@@ -1,6 +1,6 @@
-# wpy design notes
+# snek design notes
 
-The goal is Python syntax with static semantics. A wpy program should read as ordinary typed Python, run unchanged under CPython (with the `wpy` shim), and compile to small, fast WasmGC modules without a Python runtime. Where Python's dynamic semantics and a static compiler disagree, wpy rejects the program at compile time rather than silently behaving differently. The divergences that remain are listed at the end.
+The goal is Python syntax with static semantics. A snek program should read as ordinary typed Python, run unchanged under CPython (with the `snek` shim), and compile to small, fast WasmGC modules without a Python runtime. Where Python's dynamic semantics and a static compiler disagree, snek rejects the program at compile time rather than silently behaving differently. The divergences that remain are listed at the end.
 
 ## Types and inference
 
@@ -17,7 +17,7 @@ The goal is Python syntax with static semantics. A wpy program should read as or
 
 ## Numbers
 
-- **Types.** `i32`, `i64`, `f32` and `f64` are imported from `wpy`; `bool` is built in. `int` and `float` are rejected with a hint. Numbers are never boxed.
+- **Types.** `i32`, `i64`, `f32` and `f64` are imported from `snek`; `bool` is built in. `int` and `float` are rejected with a hint. Numbers are never boxed.
 - **Implicit conversions** are limited to the lossless widenings i32→i64, i32→f64 and f32→f64. Everything else is explicit: `i32(x)`, `f64(n)` and so on.
   - Float-to-int conversion uses the saturating truncation instructions, so it never traps.
 - **Integer overflow wraps**, matching the native Wasm instructions. Checked arithmetic is a candidate opt-in.

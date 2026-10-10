@@ -1,4 +1,4 @@
-"""wpyc - compiler for wpy, a statically typed Python subset targeting WasmGC + WASI."""
+"""snekc - compiler for snek, a statically typed Python subset targeting WasmGC + WASI."""
 
 from .driver import build, compile_to_wat
 from .errors import CompileError

@@ -1,5 +1,5 @@
 """Classes: single inheritance, virtual dispatch, isinstance narrowing, Final fields."""
-from wpy import i32, f64, Final
+from snek import i32, f64, Final
 
 
 class Shape:

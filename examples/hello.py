@@ -1,4 +1,4 @@
-from wpy import i32, f64
+from snek import i32, f64
 
 
 def greet(name: str, times: i32) -> str:

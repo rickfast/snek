@@ -1,5 +1,5 @@
 """Loops, break/continue, assert narrowing, conditional expressions, recursion."""
-from wpy import i32, i64
+from snek import i32, i64
 
 
 class Item:

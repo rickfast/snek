@@ -49,7 +49,7 @@ from .types import (
 INT_RANGE = {"i32": (-(2**31), 2**31 - 1), "i64": (-(2**63), 2**63 - 1)}
 
 ALLOWED_IMPORTS = {
-    "wpy": {"i32", "i64", "f32", "f64", "Final", "final"},
+    "snek": {"i32", "i64", "f32", "f64", "Final", "final"},
     "typing": {"Final", "Optional", "final"},
     "__future__": {"annotations"},
 }
@@ -214,13 +214,13 @@ class Checker:
                 allowed = ALLOWED_IMPORTS.get(s.module or "")
                 if allowed is None:
                     raise CompileError(f"import from '{s.module}' is not supported "
-                                       f"(only wpy, typing and __future__)", s)
+                                       f"(only snek, typing and __future__)", s)
                 for a in s.names:
                     if a.name not in allowed or a.asname:
                         raise CompileError(f"cannot import '{a.name}' from {s.module}", s)
                     self.imported.add(a.name)
             elif isinstance(s, ast.Import):
-                raise CompileError("plain `import` is not supported; use `from wpy import i32, ...`", s)
+                raise CompileError("plain `import` is not supported; use `from snek import i32, ...`", s)
             elif isinstance(s, ast.ClassDef):
                 self.check_new_name(s.name, s)
                 self.classes[s.name] = ClassInfo(s.name, s)
@@ -405,7 +405,7 @@ class Checker:
             n = node.id
             if n in NUMERIC:
                 if n not in self.imported:
-                    raise CompileError(f"'{n}' must be imported: `from wpy import {n}`", node)
+                    raise CompileError(f"'{n}' must be imported: `from snek import {n}`", node)
                 return NUMERIC[n]
             if n == "bool":
                 return BOOL
@@ -1140,7 +1140,7 @@ class Checker:
                 return self.to_str(self.check_expr(args[0]), args[0])
             if n in NUMERIC:
                 if n not in self.imported:
-                    raise CompileError(f"'{n}' must be imported: `from wpy import {n}`", f)
+                    raise CompileError(f"'{n}' must be imported: `from snek import {n}`", f)
                 self.arity(node, 1)
                 target = NUMERIC[n]
                 v = self.check_expr(args[0], target)

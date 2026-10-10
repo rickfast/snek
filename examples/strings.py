@@ -1,5 +1,5 @@
 """UTF-8 strings: literals are pooled data segments, concat/compare in the runtime."""
-from wpy import i32, f64
+from snek import i32, f64
 
 
 class Person:

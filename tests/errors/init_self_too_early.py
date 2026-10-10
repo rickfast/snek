@@ -1,5 +1,5 @@
 # error: must assign self.radius before `self` is used
-from wpy import f64
+from snek import f64
 
 
 class Circle:

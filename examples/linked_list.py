@@ -1,5 +1,5 @@
 """Optional references and flow-sensitive narrowing."""
-from wpy import i32
+from snek import i32
 
 
 class Node:

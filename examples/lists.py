@@ -1,5 +1,5 @@
 """Monomorphized lists: append/pop growth, negative indices, nesting, packed bools."""
-from wpy import i32, i64, f64
+from snek import i32, i64, f64
 
 
 def sieve(n: i32) -> list[i32]:

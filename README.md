@@ -1,9 +1,9 @@
-# wpy
+# snek
 
-A statically typed subset of Python that compiles to WebAssembly using WasmGC, targeting WASI. ("wpy" is a placeholder name.)
+A statically typed subset of Python that compiles to WebAssembly using WasmGC, targeting WASI. ("snek" is a placeholder name.)
 
 ```python
-from wpy import i32, f64
+from snek import i32, f64
 
 
 class Shape:
@@ -31,7 +31,7 @@ def total(shapes: list[Shape]) -> f64:
 print(total([Circle(1.0), Circle(2.0)]))
 ```
 
-Every wpy program is also a valid Python program. With the `wpy` shim on the path it runs under CPython, which is how the test suite checks the compiler.
+Every snek program is also a valid Python program. With the `snek` shim on the path it runs under CPython, which is how the test suite checks the compiler.
 
 ## Quick start
 
@@ -39,14 +39,14 @@ Every wpy program is also a valid Python program. With the `wpy` shim on the pat
 pip install wasmtime        # runtime (alternatives: the wasmtime CLI >= 47, or Node 22+)
 npm i -g binaryen           # wasm-opt assembles and optimizes the WAT (or brew/apt install binaryen)
 
-python -m wpyc run   examples/shapes.py
-python -m wpyc wat   examples/shapes.py     # print the generated WAT
-python -m wpyc build examples/shapes.py     # writes shapes.wasm (3.6 KB at -O3)
-python -m wpyc check examples/shapes.py
+python -m snekc run   examples/shapes.py
+python -m snekc wat   examples/shapes.py     # print the generated WAT
+python -m snekc build examples/shapes.py     # writes shapes.wasm (3.6 KB at -O3)
+python -m snekc check examples/shapes.py
 python tests/run_tests.py
 ```
 
-If `wasm-opt` isn't on your PATH, set `WPY_WASM_OPT` to the command (for example `WPY_WASM_OPT="npx wasm-opt"`).
+If `wasm-opt` isn't on your PATH, set `SNEK_WASM_OPT` to the command (for example `SNEK_WASM_OPT="npx wasm-opt"`).
 
 Tested with Python 3.13, Binaryen 132, Wasmtime 49 (via the `wasmtime` pip package) and Node 22.
 
@@ -70,13 +70,13 @@ The IR is the seam. A binary encoder, a component-model back end, or a Rust port
 
 | Path | What it is |
 |---|---|
-| `wpyc/check.py` | Declaration pass and type checker; produces the IR |
-| `wpyc/ir.py` | The typed IR |
-| `wpyc/types.py` | Type representations, widening and assignability rules |
-| `wpyc/emit_wat.py` | IR to WAT: type section, vtables, per-element-type list runtime |
-| `wpyc/prelude.wat` | Hand-written runtime: strings, number formatting, Python division, WASI I/O |
-| `wpyc/driver.py`, `runner.py`, `__main__.py` | Build pipeline, Wasmtime/Node runner, CLI |
-| `wpy/__init__.py` | CPython shim (`i32 = int`, …) so programs run under CPython |
+| `snekc/check.py` | Declaration pass and type checker; produces the IR |
+| `snekc/ir.py` | The typed IR |
+| `snekc/types.py` | Type representations, widening and assignability rules |
+| `snekc/emit_wat.py` | IR to WAT: type section, vtables, per-element-type list runtime |
+| `snekc/prelude.wat` | Hand-written runtime: strings, number formatting, Python division, WASI I/O |
+| `snekc/driver.py`, `runner.py`, `__main__.py` | Build pipeline, Wasmtime/Node runner, CLI |
+| `snek/__init__.py` | CPython shim (`i32 = int`, …) so programs run under CPython |
 | `examples/` | Programs that double as differential tests |
 | `tests/errors/` | Programs that must be rejected, each with its expected error |
 | `DESIGN.md` | The language rules and the Wasm mapping, with reasons |
@@ -103,4 +103,4 @@ The IR is the seam. A binary encoder, a component-model back end, or a Rust port
 6. **Component model output.** Emit a component with WIT instead of preview1 imports, and adopt the GC canonical ABI once runtimes support it.
 7. **Closures and lambdas.** A struct pairing a funcref with its captured environment.
 8. **Own binary encoder.** Keep wasm-opt only as an optimizer.
-9. **Self-hosting.** Rewrite `wpyc` in wpy.
+9. **Self-hosting.** Rewrite `snekc` in snek.

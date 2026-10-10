@@ -1,9 +1,9 @@
-"""CPython shim for wpy programs.
+"""CPython shim for snek programs.
 
-`from wpy import i32, f64` makes a wpy program runnable under regular CPython,
+`from snek import i32, f64` makes a snek program runnable under regular CPython,
 which the test suite uses as the reference implementation. Under CPython the
 machine types are plain aliases (so there is no wrapping overflow); editors and
-type checkers see them as int/float, while wpyc enforces the real rules.
+type checkers see them as int/float, while snekc enforces the real rules.
 """
 
 from typing import Final, final

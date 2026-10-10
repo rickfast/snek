@@ -158,7 +158,7 @@ class Emitter:
     def emit(self) -> str:
         prelude = self.expand_lits(PRELUDE.read_text())
         funcs = [self.emit_func(f) for f in self.m.funcs]
-        start = f'  (func $wpy.start (export "_start")\n    (call ${self.m.main})\n    (call $rt.flush))'
+        start = f'  (func $snek.start (export "_start")\n    (call ${self.m.main})\n    (call $rt.flush))'
         class_types = self.class_types()
         vtables = self.vtable_globals()
         self.close_list_types()

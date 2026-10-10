@@ -1,9 +1,9 @@
-"""wpyc: compile a statically typed Python subset to WebAssembly (WasmGC + WASI).
+"""snekc: compile a statically typed Python subset to WebAssembly (WasmGC + WASI).
 
-  python -m wpyc check prog.py           type-check only
-  python -m wpyc wat   prog.py           print the generated WAT
-  python -m wpyc build prog.py [-o out.wasm] [--no-opt] [--keep-wat]
-  python -m wpyc run   prog.py [args...]
+  python -m snekc check prog.py           type-check only
+  python -m snekc wat   prog.py           print the generated WAT
+  python -m snekc build prog.py [-o out.wasm] [--no-opt] [--keep-wat]
+  python -m snekc run   prog.py [args...]
 """
 
 from __future__ import annotations
@@ -18,7 +18,7 @@ from .errors import CompileError
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="wpyc", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(prog="snekc", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("check", "wat"):
         sub.add_parser(name).add_argument("src", type=Path)
@@ -57,7 +57,7 @@ def main(argv: list[str] | None = None) -> int:
         print(e.format(str(ns.src), source), file=sys.stderr)
         return 1
     except driver.ToolError as e:
-        print(f"wpyc: {e}", file=sys.stderr)
+        print(f"snekc: {e}", file=sys.stderr)
         return 2
 
 

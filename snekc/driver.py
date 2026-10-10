@@ -45,13 +45,13 @@ def compile_to_wat(source: str, filename: str = "<input>") -> str:
 
 
 def find_wasm_opt() -> list[str]:
-    if env := os.environ.get("WPY_WASM_OPT"):
+    if env := os.environ.get("SNEK_WASM_OPT"):
         return shlex.split(env)
     if path := shutil.which("wasm-opt"):
         return [path]
     raise ToolError(
         "wasm-opt (Binaryen) not found. Install it (`brew install binaryen`, `apt install binaryen`, or "
-        "`npm i -g binaryen`) or point WPY_WASM_OPT at it.")
+        "`npm i -g binaryen`) or point SNEK_WASM_OPT at it.")
 
 
 def assemble(wat_path: Path, wasm_path: Path, optimize: bool = True) -> None:

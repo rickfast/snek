@@ -1,5 +1,5 @@
 [project]
-name = "wpy"
+name = "snek"
 version = "0.1.0"
 description = "A statically typed Python subset compiled to WebAssembly (WasmGC + WASI)"
 requires-python = ">=3.12"
@@ -9,14 +9,14 @@ dependencies = []
 run = ["wasmtime>=47"]
 
 [project.scripts]
-wpyc = "wpyc.__main__:main"
+snekc = "snekc.__main__:main"
 
 [build-system]
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["wpyc", "wpy"]
+packages = ["snekc", "snek"]
 
 [tool.setuptools.package-data]
-wpyc = ["prelude.wat", "node_wasi.mjs"]
+snekc = ["prelude.wat", "node_wasi.mjs"]

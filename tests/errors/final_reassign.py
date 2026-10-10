@@ -1,5 +1,5 @@
 # error: is Final and can only be assigned in __init__
-from wpy import Final
+from snek import Final
 
 
 class Config:

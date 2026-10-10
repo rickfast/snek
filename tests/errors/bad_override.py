@@ -1,5 +1,5 @@
 # error: overrides Base.f with a different signature
-from wpy import i32, i64
+from snek import i32, i64
 
 
 class Base:

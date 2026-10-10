@@ -1,7 +1,7 @@
 """Test runner.
 
   examples/*.py      differential: compiled Wasm must print exactly what CPython
-                     prints (with the wpy shim) and exit with the same status.
+                     prints (with the snek shim) and exit with the same status.
                      Each example runs both unoptimized and through wasm-opt -O3.
   tests/errors/*.py  must fail to compile; the first line `# error: <text>`
                      must appear in the error message.
@@ -21,7 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from wpyc import CompileError, driver, runner  # noqa: E402
+from snekc import CompileError, driver, runner  # noqa: E402
 
 
 def run_cpython(src: Path) -> runner.RunResult:

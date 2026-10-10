@@ -1,5 +1,5 @@
 # error: may be used before it is assigned
-from wpy import i32
+from snek import i32
 
 
 def f(flag: bool) -> i32:

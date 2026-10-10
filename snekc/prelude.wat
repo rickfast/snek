@@ -1,7 +1,7 @@
   ;; ======================================================================
-  ;; wpy runtime prelude
+  ;; snek runtime prelude
   ;;
-  ;; Spliced into every compiled module by wpyc/emit_wat.py. The types it
+  ;; Spliced into every compiled module by snekc/emit_wat.py. The types it
   ;; uses ($u8s, $str) are declared by the emitter inside the module's rec
   ;; group. Forms written as (str.lit "...") are rewritten by the emitter into
   ;; calls to pooled, lazily-cached string literals.

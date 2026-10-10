@@ -1,5 +1,5 @@
 # error: can reach the end without returning
-from wpy import i32
+from snek import i32
 
 
 def sign(x: i32) -> i32:

@@ -1,5 +1,5 @@
 """Fixed-width numerics with Python division semantics and explicit conversions."""
-from wpy import i32, i64, f32, f64
+from snek import i32, i64, f32, f64
 
 
 def fib(n: i32) -> i64:
