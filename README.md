@@ -1,6 +1,6 @@
 # snek
 
-A statically typed subset of Python that compiles to WebAssembly using WasmGC, targeting WASI. ("snek" is a placeholder name.)
+A statically typed subset of Python that compiles to WebAssembly using WasmGC, targeting WASI.
 
 ```python
 from snek import i32, f64
