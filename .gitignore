@@ -3,3 +3,5 @@ __pycache__/
 *.wat
 !snekc/prelude.wat
 .venv/
+bench/node_modules/
+bench/work/

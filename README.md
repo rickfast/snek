@@ -92,6 +92,7 @@ The IR is the seam. A binary encoder, a component-model back end, or a Rust port
 | `examples/` | Programs that double as differential tests |
 | `tests/errors/` | Programs that must be rejected, each with its expected error |
 | `DESIGN.md` | The language rules and the Wasm mapping, with reasons |
+| `bench/` | Benchmarks against Pyodide, py2wasm, CPython WASI, RustPython, MicroPython and native CPython |
 
 ## What works
 
@@ -113,6 +114,21 @@ The IR is the seam. A binary encoder, a component-model back end, or a Rust port
 - **Strings.** UTF-8 `str` with literals, concatenation, comparison, f-strings, and `str()` of numbers, bools, exceptions and lists. List elements print with `repr`.
 - **Lists.** `list[T]` is monomorphized per element type. It supports literals, indexing (including negative indices), `append`, `pop`, `len`, iteration and nesting. `list[bool]` uses a packed i8 array.
 - **Control flow.** `if`/`elif`/`else`, `while`, `for` over `range()` and lists, `break`, `continue`, `assert`, and recursion.
+
+## Performance
+
+The same six programs run on every runtime: calls, float loops, allocation, lists, strings and exceptions. Times are medians in milliseconds; see [`bench/`](bench/README.md) for all eight runtimes, startup numbers and caveats.
+
+| | fib | mandelbrot | binary_trees | sieve | strings | exceptions |
+|---|---|---|---|---|---|---|
+| **snek (V8)** | **5** | **7** | **37** | **13** | **99** | **7** |
+| **snek (Wasmtime)** | **8** | **7** | 502 | 24 | 898 | 39 |
+| CPython 3.13, native | 102 | 205 | 713 | 122 | 205 | 231 |
+| Pyodide (V8) | 160 | 320 | 1,172 | 157 | 489 | 589 |
+| CPython 3.12 WASI build (Wasmtime) | 516 | 1,409 | 7,698 | 673 | 1,858 | 3,399 |
+
+- snek modules are 0.3–2 KB and start in about a millisecond. Pyodide takes 2.2 s to load, and the CPython WASI build is 26 MB.
+- Allocation-heavy code is 10–15x slower on Wasmtime than on V8, because of Wasmtime's young garbage collector.
 
 ## Roadmap, roughly in order
 

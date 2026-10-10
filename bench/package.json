@@ -1,0 +1,11 @@
+{
+  "name": "snek-bench-runtimes",
+  "private": true,
+  "description": "Comparison runtimes for bench/bench.py (Pyodide, CPython WASI, RustPython WASI, MicroPython)",
+  "dependencies": {
+    "@antonz/python-wasi": "3.12.0",
+    "@micropython/micropython-webassembly-pyscript": "1.29.0-6",
+    "pyodide": "314.0.7",
+    "rustpython-wasi": "2025.11.20-2.42"
+  }
+}
