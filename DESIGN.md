@@ -134,15 +134,23 @@ The goal is Python syntax with static semantics. A snek program should read as o
 
 ## Strings
 
-- **Layout.** `(struct (field $bytes (ref $u8s)) (field $hash (mut i32)))` holds UTF-8 bytes plus an FNV-1a hash that is computed lazily and cached. The hash is unused until dicts arrive.
-- **Literals** are bytes in one passive data segment. Each literal compiles to a function that builds the string with `array.new_data` on first use and caches it in a global. Strings are immutable, so sharing literal instances is safe.
-- **One mutable byte-array type** backs `str` (and will back `bytes` and string builders); immutability is enforced by the language. A mutable array type can't be a subtype of an immutable one, so separate types would force copies.
-- **`repr`** follows CPython's quote choice and escapes: `\\`, `\n`, `\r`, `\t`, and every other non-printable code point as `\xNN`, `\uNNNN` or `\UNNNNNNNN`. It's used for list elements and `KeyError`.
-  - Printability normally needs Unicode tables. A snek program reads no input, though, so every string it can build comes from its own literals, formatted numbers and class names. The compiler therefore embeds only the non-printable code points that occur in the program's literals, which is usually none.
-  - When input APIs arrive, the full table (about 700 ranges) will come with them.
-  - String literals containing lone surrogates are rejected, because they are not valid UTF-8.
-- **`len(s)` currently counts bytes.**
-- **Open decision: indexing.** Either Python's code-point semantics with an ASCII-only fast-path flag and a lazily built index (PyPy's approach), or Rust-style byte offsets. Indexing and iteration over `str` are rejected until this is settled.
+- **Code-point semantics, like CPython.** `len(s)`, `s[i]`, slices, `for ch in s`, `find()` results and `ljust()` widths all count code points.
+- **Layout.** `(struct $bytes $hash $cp $idx)`:
+  - `$bytes` is UTF-8, in one mutable byte-array type that also backs the string builder. Immutability is enforced by the language; a mutable array type can't be a subtype of an immutable one, so separate types would force copies.
+  - `$hash` is FNV-1a, computed lazily and cached. Dicts will key off it.
+  - `$cp` is the code point count, or -1 until something needs it. It equals the byte length exactly when the string is ASCII, so ASCII strings index and slice by byte offset with no extra work.
+  - `$idx` is the byte offset of every code point, built the first time a non-ASCII string is indexed or sliced (PyPy uses a similar index). Iteration and the methods walk the bytes and never need it.
+- **Searching works on bytes.** UTF-8 is self-synchronizing, so a byte-level match of valid UTF-8 always lands on code point boundaries. `find()` converts the byte offset back to a code point index only when it returns one.
+- **Literals** each get a passive data segment and a function that builds the string with `array.new_data` on first use and caches it in a global, so `wasm-opt` drops unused literals with their functions. The code point count is known at compile time.
+- **One-character strings** for ASCII are cached, so `for ch in s` and `s[i]` over ASCII text allocate nothing after the first use of each character.
+- **The methods are written in snek** (`STR_METHODS_TEMPLATE` in `builtins.py`), on top of byte-level intrinsics (`__dec`, `__bfind`, a string builder, Unicode lookups) that only that code can call. `s.split(",")` compiles to a call of `__str_split(s, ",")`. A method is checked and emitted only if the program uses it.
+- **Unicode properties come from a per-program table.** A snek program reads no input, so every code point its strings can hold comes from its own literals, unless it calls `chr()` on a computed value.
+  - The compiler embeds the properties of just those code points (closed under the case mappings the program uses), read from the CPython that runs the compiler. For most programs that's a handful of entries.
+  - A program that calls `chr(n)` on a computed `n` gets tables covering all of Unicode instead: about 40 KB with every method in use, and a few seconds more compile time.
+  - The tables cover printability (for `repr`), the `is…()` predicates, the full case mappings (`"ß".upper() == "SS"`, final sigma in `lower()`), and decimal digit values (`i32("٤٢") == 42`).
+- **`repr`** follows CPython's quote choice and escapes: `\\`, `\n`, `\r`, `\t`, and every other non-printable code point as `\xNN`, `\uNNNN` or `\UNNNNNNNN`. It's used by `repr()`, `!r`, list elements and `KeyError`.
+- **Lone surrogates can't be stored as UTF-8.** Literals containing them are rejected, and `chr()` of one raises `ValueError`.
+- **`i32(s)` and `i64(s)`** parse like `int(s)`, including underscores, Unicode digits and whitespace, with CPython's error messages. A value that doesn't fit raises `OverflowError`. `f64(s)` is rejected for now, because exact float parsing needs big-number arithmetic.
 
 ## Lists
 
@@ -151,6 +159,8 @@ The goal is Python syntax with static semantics. A snek program should read as o
 - **Reference elements** are stored nullable so capacity can be pre-allocated with `array.new_default`. Non-optional element types are read back with `ref.as_non_null`, and `pop` clears the slot so the GC can reclaim it.
 - **Growth** doubles the backing array with `array.copy`. Indexing is bounds-checked and supports negative indices.
 - **`str()` of a list** prints its elements with `repr`, like CPython. Element types can be numbers, bools, strings, optional strings, or lists of those.
+- **The other operations** (slicing, `in`, `index`, `insert`, `extend`, `+`, `*`, `==`, ...) are generated per element type, only for the operations a program uses. `xs += ys` and `xs *= n` mutate in place, as in CPython.
+- **Equality** is `==` for numbers and strings, element-wise for lists, and identity for objects (there is no `__eq__` yet). `list.index()` is rejected for object elements, because its error message would need `repr()` of an object.
 
 ## The WASI boundary
 
@@ -169,7 +179,8 @@ The goal is Python syntax with static semantics. A snek program should read as o
 These are accepted on purpose or still pending:
 
 - **Integer width.** Arithmetic wraps at 32 or 64 bits, while CPython integers are unbounded. Float→int conversions that don't fit raise `OverflowError` instead of producing a big int.
-- **`len(str)` counts UTF-8 bytes**, pending the indexing decision above.
+- **`chr()` of a surrogate** raises `ValueError`. CPython returns a string that can't be printed or encoded as UTF-8.
+- **NaN in lists.** `in`, `count()` and list `==` compare floats with `==`. CPython checks identity first, so a NaN object found in a list compares equal to itself there.
 - **Float repr.** `str(float)` uses the shortest of 15, 16 or 17 significant digits that round-trips. That matches CPython for ordinary values; a full Ryu or Grisu port would make it exact.
 - **Float `%`** uses `a - b*trunc(a/b)`, because Wasm has no fmod. It can differ for very large magnitudes.
 - **`f32` values** print as their f64 expansion.

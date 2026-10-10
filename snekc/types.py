@@ -64,6 +64,19 @@ STR = StrT()
 
 
 @dataclass(frozen=True)
+class BufT(Type):
+    """A growable UTF-8 byte buffer; only the built-in str methods (builtins.py) can name it."""
+
+    is_ref = True
+
+    def __str__(self) -> str:
+        return "__Buf"
+
+
+BUF = BufT()
+
+
+@dataclass(frozen=True)
 class ListT(Type):
     elem: Type
     is_ref = True
@@ -108,6 +121,7 @@ class FuncSig:
     params: list[tuple[str, Type]]
     ret: Type
     defaults: list[ast.expr | None] = field(default_factory=list)  # one per param; literals only
+    posonly: int = 0  # leading parameters that cannot be passed by keyword (built-in methods)
 
     def __post_init__(self) -> None:
         if not self.defaults:

@@ -22,14 +22,16 @@ from __future__ import annotations
 
 import ast
 import copy
+import string
 from dataclasses import dataclass, field
 from functools import reduce
 
-from . import ir
-from .builtins import BUILTINS_SOURCE
+from . import ir, unicode
+from .builtins import BUILTINS_SOURCE, STR_METHODS_TEMPLATE
 from .errors import CompileError
 from .types import (
     BOOL,
+    BUF,
     F32,
     F64,
     I32,
@@ -63,7 +65,38 @@ ALLOWED_IMPORTS = {
 }
 
 BUILTINS = {"print", "len", "str", "range", "isinstance", "abs", "min", "max", "bool", "type",
-            "i32", "i64", "f32", "f64", "int", "float", "list", "object", "super"}
+            "i32", "i64", "f32", "f64", "int", "float", "list", "object", "super", "ord", "chr", "repr"}
+
+# Runtime functions (prelude.wat) that the built-in str methods in builtins.py may call:
+# name -> (parameter types, result type, Wasm function). Positions are byte offsets.
+INTRINSICS: dict[str, tuple[list[Type], Type, str]] = {
+    "__blen": ([STR], I32, "rt.blen"),  # byte length
+    "__byte": ([STR, I32], I32, "rt.byte"),
+    "__dec": ([STR, I32], I32, "rt.dec"),  # code point starting at a byte offset
+    "__cpw": ([I32], I32, "rt.cpw"),  # UTF-8 length of a code point
+    "__wat": ([STR, I32], I32, "rt.wat"),  # byte length of the code point at an offset
+    "__back": ([STR, I32], I32, "rt.back"),  # start of the code point before an offset
+    "__cplen": ([STR], I32, "rt.str_len"),  # len(s)
+    "__cpoff": ([STR, I32], I32, "rt.cpoff"),  # code point index -> byte offset
+    "__cpidx": ([STR, I32], I32, "rt.cpidx"),  # byte offset -> code point index
+    "__bsub": ([STR, I32, I32], STR, "rt.bsub"),  # bytes [a, b)
+    "__bfind": ([STR, STR, I32, I32], I32, "rt.bfind"),  # first match in bytes [a, b), or -1
+    "__brfind": ([STR, STR, I32, I32], I32, "rt.brfind"),  # last match
+    "__bmatch": ([STR, I32, STR], BOOL, "rt.bmatch"),  # match at a byte offset
+    "__has": ([I32, I32], BOOL, "rt.has"),  # code point has a Unicode flag (constant mask)
+    "__all_flags": ([STR, I32], BOOL, "rt.all_flags"),
+    "__any_flags": ([STR, I32], BOOL, "rt.any_flags"),
+    "__decimal": ([I32], I32, "rt.decimal"),  # decimal digit value, or -1
+    "__repr": ([STR], STR, "rt.str_repr"),
+    "__buf": ([I32], BUF, "rt.buf_new"),  # string builder with a capacity hint in bytes
+    "__put": ([BUF, I32], NONE, "rt.buf_cp"),
+    "__puts": ([BUF, STR], NONE, "rt.buf_str"),
+    "__putsub": ([BUF, STR, I32, I32], NONE, "rt.buf_sub"),
+    "__putcase": ([BUF, I32, I32], NONE, "rt.buf_case"),  # case mapping of a code point (constant kind)
+    "__done": ([BUF], STR, "rt.buf_done"),
+}
+FLAG_MASK_ARG = {"__has": 1, "__all_flags": 1, "__any_flags": 1}
+INT_MAX = 2**31 - 1
 
 ARITH_OPS = {
     ast.Add: ("add", "+"), ast.Sub: ("sub", "-"), ast.Mult: ("mul", "*"),
@@ -199,6 +232,17 @@ def is_pure(e: ir.Expr) -> bool:
     return isinstance(e, (ir.Const, ir.StrLit, ir.NoneLit, ir.LocalGet))
 
 
+def const_int(e: ir.Expr) -> int | None:
+    """The value of a constant integer expression (literals combined with | and &), else None."""
+    if isinstance(e, ir.Const) and isinstance(e.value, int) and not isinstance(e.value, bool):
+        return e.value
+    if isinstance(e, ir.Binary) and e.op in ("bitor", "bitand"):
+        a, b = const_int(e.left), const_int(e.right)
+        if a is not None and b is not None:
+            return a | b if e.op == "bitor" else a & b
+    return None
+
+
 # ---- per-function state -------------------------------------------------------
 
 
@@ -284,6 +328,15 @@ class Checker:
         self.out: list[ir.Func] = []
         self.ctor_sigs: dict[ClassInfo, FuncSig] = {}
         self.ctx: FuncCtx = FuncCtx("<module>", NONE)
+        # Built-in functions (the str methods): checked and emitted only when used.
+        methods_src = string.Template(STR_METHODS_TEMPLATE).substitute(unicode.FLAG_NAMES)
+        self.bnodes: dict[str, ast.FunctionDef] = {
+            n.name: n for n in ast.parse(methods_src, filename="<snek str methods>").body
+            if isinstance(n, ast.FunctionDef)}
+        self.bsigs: dict[str, FuncSig] = {}
+        self.bqueue: list[str] = []
+        self.builtin_mode = False  # checking builtins.py code: intrinsics and __Buf are visible
+        self.unicode = unicode.UnicodeUse()
 
     @property
     def exc_base(self) -> ClassInfo:
@@ -304,7 +357,21 @@ class Checker:
         for name, (sig, node) in self.funcs.items():
             self.out.append(self.check_function(name, sig, node))
         self.out.append(self.check_main())
-        return ir.Module(self.out, self.class_order, "snek.main")
+        self.builtin_mode = True
+        while self.bqueue:  # built-in functions used so far, and the ones they use
+            name = self.bqueue.pop()
+            self.out.append(self.check_function(name, self.bsigs[name], self.bnodes[name]))
+        self.builtin_mode = False
+        return ir.Module(self.out, self.class_order, "snek.main", self.unicode)
+
+    def builtin_func(self, name: str) -> FuncSig:
+        """Signature of a built-in function, queueing its body to be checked and emitted."""
+        if name not in self.bsigs:
+            saved, self.builtin_mode = self.builtin_mode, True
+            self.bsigs[name] = self.signature(self.bnodes[name], is_method=False)
+            self.builtin_mode = saved
+            self.bqueue.append(name)
+        return self.bsigs[name]
 
     def declare_module(self) -> None:
         for s in self.builtin_tree.body:
@@ -359,7 +426,7 @@ class Checker:
             raise CompileError(f"'{name}' is a built-in exception class and cannot be redefined", node)
         if name in self.classes or name in self.funcs:
             raise CompileError(f"'{name}' is already defined", node)
-        if name in BUILTINS or name in ("str", "u8s", "rt", "lit", "snek"):
+        if name in BUILTINS or name in ("str", "u8s", "rt", "lit", "snek") or name in self.bnodes:
             raise CompileError(f"'{name}' is a reserved name", node)
         if not name.isascii():
             raise CompileError("identifiers must be ASCII", node)
@@ -475,11 +542,12 @@ class Checker:
 
     def signature(self, node: ast.FunctionDef, is_method: bool) -> FuncSig:
         a = node.args
-        if a.vararg or a.kwarg or a.kwonlyargs or a.posonlyargs:
-            raise CompileError("*args, **kwargs and keyword-only parameters are not supported yet", node)
+        if a.vararg or a.kwarg or a.kwonlyargs or (a.posonlyargs and not self.builtin_mode):
+            raise CompileError("*args, **kwargs, keyword-only and positional-only parameters are not supported yet",
+                               node)
         if node.decorator_list and not is_method:
             raise CompileError("function decorators are not supported yet", node.decorator_list[0])
-        args = list(a.args)
+        args = list(a.posonlyargs) + list(a.args)
         defaults: list[ast.expr | None] = [None] * (len(args) - len(a.defaults)) + list(a.defaults)
         if is_method:
             if not args or args[0].arg != "self":
@@ -509,7 +577,7 @@ class Checker:
                 raise CompileError(f"'{node.name}' needs a return annotation (`-> T` or `-> None`)", node)
         else:
             ret = self.resolve_type(node.returns)
-        return FuncSig(params, ret, defaults)
+        return FuncSig(params, ret, defaults, len(a.posonlyargs))
 
     def resolve_type(self, node: ast.expr) -> Type:
         if isinstance(node, ast.Constant):
@@ -524,9 +592,11 @@ class Checker:
         if isinstance(node, ast.Name):
             n = node.id
             if n in NUMERIC:
-                if n not in self.imported:
+                if n not in self.imported and not self.builtin_mode:
                     raise CompileError(f"'{n}' must be imported: `from snek import {n}`", node)
                 return NUMERIC[n]
+            if n == "__Buf" and self.builtin_mode:
+                return BUF
             if n == "bool":
                 return BOOL
             if n == "str":
@@ -903,7 +973,11 @@ class Checker:
             pre, v = self.value_first(self.coerce(self.check_expr(value, f.ty), f.ty, value), f.ty, [obj])
             return pre + [ir.SetField(obj, cls, f, v)]
         if isinstance(target, ast.Subscript):
+            if isinstance(target.slice, ast.Slice):
+                raise CompileError("slice assignment is not supported yet", target)
             lst = self.check_expr(target.value)
+            if lst.ty == STR:
+                raise CompileError("str does not support item assignment (strings are immutable)", target)
             elem = self.list_elem(lst, target.value)
             idx = self.check_index(target.slice)
             pre, v = self.value_first(self.coerce(self.check_expr(value, elem), elem, value), elem, [lst, idx])
@@ -928,6 +1002,8 @@ class Checker:
             if t.id not in ctx.types:
                 raise CompileError(f"undefined name '{t.id}'", t)
             cur = self.load_name(t)
+            if isinstance(cur.ty, ListT):
+                return [ir.ExprStmt(self.list_inplace(s, cur))]
             new = self.arith(s.op, cur, self.check_operand(s.value, cur.ty), s)
             declared = ctx.types[t.id]
             ctx.flow.narrowed.pop(t.id, None)
@@ -939,18 +1015,39 @@ class Checker:
                 raise CompileError(f"'{f.name}' is Final", t)
             tmp = ctx.temp(obj.ty)
             cur = ir.GetField(f.ty, ctx.get(tmp), cls, f)
+            if isinstance(f.ty, ListT):
+                return [ir.SetLocal(tmp, obj), ir.ExprStmt(self.list_inplace(s, cur))]
             new = self.arith(s.op, cur, self.check_operand(s.value, f.ty), s)
             return [ir.SetLocal(tmp, obj), ir.SetField(ctx.get(tmp), cls, f, self.coerce(new, f.ty, s))]
         if isinstance(t, ast.Subscript):
+            if isinstance(t.slice, ast.Slice):
+                raise CompileError("slice assignment is not supported yet", t)
             lst = self.check_expr(t.value)
+            if lst.ty == STR:
+                raise CompileError("str does not support item assignment (strings are immutable)", t)
             elem = self.list_elem(lst, t.value)
             ltmp, itmp = ctx.temp(lst.ty), ctx.temp(I32)
             idx = self.check_index(t.slice)
             cur = ir.ListGet(elem, ctx.get(ltmp), ctx.get(itmp))
+            if isinstance(elem, ListT):
+                return [ir.SetLocal(ltmp, lst), ir.SetLocal(itmp, idx), ir.ExprStmt(self.list_inplace(s, cur))]
             new = self.arith(s.op, cur, self.check_operand(s.value, elem), s)
             return [ir.SetLocal(ltmp, lst), ir.SetLocal(itmp, idx),
                     ir.SetIndex(ctx.get(ltmp), ctx.get(itmp), self.coerce(new, elem, s))]
         raise CompileError("unsupported augmented assignment target", t)
+
+    def list_inplace(self, s: ast.AugAssign, cur: ir.Expr) -> ir.Expr:
+        """xs += ys extends xs and xs *= n repeats it, in place (other references see the change)."""
+        t = cur.ty
+        if isinstance(s.op, ast.Add):
+            other = self.coerce(self.check_expr(s.value, t), t, s.value)
+            return ir.ListOp(NONE, "extend", cur, [other])
+        if isinstance(s.op, ast.Mult):
+            n = self.check_expr(s.value, I32)
+            if n.ty != I32:
+                raise CompileError(f"a list can only be repeated by an i32, got {n.ty}", s.value)
+            return ir.ListOp(NONE, "imul", cur, [n])
+        raise CompileError(f"unsupported augmented assignment on {t}", s)
 
     def check_return(self, s: ast.Return) -> list[ir.Stmt]:
         ctx = self.ctx
@@ -1189,8 +1286,7 @@ class Checker:
         else:
             seq = self.check_expr(it)
             if seq.ty == STR:
-                raise CompileError("iterating over a str is not supported yet (pending the code point vs "
-                                   "byte indexing decision)", it)
+                return self.lower_str_for(var, seq, s, loop_flow)
             elem = self.list_elem(seq, it)
             self.bind_loop_var(var, elem, s.target)
             ltmp, itmp = ctx.temp(seq.ty), ctx.temp(I32)
@@ -1203,6 +1299,21 @@ class Checker:
             stmts = [ir.SetLocal(ltmp, seq), ir.SetLocal(itmp, ir.Const(I32, 0)), ir.Loop(cond, body, step)]
         ctx.flow = loop_flow.copy()
         return stmts
+
+    def lower_str_for(self, var: str, seq: ir.Expr, s: ast.For, loop_flow: Flow) -> list[ir.Stmt]:
+        """for ch in s: walk the UTF-8 bytes, yielding one-character strings."""
+        ctx = self.ctx
+        self.bind_loop_var(var, STR, s.target)
+        stmp, itmp = ctx.temp(STR), ctx.temp(I32)
+        head = [ir.SetLocal(var, ir.Call(STR, "rt.char_at", [ctx.get(stmp), ctx.get(itmp)]))]
+        ctx.flow = loop_flow.copy()
+        ctx.flow.assigned |= {var, stmp, itmp}
+        body = self.check_loop_body(s.body, head)
+        cond = ir.Compare(BOOL, "lt", I32, ctx.get(itmp), ir.Call(I32, "rt.blen", [ctx.get(stmp)]))
+        step = [ir.SetLocal(itmp, ir.Binary(I32, "add", ctx.get(itmp),
+                                            ir.Call(I32, "rt.wat", [ctx.get(stmp), ctx.get(itmp)])))]
+        ctx.flow = loop_flow.copy()
+        return [ir.SetLocal(stmp, seq), ir.SetLocal(itmp, ir.Const(I32, 0)), ir.Loop(cond, body, step)]
 
     def lower_range_for(self, var: str, call: ast.Call, s: ast.For, loop_flow: Flow) -> list[ir.Stmt]:
         ctx = self.ctx
@@ -1297,12 +1408,15 @@ class Checker:
         """Check one operand of a binary op; numeric literals adopt the other side's type."""
         if is_num_literal(node) and isinstance(other, Prim) and other.is_numeric:
             return self.check_expr(node, other)
+        if isinstance(node, ast.List) and not node.elts and isinstance(other, ListT):
+            return self.check_expr(node, other)  # xs + []
         return self.check_expr(node)
 
     def check_operands(self, left: ast.expr, right: ast.expr, expected: Type | None) -> tuple[ir.Expr, ir.Expr]:
         # Only an int context flows into literal operands: in a float context, 2 + 3 is still the int 5.
         num_expected = expected if isinstance(expected, Prim) and expected.is_int else None
-        if is_num_literal(left) and not is_num_literal(right):
+        empty_left = isinstance(left, ast.List) and not left.elts
+        if (is_num_literal(left) and not is_num_literal(right)) or empty_left:
             r = self.check_expr(right, num_expected)
             return self.check_operand(left, r.ty), r
         l = self.check_expr(left, num_expected)
@@ -1341,14 +1455,17 @@ class Checker:
         if isinstance(node, ast.Attribute):
             return self.check_attribute(node)
         if isinstance(node, ast.Subscript):
+            seq = self.check_expr(node.value)
             if isinstance(node.slice, ast.Slice):
-                raise CompileError("slicing is not supported yet", node)
-            lst = self.check_expr(node.value)
-            if lst.ty == STR:
-                raise CompileError("indexing a str is not supported yet (pending the code point vs byte "
-                                   "indexing decision)", node)
-            elem = self.list_elem(lst, node.value)
-            return ir.ListGet(elem, lst, self.check_index(node.slice))
+                bounds = self.check_slice(node.slice)
+                if seq.ty == STR:
+                    return ir.Call(STR, "rt.str_slice", [seq, *bounds])
+                self.list_elem(seq, node.value)
+                return ir.ListOp(seq.ty, "slice", seq, bounds)
+            if seq.ty == STR:
+                return ir.Call(STR, "rt.str_get", [seq, self.check_index(node.slice)])
+            elem = self.list_elem(seq, node.value)
+            return ir.ListGet(elem, seq, self.check_index(node.slice))
         if isinstance(node, ast.List):
             return self.check_list(node, expected)
         if isinstance(node, ast.JoinedStr):
@@ -1446,6 +1563,22 @@ class Checker:
         name, sym = info
         if name == "add" and l.ty == STR and r.ty == STR:
             return ir.StrConcat(STR, l, r)
+        is_seq = lambda t: t == STR or isinstance(t, ListT)  # noqa: E731
+        if name == "mul" and (is_seq(l.ty) or is_seq(r.ty)):
+            seq_first = is_seq(l.ty)
+            seq, n = (l, r) if seq_first else (r, l)
+            if n.ty != I32:
+                raise CompileError(f"a {seq.ty} can only be repeated by an i32, got {n.ty}", node)
+            pre: list[ir.Stmt] = []
+            if not seq_first:
+                pre, n, seq = self.left_first(n, seq)
+            rep_e = (ir.Call(STR, "rt.str_repeat", [seq, n]) if seq.ty == STR
+                     else ir.ListOp(seq.ty, "repeat", seq, [n]))
+            return self.seq(pre, rep_e)
+        if name == "add" and isinstance(l.ty, ListT) and isinstance(r.ty, ListT):
+            if l.ty != r.ty:
+                raise CompileError(f"cannot concatenate {l.ty} and {r.ty}", node)
+            return ir.ListOp(l.ty, "concat", l, [r])
         if STR in (l.ty, r.ty):
             raise CompileError(f"unsupported operands for {sym}: {l.ty} and {r.ty} (use str(x) or an f-string)", node)
         if not (isinstance(l.ty, Prim) and l.ty.is_numeric and isinstance(r.ty, Prim) and r.ty.is_numeric):
@@ -1503,9 +1636,17 @@ class Checker:
                 raise CompileError("`is` compares object identity; use == for numbers and bools", node)
             return ir.Compare(BOOL, "isnot" if negate else "is", l.ty, l, r)
         if isinstance(op, (ast.In, ast.NotIn)):
-            raise CompileError("`in` is not supported yet", node)
+            e = self.check_in(left_n, right_n, node)
+            return ir.Unary(BOOL, "not", e) if isinstance(op, ast.NotIn) else e
         name = CMP_OPS[type(op)]
         l, r = self.check_operands(left_n, right_n, None)
+        if isinstance(strip_optional(l.ty), ListT) or isinstance(strip_optional(r.ty), ListT):
+            if name not in ("eq", "ne"):
+                raise CompileError("ordering comparisons (<, >, ...) on lists are not supported yet", node)
+            if strip_optional(l.ty) != strip_optional(r.ty):
+                raise CompileError(f"cannot compare {l.ty} with {r.ty}", node)
+            eq = ir.ListOp(BOOL, "eq", l, [r])
+            return ir.Unary(BOOL, "not", eq) if name == "ne" else eq
         if isinstance(l.ty, Prim) and l.ty.is_numeric and isinstance(r.ty, Prim) and r.ty.is_numeric:
             target = join_numeric(l.ty, r.ty)
             if target is None:
@@ -1520,6 +1661,23 @@ class Checker:
             raise CompileError("== on objects is not supported yet (no __eq__); use `is` for identity", node)
         raise CompileError(f"cannot compare {l.ty} with {r.ty}", node)
 
+    def check_in(self, left_n: ast.expr, right_n: ast.expr, node: ast.AST) -> ir.Expr:
+        r = self.check_expr(right_n)
+        if isinstance(r.ty, OptionalT):
+            raise CompileError(f"this may be None (type {r.ty}); check `is not None` first", right_n)
+        if r.ty == STR:
+            l = self.check_expr(left_n)
+            if l.ty != STR:
+                raise CompileError(f"'in <str>' needs a str on the left, got {l.ty}", left_n)
+            pre, l, r = self.left_first(l, r)
+            return self.seq(pre, ir.Call(BOOL, "rt.str_contains", [r, l]))
+        if isinstance(r.ty, ListT):
+            elem = r.ty.elem
+            l = self.coerce(self.check_expr(left_n, elem), elem, left_n, arith=True)  # compared with ==
+            pre, l, r = self.left_first(l, r)
+            return self.seq(pre, ir.ListOp(BOOL, "contains", r, [l]))
+        raise CompileError(f"`in` needs a str or a list on the right, got {r.ty}", node)
+
     def seq(self, prelude: list[ir.Stmt], e: ir.Expr) -> ir.Expr:
         return ir.Seq(e.ty, prelude, e) if prelude else e
 
@@ -1529,6 +1687,12 @@ class Checker:
             n = f.id
             if n in self.ctx.types:
                 raise CompileError(f"'{n}' is a variable, not a function", f)
+            if self.builtin_mode and n in INTRINSICS:
+                return self.check_intrinsic(n, node)
+            if self.builtin_mode and n in self.bnodes:
+                sig = self.builtin_func(n)
+                prelude, bound = self.bind_args(sig, node, n)
+                return self.seq(prelude, ir.Call(sig.ret, n, bound))
             if n in BUILTINS:
                 if node.keywords:
                     raise CompileError(f"{n}() does not take keyword arguments here", node.keywords[0])
@@ -1562,20 +1726,89 @@ class Checker:
                     prelude.insert(0, ir.SetLocal(tmp, recv))
                     recv = self.ctx.get(tmp)
                 return self.seq(prelude, ir.CallMethod(m.sig.ret, recv, t.info, m, bound))
-            if node.keywords:
-                raise CompileError(f"{t}.{f.attr}() does not take keyword arguments", node.keywords[0])
-            if isinstance(t, ListT):
-                if f.attr == "append":
-                    self.arity(node, 1)
-                    return ir.ListAppend(NONE, recv, self.coerce(self.check_expr(args[0], t.elem), t.elem, args[0]))
-                if f.attr == "pop":
-                    self.arity(node, 0)
-                    return ir.ListPop(t.elem, recv)
-                raise CompileError(f"list.{f.attr}() is not supported yet (append and pop are)", f)
             if t == STR:
-                raise CompileError("str methods are not supported yet", f)
+                return self.check_str_method(recv, node, f)
+            if isinstance(t, ListT):
+                return self.check_list_method(recv, t, node, f)
             raise CompileError(f"{t} has no methods", f)
         raise CompileError("unsupported call target", node)
+
+    def check_intrinsic(self, n: str, node: ast.Call) -> ir.Expr:
+        params, ret, fn = INTRINSICS[n]
+        if node.keywords or len(node.args) != len(params):
+            raise CompileError(f"{n}() takes {len(params)} positional arguments", node)
+        args = [self.coerce(self.check_expr(a, t), t, a) for a, t in zip(node.args, params)]
+        # record which Unicode tables the program needs
+        u = self.unicode
+        if n in FLAG_MASK_ARG:
+            m = const_int(args[FLAG_MASK_ARG[n]])
+            u.flags |= unicode.ALL_FLAGS if m is None else m
+        elif n == "__putcase":
+            k = const_int(args[2])
+            u.cases |= set(unicode.CASE_KINDS) if k is None else {k}
+        elif n == "__decimal":
+            u.decimal = True
+        return ir.Call(ret, fn, args)
+
+    def check_str_method(self, recv: ir.Expr, node: ast.Call, f: ast.Attribute) -> ir.Expr:
+        name = f"__str_{f.attr}"
+        if f.attr.startswith("_") or name not in self.bnodes:
+            raise CompileError(f"str.{f.attr}() is not supported yet", f)
+        sig = self.builtin_func(name)
+        msig = FuncSig(sig.params[1:], sig.ret, sig.defaults[1:], max(sig.posonly - 1, 0))
+        prelude, bound = self.bind_args(msig, node, f"str.{f.attr}")
+        if prelude and not is_pure(recv):  # keep the receiver first in evaluation order
+            tmp = self.ctx.temp(STR)
+            prelude.insert(0, ir.SetLocal(tmp, recv))
+            recv = self.ctx.get(tmp)
+        return self.seq(prelude, ir.Call(sig.ret, name, [recv, *bound]))
+
+    def check_list_method(self, recv: ir.Expr, t: ListT, node: ast.Call, f: ast.Attribute) -> ir.Expr:
+        a, args, e = f.attr, node.args, t.elem
+        if node.keywords:
+            raise CompileError(f"list.{a}() does not take keyword arguments", node.keywords[0])
+
+        def elem_arg(i: int, compared: bool = False) -> ir.Expr:
+            # a value only compared with == (index, count, remove) mixes ints into floats like `in`
+            return self.coerce(self.check_expr(args[i], e), e, args[i], arith=compared)
+
+        if a == "append":
+            self.arity(node, 1)
+            return ir.ListAppend(NONE, recv, elem_arg(0))
+        if a == "pop":
+            if not args:
+                return ir.ListPop(e, recv)
+            self.arity(node, 1)
+            return ir.ListOp(e, "pop_at", recv, [self.check_index(args[0])])
+        if a == "insert":
+            self.arity(node, 2)
+            i = self.check_index(args[0])
+            return ir.ListOp(NONE, "insert", recv, [i, elem_arg(1)])
+        if a == "extend":
+            self.arity(node, 1)
+            return ir.ListOp(NONE, "extend", recv, [self.coerce(self.check_expr(args[0], t), t, args[0])])
+        if a in ("remove", "count"):
+            self.arity(node, 1)
+            return ir.ListOp(I32 if a == "count" else NONE, a, recv, [elem_arg(0, compared=True)])
+        if a == "index":
+            if not 1 <= len(args) <= 3:
+                raise CompileError(f"list.index() takes 1 to 3 arguments, got {len(args)}", node)
+            if not self.has_repr(e):
+                raise CompileError(f"list.index() on {t} is not supported: when the value is missing, CPython's "
+                                   f"error message shows repr() of it, which snek cannot produce for {e}", f)
+            v = elem_arg(0)  # not compared=True: a failure shows repr(v), and 2 must not print as 2.0
+            start = self.check_index(args[1]) if len(args) > 1 else ir.Const(I32, 0)
+            stop = self.check_index(args[2]) if len(args) > 2 else ir.Const(I32, INT_MAX)
+            return ir.ListOp(I32, "index", recv, [v, start, stop])
+        if a in ("reverse", "clear", "copy"):
+            self.arity(node, 0)
+            return ir.ListOp(t if a == "copy" else NONE, a, recv, [])
+        raise CompileError(f"list.{a}() is not supported yet", f)
+
+    def has_repr(self, t: Type) -> bool:
+        while isinstance(t, ListT):
+            t = t.elem
+        return isinstance(t, Prim) or t in (STR, OptionalT(STR))
 
     def check_super_call(self, node: ast.Call, f: ast.Attribute) -> ir.Expr:
         ctx = self.ctx
@@ -1617,14 +1850,38 @@ class Checker:
         if n == "str":
             self.arity(node, 1)
             return self.to_str(self.check_expr(args[0]), args[0])
+        if n == "repr":
+            self.arity(node, 1)
+            return self.repr_of(self.check_expr(args[0]), args[0])
+        if n == "ord":
+            self.arity(node, 1)
+            v = self.check_expr(args[0])
+            if v.ty != STR:
+                raise CompileError(f"ord() expected a str, got {v.ty}", args[0])
+            return ir.Call(I32, "rt.ord", [v])
+        if n == "chr":
+            self.arity(node, 1)
+            v = self.coerce(self.check_expr(args[0], I32), I32, args[0], "chr() argument")
+            c = const_int(v)
+            if c is None:
+                self.unicode.dynamic = True  # any code point can occur: embed full Unicode tables
+            elif 0 <= c < unicode.MAX_CP:
+                self.unicode.extra.add(c)
+            return ir.Call(STR, "rt.chr", [v])
         if n in NUMERIC:
-            if n not in self.imported:
+            if n not in self.imported and not self.builtin_mode:
                 raise CompileError(f"'{n}' must be imported: `from snek import {n}`", node.func)
             self.arity(node, 1)
             target = NUMERIC[n]
             v = self.check_expr(args[0], target)
             if v.ty == target:
                 return v
+            if v.ty == STR:
+                if not target.is_int:
+                    raise CompileError(f"{n}(str) is not supported yet (only i32() and i64() parse strings)", node)
+                self.builtin_func("__parse_int")
+                parsed = ir.Call(I64, "__parse_int", [v, ir.Const(I32, 32 if target == I32 else 64)])
+                return parsed if target == I64 else ir.Convert(I32, parsed)
             if not (isinstance(v.ty, Prim)):
                 raise CompileError(f"cannot convert {v.ty} to {target}", node)
             return ir.Convert(target, v)
@@ -1635,6 +1892,10 @@ class Checker:
                 return v
             if isinstance(v.ty, Prim):
                 return ir.Compare(BOOL, "ne", v.ty, v, ir.Const(v.ty, 0))
+            if v.ty == STR:
+                return ir.Compare(BOOL, "ne", I32, ir.StrLen(I32, v), ir.Const(I32, 0))
+            if isinstance(v.ty, ListT):
+                return ir.Compare(BOOL, "ne", I32, ir.ListLen(I32, v), ir.Const(I32, 0))
             raise CompileError(f"bool() of {v.ty} is not supported (no implicit truthiness)", node)
         if n == "isinstance":
             self.arity(node, 2)
@@ -1723,6 +1984,8 @@ class Checker:
             if kw.arg not in names or kw.arg.startswith("__"):
                 raise CompileError(f"{name}() got an unexpected keyword argument '{kw.arg}'", kw)
             i = names.index(kw.arg)
+            if i < sig.posonly:
+                raise CompileError(f"{name}() takes '{kw.arg}' as a positional argument only", kw)
             if slots[i] is not None:
                 raise CompileError(f"{name}() got multiple values for argument '{kw.arg}'", kw)
             p, t = params[i]
@@ -1749,11 +2012,32 @@ class Checker:
                 slots[i] = self.coerce(self.check_expr(d, t), t, d)
         return prelude, slots  # type: ignore[return-value]
 
-    def check_index(self, node: ast.expr) -> ir.Expr:
+    def check_index(self, node: ast.expr, what: str = "indices") -> ir.Expr:
         idx = self.check_expr(node, I32)
         if idx.ty != I32:
-            raise CompileError(f"list indices are i32, got {idx.ty} (use i32(x))", node)
+            raise CompileError(f"{what} are i32, got {idx.ty} (use i32(x))", node)
         return idx
+
+    def check_slice(self, sl: ast.Slice) -> list[ir.Expr]:
+        """[start, stop, step, flags]: flags bit 0/1 says start/stop was given (absent or None)."""
+        flags = 0
+        out: list[ir.Expr] = []
+        for i, part in enumerate((sl.lower, sl.upper)):
+            if part is None or (isinstance(part, ast.Constant) and part.value is None):
+                out.append(ir.Const(I32, 0))
+            else:
+                out.append(self.check_index(part, "slice indices"))
+                flags |= 1 << i
+        no_step = sl.step is None or (isinstance(sl.step, ast.Constant) and sl.step.value is None)
+        step = ir.Const(I32, 1) if no_step else self.check_index(sl.step, "slice indices")  # type: ignore[arg-type]
+        return [out[0], out[1], step, ir.Const(I32, flags)]
+
+    def left_first(self, left: ir.Expr, right: ir.Expr) -> tuple[list[ir.Stmt], ir.Expr, ir.Expr]:
+        """Make `left` evaluate before `right` even where the call emits right first."""
+        if is_pure(left) or is_pure(right):
+            return [], left, right
+        tmp = self.ctx.temp(left.ty)
+        return [ir.SetLocal(tmp, left)], self.ctx.get(tmp), right
 
     def list_elem(self, lst: ir.Expr, node: ast.AST) -> Type:
         if isinstance(lst.ty, OptionalT):
@@ -1807,9 +2091,15 @@ class Checker:
             if isinstance(v, ast.Constant):
                 parts.append(ir.StrLit(STR, self.utf8_text(v.value, v)))
             elif isinstance(v, ast.FormattedValue):
-                if v.conversion != -1 or v.format_spec is not None:
-                    raise CompileError("f-string conversions and format specs are not supported yet", v)
-                parts.append(self.to_str(self.check_expr(v.value), v.value))
+                if v.format_spec is not None:
+                    raise CompileError("f-string format specs are not supported yet", v)
+                e = self.check_expr(v.value)
+                if v.conversion == ord("r"):
+                    parts.append(self.repr_of(e, v.value))
+                elif v.conversion in (-1, ord("s")):
+                    parts.append(self.to_str(e, v.value))
+                else:
+                    raise CompileError("the f-string !a (ascii) conversion is not supported", v)
         if not parts:
             return ir.StrLit(STR, "")
         out = parts[0]
@@ -1865,6 +2155,19 @@ class Checker:
             raise CompileError(f"converting {t} to str is not supported yet (lists of numbers, bools and "
                                f"strings are)", node)
         raise CompileError(f"converting {t} to str is not supported yet (no __str__/__repr__)", node)
+
+    def repr_of(self, e: ir.Expr, node: ast.AST) -> ir.Expr:
+        self.no_int_taint(e, node)
+        t = e.ty
+        if t == STR:
+            return ir.Call(STR, "rt.str_repr", [e])
+        if t == OptionalT(STR):
+            return ir.Call(STR, "rt.opt_str_repr", [e])
+        if self.is_exception(t):
+            return ir.Call(STR, "rt.exc_repr", [e])
+        if isinstance(t, OptionalT):
+            raise CompileError(f"repr() of {t} is not supported yet; check `is not None` first", node)
+        return self.to_str(e, node)  # numbers, bools, None and lists: str() is repr()
 
     def no_int_taint(self, e: ir.Expr, node: ast.AST, what: str = "value") -> None:
         """A conditional mixing an int and a float branch is an int on one path in CPython: fine as an

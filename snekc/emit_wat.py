@@ -1,7 +1,9 @@
 """Typed IR -> WebAssembly text (WAT) using WasmGC and Wasm exception handling.
 
 Layout decisions (see DESIGN.md):
-  str          (struct (field $bytes (ref $u8s)) (field $hash (mut i32)))   UTF-8 bytes
+  str          (struct $bytes $hash $cp $idx): UTF-8 bytes, cached hash, cached
+               code point count (ASCII iff it equals the byte length) and a lazily
+               built code point -> byte offset index
   list[T]      (struct (field $len (mut i32)) (field $data (mut (ref $arr.T))))
                monomorphized per T; list[bool] uses a packed (array (mut i8))
   class C      (struct (field $__vt__ (ref $C.vt)) (field $f T) ...)
@@ -26,9 +28,10 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import ir
+from . import ir, unicode
 from .types import (
     BOOL,
+    BUF,
     F32,
     F64,
     I32,
@@ -68,6 +71,12 @@ JUMP_CODES = {"return": 1, "break": 2, "continue": 3, "exit_inline": 4}
 # float -> int conversions are checked (nan/inf/out of range raise, like CPython's int())
 CHECKED_TRUNC = {(F64, I32): "$rt.f64_to_i32", (F64, I64): "$rt.f64_to_i64",
                  (F32, I32): "$rt.f64_to_i32", (F32, I64): "$rt.f64_to_i64"}
+
+
+def words(values: list[int], size: int = 4) -> bytes:
+    """Little-endian data for a table of (possibly negative) integers."""
+    mask = (1 << (8 * size)) - 1
+    return b"".join((v & mask).to_bytes(size, "little") for v in values)
 
 
 def wat_string(data: bytes) -> str:
@@ -152,8 +161,9 @@ class Emitter:
         self.m = module
         self.lit_index: dict[str, int] = {}
         self.lit_data = bytearray()
-        self.lit_spans: list[tuple[int, int]] = []
+        self.lit_spans: list[tuple[int, int, int]] = []  # byte offset, byte length, code points
         self.list_types: dict[str, ListT] = {}
+        self.list_ops: dict[str, set[str]] = {}  # extra list helpers each element type needs
         self.fn: FnState | None = None
 
     # ---- types -----------------------------------------------------------------
@@ -162,6 +172,8 @@ class Emitter:
         t = strip_optional(t)
         if t == STR:
             return "$str"
+        if t == BUF:
+            return "$buf"
         if isinstance(t, ListT):
             m = mangle(t.elem)
             self.list_types.setdefault(m, t)
@@ -194,7 +206,7 @@ class Emitter:
         if text not in self.lit_index:
             data = text.encode("utf-8")
             self.lit_index[text] = len(self.lit_spans)
-            self.lit_spans.append((len(self.lit_data), len(data)))
+            self.lit_spans.append((len(self.lit_data), len(data), len(text)))
             self.lit_data += data
         return f"(call $lit.{self.lit_index[text]})"
 
@@ -211,7 +223,7 @@ class Emitter:
         self.close_list_types()
         list_funcs = self.list_helpers()  # registers literals used by the helpers
         lits = self.literal_funcs()
-        nonprint = self.nonprint_table()  # after every literal is known
+        tables = self.unicode_tables()  # after every literal is known
         types = self.type_section(class_types)
         parts = [
             "(module",
@@ -220,8 +232,7 @@ class Emitter:
             types,
             f"  (tag $snek.exc (param (ref {EXC})))",
             '  (memory (export "memory") 1)',
-            f"  (data $lits {wat_string(bytes(self.lit_data))})",
-            nonprint,
+            tables,
             prelude,
             lits,
             list_funcs,
@@ -256,9 +267,13 @@ class Emitter:
     def type_section(self, class_types: list[str]) -> str:
         lines = ["  (rec",
                  "    (type $u8s (array (mut i8)))",
-                 "    (type $u32s (array i32))",
+                 "    (type $u16s (array (mut i16)))",
+                 "    (type $u32s (array (mut i32)))",
                  "    (type $strs (array (ref $str)))",
-                 "    (type $str (struct (field $bytes (ref $u8s)) (field $hash (mut i32))))"]
+                 "    (type $ostrs (array (mut (ref null $str))))",
+                 "    (type $str (struct (field $bytes (ref $u8s)) (field $hash (mut i32)) (field $cp (mut i32))"
+                 " (field $idx (mut (ref null $u32s)))))",
+                 "    (type $buf (struct (field $b (mut (ref $u8s))) (field $n (mut i32)) (field $cp (mut i32))))"]
         done: set[str] = set()
         while len(done) < len(self.list_types):  # element types can register further list types
             for m, t in list(self.list_types.items()):
@@ -296,44 +311,276 @@ class Emitter:
             # Constant-expression string for the class name (array.new_fixed is a const op).
             data = cls.name.encode()
             chars = " ".join(f"(i32.const {b})" for b in data)
-            out.append(f"  (global ${cls.name}.name (ref $str) "
-                       f"(struct.new $str (array.new_fixed $u8s {len(data)} {chars}) (i32.const 0)))")
+            out.append(f"  (global ${cls.name}.name (ref $str) (struct.new $str "
+                       f"(array.new_fixed $u8s {len(data)} {chars}) (i32.const 0) (i32.const {len(data)}) "
+                       f"(ref.null $u32s)))")
             refs = "".join(f" (ref.func ${m.owner.name}.{m.name})" for m in cls.methods.values())
             out.append(f"  (global ${cls.name}.vt.inst (ref ${cls.name}.vt) "
                        f"(struct.new ${cls.name}.vt (global.get ${cls.name}.name){refs}))")
         return "\n".join(out)
 
-    def nonprint_table(self) -> str:
-        """Non-printable code points that occur in the program's string literals, for repr().
-        snek programs read no input, so these are the only ones a string can ever contain."""
-        cps = sorted({ord(ch) for text in self.lit_index for ch in text if ord(ch) >= 0x80 and not ch.isprintable()})
-        data = b"".join(cp.to_bytes(4, "little") for cp in cps)
-        return (f"  (data $nonprint {wat_string(data)})\n"
-                f"  (global $rt.np.n i32 (i32.const {len(cps)}))")
+    def unicode_tables(self) -> str:
+        """Unicode properties of the code points the program can hold (see unicode.py)."""
+        t = unicode.build(list(self.lit_index), self.m.unicode)
+        cases = [len(t.case_runs[k]) for k in unicode.CASE_KINDS]
+        cases += [x for k in unicode.CASE_KINDS for run in t.case_runs[k] for x in run]
+        flags = [x for run in t.flag_runs for x in run]
+        return "\n".join([
+            f"  (data $uascii {wat_string(words(t.ascii_flags, 2))})",
+            f"  (data $uflags {wat_string(words(flags))})",
+            f"  (global $rt.uf.n i32 (i32.const {len(t.flag_runs)}))",
+            f"  (data $ucases {wat_string(words(cases))})",
+            f"  (global $rt.uc.n i32 (i32.const {len(cases)}))",
+            f"  (data $uspecial {wat_string(words(t.specials))})",
+            f"  (global $rt.usp.n i32 (i32.const {len(t.specials)}))",
+            f"  (data $uzeros {wat_string(words(t.zeros))})",
+            f"  (global $rt.uz.n i32 (i32.const {len(t.zeros)}))",
+        ])
 
     def literal_funcs(self) -> str:
         out = []
-        for i, (off, n) in enumerate(self.lit_spans):
+        # One passive segment per literal, so wasm-opt drops the bytes of unused ones with their functions.
+        for i, (off, n, cps) in enumerate(self.lit_spans):
             out.append(
+                f"  (data $lit.{i} {wat_string(bytes(self.lit_data[off:off + n]))})\n"
                 f"  (global $lit.{i}.cache (mut (ref null $str)) (ref.null $str))\n"
                 f"  (func $lit.{i} (result (ref $str))\n"
                 f"    (if (ref.is_null (global.get $lit.{i}.cache))\n"
                 f"      (then (global.set $lit.{i}.cache\n"
-                f"        (struct.new $str (array.new_data $u8s $lits (i32.const {off}) (i32.const {n})) (i32.const 0)))))\n"
+                f"        (call $rt.mkstr (array.new_data $u8s $lit.{i} (i32.const 0) (i32.const {n})) (i32.const {cps})))))\n"
                 f"    (ref.as_non_null (global.get $lit.{i}.cache)))")
         return "\n".join(out)
 
     # ---- list runtime, generated per element type ---------------------------------
 
     def list_helpers(self) -> str:
+        """The basic helpers for every list type, plus the other operations the program uses.
+        Generating one can require more (eq on list[list[T]] needs eq on list[T])."""
         out: list[str] = []
         done: set[str] = set()
-        while len(done) < len(self.list_types):
+        done_ops: set[tuple[str, str]] = set()
+        progress = True
+        while progress:
+            progress = False
             for m, t in list(self.list_types.items()):
                 if m not in done:
                     done.add(m)
                     out.append(self.list_helper(m, t))
+                    progress = True
+                for op in sorted(self.list_ops.get(m, set())):
+                    if (m, op) not in done_ops:
+                        done_ops.add((m, op))
+                        out.append(self.list_op_code(m, t, op))
+                        progress = True
         return "\n".join(out)
+
+    def list_op(self, t: ListT, op: str) -> str:
+        """Name of the helper for a list operation, generating it on demand."""
+        self.heap(t)
+        m = mangle(t.elem)
+        self.list_ops.setdefault(m, set()).add(op)
+        return f"$list.{m}.{op}"
+
+    def eq_code(self, t: Type, a: str, b: str) -> str:
+        """==, as `in`, index(), count(), remove() and list equality use it."""
+        if t in (BOOL, I32):
+            return f"(i32.eq {a} {b})"
+        if isinstance(t, Prim):
+            return f"({t.name}.eq {a} {b})"
+        if t == STR:
+            return f"(call $rt.str_eq {a} {b})"
+        if t == OptionalT(STR):
+            return f"(call $rt.opt_str_eq {a} {b})"
+        inner = strip_optional(t)
+        if isinstance(inner, ListT):
+            return f"(call {self.list_op(inner, 'eq')} {a} {b})"
+        return f"(ref.eq {a} {b})"  # objects compare by identity (no __eq__ yet)
+
+    def list_op_code(self, m: str, t: ListT, op: str) -> str:
+        e = t.elem
+        A, L = f"$arr.{m}", f"$list.{m}"
+        R, S = self.valtype(e), self.storage(e)
+        get = "array.get_u" if e == BOOL else "array.get"
+        nn = e.is_ref and not isinstance(e, OptionalT)
+        LEN, DATA = f"(struct.get {L} $len (local.get $l))", f"(struct.get {L} $data (local.get $l))"
+
+        def load(arr: str, idx: str) -> str:
+            code = f"({get} {A} (local.get {arr}) (local.get {idx}))"
+            return f"(ref.as_non_null {code})" if nn else code
+
+        clear = (f"(array.set {A} (local.get $d) (local.get $n) (ref.null {self.heap(e)}))" if e.is_ref else "")
+        shift_down = (f"(array.copy {A} {A} (local.get $d) (local.get $i) (local.get $d) "
+                      f"(i32.add (local.get $i) (i32.const 1)) (i32.sub (local.get $n) (local.get $i)))")
+        loop = lambda var, end, body: (  # noqa: E731
+            f"(block $done (loop $next (br_if $done (i32.ge_s (local.get {var}) {end})) {body} "
+            f"(local.set {var} (i32.add (local.get {var}) (i32.const 1))) (br $next)))")
+        clamp = lambda v: (  # noqa: E731
+            f"(if (i32.lt_s (local.get {v}) (i32.const 0)) (then (local.set {v} (i32.add (local.get {v}) "
+            f"(local.get $n))) (if (i32.lt_s (local.get {v}) (i32.const 0)) (then (local.set {v} (i32.const 0))))))")
+        head = f"  (func {L}.{op} "
+        if op == "slice":
+            body = f"""(param $l (ref {L})) (param $start i32) (param $stop i32) (param $step i32) (param $flags i32) (result (ref {L}))
+    (local $cnt i32) (local $o (ref {A})) (local $d (ref {A})) (local $k i32) (local $p i32)
+    (call $rt.step_check (local.get $step))
+    (local.set $cnt (call $rt.slice_adj {LEN} (local.get $start) (local.get $stop) (local.get $step) (local.get $flags)))
+    (local.set $p (global.get $rt.slice_start))
+    (local.set $d {DATA})
+    (local.set $o (array.new_default {A} (local.get $cnt)))
+    (if (i32.eq (local.get $step) (i32.const 1))
+      (then (array.copy {A} {A} (local.get $o) (i32.const 0) (local.get $d) (local.get $p) (local.get $cnt)))
+      (else {loop("$k", "(local.get $cnt)",
+                  f"(array.set {A} (local.get $o) (local.get $k) ({get} {A} (local.get $d) (local.get $p))) "
+                  f"(local.set $p (i32.add (local.get $p) (local.get $step)))")}))
+    (struct.new {L} (local.get $cnt) (local.get $o)))"""
+        elif op == "copy":
+            body = f"""(param $l (ref {L})) (result (ref {L}))
+    (call {L}.slice (local.get $l) (i32.const 0) (i32.const 0) (i32.const 1) (i32.const 0)))"""
+            self.list_ops[m].add("slice")
+        elif op == "find":  # first index in [i, stop) equal to v, or -1
+            body = f"""(param $l (ref {L})) (param $v {R}) (param $i i32) (param $stop i32) (result i32)
+    (local $d (ref {A}))
+    (if (i32.gt_s (local.get $stop) {LEN}) (then (local.set $stop {LEN})))
+    (local.set $d {DATA})
+    {loop("$i", "(local.get $stop)", f"(if {self.eq_code(e, load('$d', '$i'), '(local.get $v)')} (then (return (local.get $i))))")}
+    (i32.const -1))"""
+        elif op == "contains":
+            self.list_ops[m].add("find")
+            body = f"""(param $l (ref {L})) (param $v {R}) (result i32)
+    (i32.ge_s (call {L}.find (local.get $l) (local.get $v) (i32.const 0) (i32.const 0x7FFFFFFF)) (i32.const 0)))"""
+        elif op == "index":
+            self.list_ops[m].add("find")
+            msg = f"(call $rt.str_concat {self.repr_code(e, '(local.get $v)')} {self.lit(' is not in list')})"
+            body = f"""(param $l (ref {L})) (param $v {R}) (param $start i32) (param $stop i32) (result i32)
+    (local $n i32) (local $r i32)
+    (local.set $n {LEN})
+    {clamp("$start")}
+    {clamp("$stop")}
+    (local.set $r (call {L}.find (local.get $l) (local.get $v) (local.get $start) (local.get $stop)))
+    (if (i32.lt_s (local.get $r) (i32.const 0)) (then (throw $snek.exc (call $ValueError.__new__ {msg}))))
+    (local.get $r))"""
+        elif op == "count":
+            body = f"""(param $l (ref {L})) (param $v {R}) (result i32)
+    (local $d (ref {A})) (local $i i32) (local $c i32)
+    (local.set $d {DATA})
+    {loop("$i", LEN, f"(if {self.eq_code(e, load('$d', '$i'), '(local.get $v)')} (then (local.set $c (i32.add (local.get $c) (i32.const 1)))))")}
+    (local.get $c))"""
+        elif op == "insert":
+            body = f"""(param $l (ref {L})) (param $i i32) (param $v {R})
+    (local $n i32) (local $d (ref {A}))
+    (local.set $n {LEN})
+    {clamp("$i")}
+    (if (i32.gt_s (local.get $i) (local.get $n)) (then (local.set $i (local.get $n))))
+    (call {L}.append (local.get $l) (local.get $v))
+    (local.set $d {DATA})
+    (array.copy {A} {A} (local.get $d) (i32.add (local.get $i) (i32.const 1)) (local.get $d) (local.get $i)
+                (i32.sub (local.get $n) (local.get $i)))
+    (array.set {A} (local.get $d) (local.get $i) (local.get $v)))"""
+        elif op == "extend":
+            body = f"""(param $l (ref {L})) (param $o (ref {L}))
+    (local $n i32) (local $k i32) (local $need i32) (local $cap i32) (local $d (ref {A})) (local $g (ref null {A}))
+    (local.set $n {LEN})
+    (local.set $k (struct.get {L} $len (local.get $o)))  ;; before growing: o may be l itself
+    (local.set $need (i32.add (local.get $n) (local.get $k)))
+    (local.set $d {DATA})
+    (if (i32.gt_u (local.get $need) (array.len (local.get $d)))
+      (then
+        (local.set $cap (i32.shl (array.len (local.get $d)) (i32.const 1)))
+        (if (i32.lt_u (local.get $cap) (local.get $need)) (then (local.set $cap (local.get $need))))
+        (local.set $g (array.new_default {A} (local.get $cap)))
+        (array.copy {A} {A} (local.get $g) (i32.const 0) (local.get $d) (i32.const 0) (local.get $n))
+        (local.set $d (ref.as_non_null (local.get $g)))
+        (struct.set {L} $data (local.get $l) (local.get $d))))
+    (array.copy {A} {A} (local.get $d) (local.get $n) (struct.get {L} $data (local.get $o)) (i32.const 0) (local.get $k))
+    (struct.set {L} $len (local.get $l) (local.get $need)))"""
+        elif op == "remove":
+            self.list_ops[m].add("find")
+            body = f"""(param $l (ref {L})) (param $v {R})
+    (local $i i32) (local $n i32) (local $d (ref {A}))
+    (local.set $i (call {L}.find (local.get $l) (local.get $v) (i32.const 0) (i32.const 0x7FFFFFFF)))
+    (if (i32.lt_s (local.get $i) (i32.const 0))
+      (then {self.raise_code("ValueError", "list.remove(x): x not in list")}))
+    (local.set $n (i32.sub {LEN} (i32.const 1)))
+    (local.set $d {DATA})
+    {shift_down}
+    {clear}
+    (struct.set {L} $len (local.get $l) (local.get $n)))"""
+        elif op == "pop_at":
+            val = "(ref.as_non_null (local.get $v))" if nn else "(local.get $v)"
+            body = f"""(param $l (ref {L})) (param $i i32) (result {R})
+    (local $n i32) (local $d (ref {A})) (local $v {S})
+    (local.set $n {LEN})
+    (if (i32.eqz (local.get $n)) (then {self.raise_code("IndexError", "pop from empty list")}))
+    (if (i32.lt_s (local.get $i) (i32.const 0)) (then (local.set $i (i32.add (local.get $i) (local.get $n)))))
+    (if (i32.ge_u (local.get $i) (local.get $n)) (then {self.raise_code("IndexError", "pop index out of range")}))
+    (local.set $d {DATA})
+    (local.set $v ({get} {A} (local.get $d) (local.get $i)))
+    (local.set $n (i32.sub (local.get $n) (i32.const 1)))
+    {shift_down}
+    {clear}
+    (struct.set {L} $len (local.get $l) (local.get $n))
+    {val})"""
+        elif op == "reverse":
+            body = f"""(param $l (ref {L}))
+    (local $d (ref {A})) (local $i i32) (local $j i32) (local $t {S})
+    (local.set $d {DATA})
+    (local.set $j (i32.sub {LEN} (i32.const 1)))
+    (block $done
+      (loop $next
+        (br_if $done (i32.ge_s (local.get $i) (local.get $j)))
+        (local.set $t ({get} {A} (local.get $d) (local.get $i)))
+        (array.set {A} (local.get $d) (local.get $i) ({get} {A} (local.get $d) (local.get $j)))
+        (array.set {A} (local.get $d) (local.get $j) (local.get $t))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (local.set $j (i32.sub (local.get $j) (i32.const 1)))
+        (br $next))))"""
+        elif op == "clear":
+            body = f"""(param $l (ref {L}))
+    (struct.set {L} $len (local.get $l) (i32.const 0))
+    (struct.set {L} $data (local.get $l) (array.new_default {A} (i32.const 0))))"""
+        elif op == "concat":
+            body = f"""(param $a (ref {L})) (param $b (ref {L})) (result (ref {L}))
+    (local $na i32) (local $nb i32) (local $o (ref {A}))
+    (local.set $na (struct.get {L} $len (local.get $a)))
+    (local.set $nb (struct.get {L} $len (local.get $b)))
+    (local.set $o (array.new_default {A} (i32.add (local.get $na) (local.get $nb))))
+    (array.copy {A} {A} (local.get $o) (i32.const 0) (struct.get {L} $data (local.get $a)) (i32.const 0) (local.get $na))
+    (array.copy {A} {A} (local.get $o) (local.get $na) (struct.get {L} $data (local.get $b)) (i32.const 0) (local.get $nb))
+    (struct.new {L} (i32.add (local.get $na) (local.get $nb)) (local.get $o)))"""
+        elif op == "repeat":
+            body = f"""(param $l (ref {L})) (param $k i32) (result (ref {L}))
+    (local $n i32) (local $o (ref {A})) (local $d (ref {A})) (local $i i32) (local $total i64)
+    (local.set $n {LEN})
+    (if (i32.lt_s (local.get $k) (i32.const 0)) (then (local.set $k (i32.const 0))))
+    (local.set $total (i64.mul (i64.extend_i32_u (local.get $n)) (i64.extend_i32_u (local.get $k))))
+    (if (i64.gt_u (local.get $total) (i64.const 0x7FFFFFFF))
+      (then (throw $snek.exc (call $MemoryError.__new__ (ref.null $str)))))
+    (local.set $o (array.new_default {A} (i32.wrap_i64 (local.get $total))))
+    (local.set $d {DATA})
+    {loop("$i", "(local.get $k)", f"(array.copy {A} {A} (local.get $o) (i32.mul (local.get $i) (local.get $n)) (local.get $d) (i32.const 0) (local.get $n))")}
+    (struct.new {L} (i32.wrap_i64 (local.get $total)) (local.get $o)))"""
+        elif op == "imul":
+            self.list_ops[m].add("repeat")
+            body = f"""(param $l (ref {L})) (param $k i32)
+    (local $r (ref {L}))
+    (local.set $r (call {L}.repeat (local.get $l) (local.get $k)))
+    (struct.set {L} $data (local.get $l) (struct.get {L} $data (local.get $r)))
+    (struct.set {L} $len (local.get $l) (struct.get {L} $len (local.get $r))))"""
+        elif op == "eq":
+            body = f"""(param $a (ref null {L})) (param $b (ref null {L})) (result i32)
+    (local $x (ref {L})) (local $y (ref {L})) (local $n i32) (local $i i32) (local $da (ref {A})) (local $db (ref {A}))
+    (if (ref.eq (local.get $a) (local.get $b)) (then (return (i32.const 1))))
+    (if (i32.or (ref.is_null (local.get $a)) (ref.is_null (local.get $b))) (then (return (i32.const 0))))
+    (local.set $x (ref.as_non_null (local.get $a)))
+    (local.set $y (ref.as_non_null (local.get $b)))
+    (local.set $n (struct.get {L} $len (local.get $x)))
+    (if (i32.ne (local.get $n) (struct.get {L} $len (local.get $y))) (then (return (i32.const 0))))
+    (local.set $da (struct.get {L} $data (local.get $x)))
+    (local.set $db (struct.get {L} $data (local.get $y)))
+    {loop("$i", "(local.get $n)", f"(if (i32.eqz {self.eq_code(e, load('$da', '$i'), load('$db', '$i'))}) (then (return (i32.const 0))))")}
+    (i32.const 1))"""
+        else:
+            raise AssertionError(f"list op {op}")
+        return head + body
 
     def raise_code(self, cls_name: str, message: str) -> str:
         return f"(throw $snek.exc (call ${cls_name}.__new__ {self.lit(message)}))"
@@ -771,6 +1018,10 @@ class Emitter:
         if isinstance(e, ir.ListPop):
             self.heap(e.lst.ty)
             return f"(call $list.{mangle(e.ty)}.pop {self.ex(e.lst)})"
+        if isinstance(e, ir.ListOp):
+            t = strip_optional(e.lst.ty)
+            assert isinstance(t, ListT)
+            return self.call(self.list_op(t, e.op), [e.lst, *e.args])
         if isinstance(e, ir.ListAppend):
             m = mangle(e.lst.ty.elem)  # type: ignore[attr-defined]
             self.heap(e.lst.ty)

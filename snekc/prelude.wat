@@ -2,8 +2,8 @@
   ;; snek runtime prelude
   ;;
   ;; Spliced into every compiled module by snekc/emit_wat.py. The types it
-  ;; uses ($u8s, $str) are declared by the emitter inside the module's rec
-  ;; group. Forms written as (str.lit "...") are rewritten by the emitter into
+  ;; uses ($u8s, $str, $buf, ...) and the Unicode table data segments are
+  ;; declared by the emitter. Forms written as (str.lit "...") are rewritten by the emitter into
   ;; calls to pooled, lazily-cached string literals.
   ;;
   ;; All language values live on the GC heap. Linear memory exists only for
@@ -81,10 +81,652 @@
     (call $wasi.proc_exit (i32.const 1))
     (unreachable))
 
-  ;; ---- strings: UTF-8 bytes in a GC array + cached hash ------------------
+  ;; ---- strings ------------------------------------------------------------
+  ;; (struct $bytes $hash $cp $idx)
+  ;;   $bytes  UTF-8
+  ;;   $hash   FNV-1a, computed lazily (0 = not yet)
+  ;;   $cp     number of code points, -1 until counted. It equals the byte
+  ;;           length exactly when the string is ASCII, which is the fast path
+  ;;           for len(), indexing and slicing.
+  ;;   $idx    byte offset of every code point plus the end, built the first
+  ;;           time a non-ASCII string is indexed or sliced
+  ;; Strings are immutable, so the cached fields never go stale.
 
-  (func $rt.str_len (param $s (ref $str)) (result i32)
+  (func $rt.mkstr (param $b (ref $u8s)) (param $cp i32) (result (ref $str))
+    (struct.new $str (local.get $b) (i32.const 0) (local.get $cp) (ref.null $u32s)))
+
+  (func $rt.blen (param $s (ref $str)) (result i32)
     (array.len (struct.get $str $bytes (local.get $s))))
+
+  (func $rt.byte (param $s (ref $str)) (param $i i32) (result i32)
+    (array.get_u $u8s (struct.get $str $bytes (local.get $s)) (local.get $i)))
+
+  ;; len(s): code points, counted once (every byte that is not 10xxxxxx starts one)
+  (func $rt.str_len (param $s (ref $str)) (result i32)
+    (local $n i32) (local $a (ref $u8s)) (local $i i32)
+    (local.set $n (struct.get $str $cp (local.get $s)))
+    (if (i32.ge_s (local.get $n) (i32.const 0)) (then (return (local.get $n))))
+    (local.set $a (struct.get $str $bytes (local.get $s)))
+    (local.set $n (i32.const 0))
+    (block $done
+      (loop $l
+        (br_if $done (i32.ge_u (local.get $i) (array.len (local.get $a))))
+        (local.set $n (i32.add (local.get $n)
+          (i32.ne (i32.and (array.get_u $u8s (local.get $a) (local.get $i)) (i32.const 0xC0)) (i32.const 0x80))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $l)))
+    (struct.set $str $cp (local.get $s) (local.get $n))
+    (local.get $n))
+
+  (func $rt.is_ascii (param $s (ref $str)) (result i32)
+    (i32.eq (call $rt.str_len (local.get $s)) (call $rt.blen (local.get $s))))
+
+  ;; code point count of a concatenation: known only if both parts are
+  (func $rt.cp_sum (param $a i32) (param $b i32) (result i32)
+    (select (i32.add (local.get $a) (local.get $b)) (i32.const -1)
+            (i32.and (i32.ge_s (local.get $a) (i32.const 0)) (i32.ge_s (local.get $b) (i32.const 0)))))
+
+  ;; ---- UTF-8 ----
+
+  ;; length of a UTF-8 sequence, from its lead byte
+  (func $rt.u8w (param $c i32) (result i32)
+    (select (i32.const 1)
+      (select (i32.const 2)
+        (select (i32.const 3) (i32.const 4) (i32.lt_u (local.get $c) (i32.const 0xF0)))
+        (i32.lt_u (local.get $c) (i32.const 0xE0)))
+      (i32.lt_u (local.get $c) (i32.const 0x80))))
+
+  ;; length of the UTF-8 encoding of a code point
+  (func $rt.cpw (param $cp i32) (result i32)
+    (select (i32.const 1)
+      (select (i32.const 2)
+        (select (i32.const 3) (i32.const 4) (i32.lt_u (local.get $cp) (i32.const 0x10000)))
+        (i32.lt_u (local.get $cp) (i32.const 0x800)))
+      (i32.lt_u (local.get $cp) (i32.const 0x80))))
+
+  ;; byte length of the code point starting at byte i
+  (func $rt.wat (param $s (ref $str)) (param $i i32) (result i32)
+    (call $rt.u8w (call $rt.byte (local.get $s) (local.get $i))))
+
+  ;; start of the code point that ends at byte boundary i (i > 0)
+  (func $rt.back (param $s (ref $str)) (param $i i32) (result i32)
+    (local $a (ref $u8s))
+    (local.set $a (struct.get $str $bytes (local.get $s)))
+    (loop $l
+      (local.set $i (i32.sub (local.get $i) (i32.const 1)))
+      (br_if $l (i32.eq (i32.and (array.get_u $u8s (local.get $a) (local.get $i)) (i32.const 0xC0)) (i32.const 0x80))))
+    (local.get $i))
+
+  ;; the code point starting at byte i
+  (func $rt.dec (param $s (ref $str)) (param $i i32) (result i32)
+    (local $a (ref $u8s)) (local $c i32)
+    (local.set $a (struct.get $str $bytes (local.get $s)))
+    (local.set $c (array.get_u $u8s (local.get $a) (local.get $i)))
+    (if (i32.lt_u (local.get $c) (i32.const 0x80)) (then (return (local.get $c))))
+    (if (i32.lt_u (local.get $c) (i32.const 0xE0))
+      (then (return (i32.or
+        (i32.shl (i32.and (local.get $c) (i32.const 0x1F)) (i32.const 6))
+        (i32.and (array.get_u $u8s (local.get $a) (i32.add (local.get $i) (i32.const 1))) (i32.const 0x3F))))))
+    (if (i32.lt_u (local.get $c) (i32.const 0xF0))
+      (then (return (i32.or (i32.or
+        (i32.shl (i32.and (local.get $c) (i32.const 0x0F)) (i32.const 12))
+        (i32.shl (i32.and (array.get_u $u8s (local.get $a) (i32.add (local.get $i) (i32.const 1))) (i32.const 0x3F))
+                 (i32.const 6)))
+        (i32.and (array.get_u $u8s (local.get $a) (i32.add (local.get $i) (i32.const 2))) (i32.const 0x3F))))))
+    (i32.or (i32.or (i32.or
+      (i32.shl (i32.and (local.get $c) (i32.const 0x07)) (i32.const 18))
+      (i32.shl (i32.and (array.get_u $u8s (local.get $a) (i32.add (local.get $i) (i32.const 1))) (i32.const 0x3F))
+               (i32.const 12)))
+      (i32.shl (i32.and (array.get_u $u8s (local.get $a) (i32.add (local.get $i) (i32.const 2))) (i32.const 0x3F))
+               (i32.const 6)))
+      (i32.and (array.get_u $u8s (local.get $a) (i32.add (local.get $i) (i32.const 3))) (i32.const 0x3F))))
+
+  ;; write cp as UTF-8 at o[p..], return the position after it
+  (func $rt.enc (param $o (ref $u8s)) (param $p i32) (param $cp i32) (result i32)
+    (if (i32.lt_u (local.get $cp) (i32.const 0x80))
+      (then
+        (array.set $u8s (local.get $o) (local.get $p) (local.get $cp))
+        (return (i32.add (local.get $p) (i32.const 1)))))
+    (if (i32.lt_u (local.get $cp) (i32.const 0x800))
+      (then
+        (array.set $u8s (local.get $o) (local.get $p) (i32.or (i32.const 0xC0) (i32.shr_u (local.get $cp) (i32.const 6))))
+        (array.set $u8s (local.get $o) (i32.add (local.get $p) (i32.const 1))
+          (i32.or (i32.const 0x80) (i32.and (local.get $cp) (i32.const 0x3F))))
+        (return (i32.add (local.get $p) (i32.const 2)))))
+    (if (i32.lt_u (local.get $cp) (i32.const 0x10000))
+      (then
+        (array.set $u8s (local.get $o) (local.get $p) (i32.or (i32.const 0xE0) (i32.shr_u (local.get $cp) (i32.const 12))))
+        (array.set $u8s (local.get $o) (i32.add (local.get $p) (i32.const 1))
+          (i32.or (i32.const 0x80) (i32.and (i32.shr_u (local.get $cp) (i32.const 6)) (i32.const 0x3F))))
+        (array.set $u8s (local.get $o) (i32.add (local.get $p) (i32.const 2))
+          (i32.or (i32.const 0x80) (i32.and (local.get $cp) (i32.const 0x3F))))
+        (return (i32.add (local.get $p) (i32.const 3)))))
+    (array.set $u8s (local.get $o) (local.get $p) (i32.or (i32.const 0xF0) (i32.shr_u (local.get $cp) (i32.const 18))))
+    (array.set $u8s (local.get $o) (i32.add (local.get $p) (i32.const 1))
+      (i32.or (i32.const 0x80) (i32.and (i32.shr_u (local.get $cp) (i32.const 12)) (i32.const 0x3F))))
+    (array.set $u8s (local.get $o) (i32.add (local.get $p) (i32.const 2))
+      (i32.or (i32.const 0x80) (i32.and (i32.shr_u (local.get $cp) (i32.const 6)) (i32.const 0x3F))))
+    (array.set $u8s (local.get $o) (i32.add (local.get $p) (i32.const 3))
+      (i32.or (i32.const 0x80) (i32.and (local.get $cp) (i32.const 0x3F))))
+    (i32.add (local.get $p) (i32.const 4)))
+
+  ;; ---- code point indexing ----
+
+  (func $rt.str_index (param $s (ref $str)) (result (ref $u32s))
+    (local $x (ref null $u32s)) (local $a (ref $u8s)) (local $n i32) (local $i i32) (local $k i32) (local $t (ref $u32s))
+    (local.set $x (struct.get $str $idx (local.get $s)))
+    (if (i32.eqz (ref.is_null (local.get $x))) (then (return (ref.as_non_null (local.get $x)))))
+    (local.set $n (call $rt.str_len (local.get $s)))
+    (local.set $a (struct.get $str $bytes (local.get $s)))
+    (local.set $t (array.new_default $u32s (i32.add (local.get $n) (i32.const 1))))
+    (block $done
+      (loop $l
+        (br_if $done (i32.ge_u (local.get $i) (array.len (local.get $a))))
+        (if (i32.ne (i32.and (array.get_u $u8s (local.get $a) (local.get $i)) (i32.const 0xC0)) (i32.const 0x80))
+          (then
+            (array.set $u32s (local.get $t) (local.get $k) (local.get $i))
+            (local.set $k (i32.add (local.get $k) (i32.const 1)))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $l)))
+    (array.set $u32s (local.get $t) (local.get $n) (array.len (local.get $a)))
+    (struct.set $str $idx (local.get $s) (local.get $t))
+    (local.get $t))
+
+  ;; byte offset of code point k (0 <= k <= len)
+  (func $rt.cpoff (param $s (ref $str)) (param $k i32) (result i32)
+    (if (result i32) (call $rt.is_ascii (local.get $s))
+      (then (local.get $k))
+      (else (array.get $u32s (call $rt.str_index (local.get $s)) (local.get $k)))))
+
+  ;; code point index of a byte boundary
+  (func $rt.cpidx (param $s (ref $str)) (param $off i32) (result i32)
+    (local $a (ref $u8s)) (local $i i32) (local $n i32)
+    (if (call $rt.is_ascii (local.get $s)) (then (return (local.get $off))))
+    (local.set $a (struct.get $str $bytes (local.get $s)))
+    (block $done
+      (loop $l
+        (br_if $done (i32.ge_u (local.get $i) (local.get $off)))
+        (local.set $n (i32.add (local.get $n)
+          (i32.ne (i32.and (array.get_u $u8s (local.get $a) (local.get $i)) (i32.const 0xC0)) (i32.const 0x80))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $l)))
+    (local.get $n))
+
+  ;; A one-character string. The 128 ASCII ones are cached, so `for ch in s`
+  ;; and s[i] over ASCII text allocate nothing after the first use of a letter.
+  (global $rt.chars (mut (ref null $ostrs)) (ref.null $ostrs))
+
+  (func $rt.char_str (param $cp i32) (result (ref $str))
+    (local $t (ref $ostrs)) (local $s (ref null $str)) (local $o (ref $u8s))
+    (if (i32.lt_u (local.get $cp) (i32.const 128))
+      (then
+        (if (ref.is_null (global.get $rt.chars))
+          (then (global.set $rt.chars (array.new_default $ostrs (i32.const 128)))))
+        (local.set $t (ref.as_non_null (global.get $rt.chars)))
+        (local.set $s (array.get $ostrs (local.get $t) (local.get $cp)))
+        (if (ref.is_null (local.get $s))
+          (then
+            (local.set $s (call $rt.mkstr (array.new $u8s (local.get $cp) (i32.const 1)) (i32.const 1)))
+            (array.set $ostrs (local.get $t) (local.get $cp) (local.get $s))))
+        (return (ref.as_non_null (local.get $s)))))
+    (local.set $o (array.new_default $u8s (call $rt.cpw (local.get $cp))))
+    (drop (call $rt.enc (local.get $o) (i32.const 0) (local.get $cp)))
+    (call $rt.mkstr (local.get $o) (i32.const 1)))
+
+  ;; the character starting at byte i (for-loops over a str walk bytes)
+  (func $rt.char_at (param $s (ref $str)) (param $i i32) (result (ref $str))
+    (call $rt.char_str (call $rt.dec (local.get $s) (local.get $i))))
+
+  ;; s[i]
+  (func $rt.str_get (param $s (ref $str)) (param $i i32) (result (ref $str))
+    (local $n i32)
+    (local.set $n (call $rt.str_len (local.get $s)))
+    (if (i32.lt_s (local.get $i) (i32.const 0)) (then (local.set $i (i32.add (local.get $i) (local.get $n)))))
+    (if (i32.ge_u (local.get $i) (local.get $n))
+      (then (throw $snek.exc (call $IndexError.__new__ (str.lit "string index out of range")))))
+    (call $rt.char_at (local.get $s) (call $rt.cpoff (local.get $s) (local.get $i))))
+
+  (func $rt.ord (param $s (ref $str)) (result i32)
+    (local $n i32)
+    (local.set $n (call $rt.str_len (local.get $s)))
+    (if (i32.ne (local.get $n) (i32.const 1))
+      (then (throw $snek.exc (call $TypeError.__new__
+        (call $rt.str_concat_n (array.new_fixed $strs 3
+          (str.lit "ord() expected a character, but string of length ")
+          (call $rt.i64_to_str (i64.extend_i32_u (local.get $n)))
+          (str.lit " found")))))))
+    (call $rt.dec (local.get $s) (i32.const 0)))
+
+  ;; chr(i). A lone surrogate cannot be stored as UTF-8, so chr() of one raises
+  ;; where CPython would return a string it could not print.
+  (func $rt.chr (param $cp i32) (result (ref $str))
+    (if (i32.gt_u (local.get $cp) (i32.const 0x10FFFF))
+      (then (throw $snek.exc (call $ValueError.__new__ (str.lit "chr() arg not in range(0x110000)")))))
+    (if (i32.eq (i32.and (local.get $cp) (i32.const 0xFFFFF800)) (i32.const 0xD800))
+      (then (throw $snek.exc (call $ValueError.__new__
+        (str.lit "chr() of a surrogate code point is not supported (snek strings are UTF-8)")))))
+    (call $rt.char_str (local.get $cp)))
+
+  ;; ---- slices ----
+
+  (global $rt.slice_start (mut i32) (i32.const 0))
+
+  (func $rt.step_check (param $step i32)
+    (if (i32.eqz (local.get $step))
+      (then (throw $snek.exc (call $ValueError.__new__ (str.lit "slice step cannot be zero"))))))
+
+  (func $rt.slice_clamp (param $i i32) (param $n i32) (param $step i32) (result i32)
+    (if (i32.lt_s (local.get $i) (i32.const 0))
+      (then
+        (local.set $i (i32.add (local.get $i) (local.get $n)))
+        (if (i32.lt_s (local.get $i) (i32.const 0))
+          (then (local.set $i (select (i32.const -1) (i32.const 0) (i32.lt_s (local.get $step) (i32.const 0))))))
+        (return (local.get $i))))
+    (if (i32.ge_s (local.get $i) (local.get $n))
+      (then (local.set $i (select (i32.sub (local.get $n) (i32.const 1)) (local.get $n)
+                                  (i32.lt_s (local.get $step) (i32.const 0))))))
+    (local.get $i))
+
+  ;; slice.indices() for a sequence of length n: returns the slice length and
+  ;; leaves the first index in $rt.slice_start. flags bit 0: start was given,
+  ;; bit 1: stop was given (absent bounds depend on the sign of step).
+  (func $rt.slice_adj (param $n i32) (param $start i32) (param $stop i32) (param $step i32) (param $flags i32)
+                      (result i32)
+    (if (i32.eq (local.get $step) (i32.const 0x80000000)) (then (local.set $step (i32.const -0x7FFFFFFF))))
+    (local.set $start
+      (if (result i32) (i32.and (local.get $flags) (i32.const 1))
+        (then (call $rt.slice_clamp (local.get $start) (local.get $n) (local.get $step)))
+        (else (select (i32.sub (local.get $n) (i32.const 1)) (i32.const 0) (i32.lt_s (local.get $step) (i32.const 0))))))
+    (local.set $stop
+      (if (result i32) (i32.and (local.get $flags) (i32.const 2))
+        (then (call $rt.slice_clamp (local.get $stop) (local.get $n) (local.get $step)))
+        (else (select (i32.const -1) (local.get $n) (i32.lt_s (local.get $step) (i32.const 0))))))
+    (global.set $rt.slice_start (local.get $start))
+    (if (i32.lt_s (local.get $step) (i32.const 0))
+      (then
+        (if (i32.lt_s (local.get $stop) (local.get $start))
+          (then (return (i32.add (i32.div_u (i32.sub (i32.sub (local.get $start) (local.get $stop)) (i32.const 1))
+                                            (i32.sub (i32.const 0) (local.get $step)))
+                                 (i32.const 1))))))
+      (else
+        (if (i32.lt_s (local.get $start) (local.get $stop))
+          (then (return (i32.add (i32.div_u (i32.sub (i32.sub (local.get $stop) (local.get $start)) (i32.const 1))
+                                            (local.get $step))
+                                 (i32.const 1)))))))
+    (i32.const 0))
+
+  ;; s[start:stop:step]
+  (func $rt.str_slice (param $s (ref $str)) (param $start i32) (param $stop i32) (param $step i32) (param $flags i32)
+                      (result (ref $str))
+    (local $n i32) (local $cnt i32) (local $a i32) (local $b i32) (local $o (ref $u8s)) (local $src (ref $u8s))
+    (local $ix (ref $u32s)) (local $k i32) (local $p i32) (local $pos i32) (local $len i32)
+    (call $rt.step_check (local.get $step))
+    (local.set $n (call $rt.str_len (local.get $s)))
+    (local.set $cnt (call $rt.slice_adj (local.get $n) (local.get $start) (local.get $stop) (local.get $step)
+                                        (local.get $flags)))
+    (local.set $start (global.get $rt.slice_start))
+    (if (i32.le_s (local.get $cnt) (i32.const 0)) (then (return (str.lit ""))))
+    (local.set $src (struct.get $str $bytes (local.get $s)))
+    (if (i32.eq (local.get $step) (i32.const 1))
+      (then
+        (if (i32.eq (local.get $cnt) (local.get $n)) (then (return (local.get $s))))
+        (local.set $a (call $rt.cpoff (local.get $s) (local.get $start)))
+        (local.set $b (call $rt.cpoff (local.get $s) (i32.add (local.get $start) (local.get $cnt))))
+        (if (i32.eq (local.get $cnt) (i32.const 1)) (then (return (call $rt.char_at (local.get $s) (local.get $a)))))
+        (local.set $o (array.new_default $u8s (i32.sub (local.get $b) (local.get $a))))
+        (array.copy $u8s $u8s (local.get $o) (i32.const 0) (local.get $src) (local.get $a) (i32.sub (local.get $b) (local.get $a)))
+        (return (call $rt.mkstr (local.get $o) (local.get $cnt)))))
+    (if (call $rt.is_ascii (local.get $s))
+      (then
+        (local.set $o (array.new_default $u8s (local.get $cnt)))
+        (local.set $p (local.get $start))
+        (block $d
+          (loop $l
+            (br_if $d (i32.ge_s (local.get $k) (local.get $cnt)))
+            (array.set $u8s (local.get $o) (local.get $k) (array.get_u $u8s (local.get $src) (local.get $p)))
+            (local.set $p (i32.add (local.get $p) (local.get $step)))
+            (local.set $k (i32.add (local.get $k) (i32.const 1)))
+            (br $l)))
+        (return (call $rt.mkstr (local.get $o) (local.get $cnt)))))
+    ;; non-ASCII with a step: measure, then copy each code point's bytes
+    (local.set $ix (call $rt.str_index (local.get $s)))
+    (local.set $p (local.get $start))
+    (block $d1
+      (loop $l1
+        (br_if $d1 (i32.ge_s (local.get $k) (local.get $cnt)))
+        (local.set $len (i32.add (local.get $len)
+          (i32.sub (array.get $u32s (local.get $ix) (i32.add (local.get $p) (i32.const 1)))
+                   (array.get $u32s (local.get $ix) (local.get $p)))))
+        (local.set $p (i32.add (local.get $p) (local.get $step)))
+        (local.set $k (i32.add (local.get $k) (i32.const 1)))
+        (br $l1)))
+    (local.set $o (array.new_default $u8s (local.get $len)))
+    (local.set $p (local.get $start))
+    (local.set $k (i32.const 0))
+    (block $d2
+      (loop $l2
+        (br_if $d2 (i32.ge_s (local.get $k) (local.get $cnt)))
+        (local.set $a (array.get $u32s (local.get $ix) (local.get $p)))
+        (local.set $b (i32.sub (array.get $u32s (local.get $ix) (i32.add (local.get $p) (i32.const 1))) (local.get $a)))
+        (array.copy $u8s $u8s (local.get $o) (local.get $pos) (local.get $src) (local.get $a) (local.get $b))
+        (local.set $pos (i32.add (local.get $pos) (local.get $b)))
+        (local.set $p (i32.add (local.get $p) (local.get $step)))
+        (local.set $k (i32.add (local.get $k) (i32.const 1)))
+        (br $l2)))
+    (call $rt.mkstr (local.get $o) (local.get $cnt)))
+
+  ;; bytes [a, b) of s, both on code point boundaries
+  (func $rt.bsub (param $s (ref $str)) (param $a i32) (param $b i32) (result (ref $str))
+    (local $o (ref $u8s)) (local $n i32)
+    (local.set $n (i32.sub (local.get $b) (local.get $a)))
+    (if (i32.eq (local.get $n) (call $rt.blen (local.get $s))) (then (return (local.get $s))))
+    (if (i32.le_s (local.get $n) (i32.const 0)) (then (return (str.lit ""))))
+    (if (i32.eq (local.get $n) (call $rt.wat (local.get $s) (local.get $a)))  ;; a single character
+      (then (return (call $rt.char_at (local.get $s) (local.get $a)))))
+    (local.set $o (array.new_default $u8s (local.get $n)))
+    (array.copy $u8s $u8s (local.get $o) (i32.const 0) (struct.get $str $bytes (local.get $s)) (local.get $a) (local.get $n))
+    (call $rt.mkstr (local.get $o)
+      (select (local.get $n) (i32.const -1)
+              (i32.eq (struct.get $str $cp (local.get $s)) (call $rt.blen (local.get $s))))))
+
+  ;; ---- search ----
+  ;; UTF-8 is self-synchronizing: a byte-level match of valid UTF-8 always
+  ;; starts and ends on code point boundaries, so searching bytes is exact.
+
+  ;; does n occur in h at byte p?
+  (func $rt.bmatch (param $h (ref $str)) (param $p i32) (param $n (ref $str)) (result i32)
+    (local $a (ref $u8s)) (local $b (ref $u8s)) (local $j i32) (local $m i32)
+    (local.set $a (struct.get $str $bytes (local.get $h)))
+    (local.set $b (struct.get $str $bytes (local.get $n)))
+    (local.set $m (array.len (local.get $b)))
+    (if (i32.lt_s (local.get $p) (i32.const 0)) (then (return (i32.const 0))))
+    (if (i32.gt_s (i32.add (local.get $p) (local.get $m)) (array.len (local.get $a))) (then (return (i32.const 0))))
+    (block $done
+      (loop $l
+        (br_if $done (i32.ge_u (local.get $j) (local.get $m)))
+        (if (i32.ne (array.get_u $u8s (local.get $a) (i32.add (local.get $p) (local.get $j)))
+                    (array.get_u $u8s (local.get $b) (local.get $j)))
+          (then (return (i32.const 0))))
+        (local.set $j (i32.add (local.get $j) (i32.const 1)))
+        (br $l)))
+    (i32.const 1))
+
+  ;; first byte offset p in [from, to - len(n)] where n occurs in h, or -1
+  (func $rt.bfind (param $h (ref $str)) (param $n (ref $str)) (param $from i32) (param $to i32) (result i32)
+    (local $a (ref $u8s)) (local $m i32) (local $last i32) (local $first i32)
+    (local.set $a (struct.get $str $bytes (local.get $h)))
+    (local.set $m (call $rt.blen (local.get $n)))
+    (if (i32.eqz (local.get $m))
+      (then (return (select (local.get $from) (i32.const -1) (i32.le_s (local.get $from) (local.get $to))))))
+    (local.set $last (i32.sub (local.get $to) (local.get $m)))
+    (local.set $first (call $rt.byte (local.get $n) (i32.const 0)))
+    (block $none
+      (loop $scan
+        (br_if $none (i32.gt_s (local.get $from) (local.get $last)))
+        (if (i32.eq (array.get_u $u8s (local.get $a) (local.get $from)) (local.get $first))
+          (then (if (call $rt.bmatch (local.get $h) (local.get $from) (local.get $n))
+                  (then (return (local.get $from))))))
+        (local.set $from (i32.add (local.get $from) (i32.const 1)))
+        (br $scan)))
+    (i32.const -1))
+
+  ;; last byte offset p in [from, to - len(n)] where n occurs in h, or -1
+  (func $rt.brfind (param $h (ref $str)) (param $n (ref $str)) (param $from i32) (param $to i32) (result i32)
+    (local $p i32)
+    (if (i32.eqz (call $rt.blen (local.get $n)))
+      (then (return (select (local.get $to) (i32.const -1) (i32.le_s (local.get $from) (local.get $to))))))
+    (local.set $p (i32.sub (local.get $to) (call $rt.blen (local.get $n))))
+    (block $none
+      (loop $scan
+        (br_if $none (i32.lt_s (local.get $p) (local.get $from)))
+        (if (call $rt.bmatch (local.get $h) (local.get $p) (local.get $n)) (then (return (local.get $p))))
+        (local.set $p (i32.sub (local.get $p) (i32.const 1)))
+        (br $scan)))
+    (i32.const -1))
+
+  ;; sub in s
+  (func $rt.str_contains (param $s (ref $str)) (param $sub (ref $str)) (result i32)
+    (i32.ge_s (call $rt.bfind (local.get $s) (local.get $sub) (i32.const 0) (call $rt.blen (local.get $s))) (i32.const 0)))
+
+  ;; s * k
+  (func $rt.str_repeat (param $s (ref $str)) (param $k i32) (result (ref $str))
+    (local $a (ref $u8s)) (local $n i32) (local $o (ref $u8s)) (local $i i32) (local $total i64) (local $cp i32)
+    (if (i32.le_s (local.get $k) (i32.const 0)) (then (return (str.lit ""))))
+    (if (i32.eq (local.get $k) (i32.const 1)) (then (return (local.get $s))))
+    (local.set $a (struct.get $str $bytes (local.get $s)))
+    (local.set $n (array.len (local.get $a)))
+    (if (i32.eqz (local.get $n)) (then (return (local.get $s))))
+    (local.set $total (i64.mul (i64.extend_i32_u (local.get $n)) (i64.extend_i32_u (local.get $k))))
+    (if (i64.gt_u (local.get $total) (i64.const 0x7FFFFFFF))
+      (then (throw $snek.exc (call $OverflowError.__new__ (str.lit "repeated string is too long")))))
+    (local.set $o (array.new_default $u8s (i32.wrap_i64 (local.get $total))))
+    (block $d
+      (loop $l
+        (br_if $d (i32.ge_u (local.get $i) (local.get $k)))
+        (array.copy $u8s $u8s (local.get $o) (i32.mul (local.get $i) (local.get $n)) (local.get $a) (i32.const 0) (local.get $n))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $l)))
+    (local.set $cp (struct.get $str $cp (local.get $s)))
+    (call $rt.mkstr (local.get $o)
+      (select (i32.mul (local.get $cp) (local.get $k)) (i32.const -1) (i32.ge_s (local.get $cp) (i32.const 0)))))
+
+  ;; ---- string builder (used by the str methods in builtins.py) ----
+
+  (func $rt.buf_new (param $cap i32) (result (ref $buf))
+    (struct.new $buf
+      (array.new_default $u8s (select (local.get $cap) (i32.const 8) (i32.gt_s (local.get $cap) (i32.const 8))))
+      (i32.const 0) (i32.const 0)))
+
+  ;; the data array, with room for `extra` more bytes
+  (func $rt.buf_room (param $b (ref $buf)) (param $extra i32) (result (ref $u8s))
+    (local $d (ref $u8s)) (local $need i32) (local $cap i32) (local $g (ref $u8s))
+    (local.set $d (struct.get $buf $b (local.get $b)))
+    (local.set $need (i32.add (struct.get $buf $n (local.get $b)) (local.get $extra)))
+    (if (i32.le_u (local.get $need) (array.len (local.get $d))) (then (return (local.get $d))))
+    (local.set $cap (i32.shl (array.len (local.get $d)) (i32.const 1)))
+    (if (i32.lt_u (local.get $cap) (local.get $need)) (then (local.set $cap (local.get $need))))
+    (local.set $g (array.new_default $u8s (local.get $cap)))
+    (array.copy $u8s $u8s (local.get $g) (i32.const 0) (local.get $d) (i32.const 0) (struct.get $buf $n (local.get $b)))
+    (struct.set $buf $b (local.get $b) (local.get $g))
+    (local.get $g))
+
+  (func $rt.buf_add_cps (param $b (ref $buf)) (param $k i32)
+    (struct.set $buf $cp (local.get $b) (call $rt.cp_sum (struct.get $buf $cp (local.get $b)) (local.get $k))))
+
+  (func $rt.buf_cp (param $b (ref $buf)) (param $cp i32)
+    (local $d (ref $u8s))
+    (local.set $d (call $rt.buf_room (local.get $b) (i32.const 4)))
+    (struct.set $buf $n (local.get $b) (call $rt.enc (local.get $d) (struct.get $buf $n (local.get $b)) (local.get $cp)))
+    (call $rt.buf_add_cps (local.get $b) (i32.const 1)))
+
+  ;; append bytes [x, y) of s (on code point boundaries)
+  (func $rt.buf_sub (param $b (ref $buf)) (param $s (ref $str)) (param $x i32) (param $y i32)
+    (local $d (ref $u8s)) (local $k i32)
+    (local.set $k (i32.sub (local.get $y) (local.get $x)))
+    (local.set $d (call $rt.buf_room (local.get $b) (local.get $k)))
+    (array.copy $u8s $u8s (local.get $d) (struct.get $buf $n (local.get $b))
+                (struct.get $str $bytes (local.get $s)) (local.get $x) (local.get $k))
+    (struct.set $buf $n (local.get $b) (i32.add (struct.get $buf $n (local.get $b)) (local.get $k)))
+    ;; exact for ASCII sources; otherwise the result counts itself if asked
+    (call $rt.buf_add_cps (local.get $b)
+      (select (local.get $k) (i32.const -1)
+              (i32.eq (struct.get $str $cp (local.get $s)) (call $rt.blen (local.get $s))))))
+
+  (func $rt.buf_str (param $b (ref $buf)) (param $s (ref $str))
+    (local $d (ref $u8s)) (local $k i32)
+    (local.set $k (call $rt.blen (local.get $s)))
+    (local.set $d (call $rt.buf_room (local.get $b) (local.get $k)))
+    (array.copy $u8s $u8s (local.get $d) (struct.get $buf $n (local.get $b))
+                (struct.get $str $bytes (local.get $s)) (i32.const 0) (local.get $k))
+    (struct.set $buf $n (local.get $b) (i32.add (struct.get $buf $n (local.get $b)) (local.get $k)))
+    (call $rt.buf_add_cps (local.get $b) (struct.get $str $cp (local.get $s))))
+
+  (func $rt.buf_done (param $b (ref $buf)) (result (ref $str))
+    (local $d (ref $u8s)) (local $n i32) (local $o (ref $u8s))
+    (local.set $d (struct.get $buf $b (local.get $b)))
+    (local.set $n (struct.get $buf $n (local.get $b)))
+    (if (i32.eq (local.get $n) (array.len (local.get $d)))
+      (then (return (call $rt.mkstr (local.get $d) (struct.get $buf $cp (local.get $b))))))
+    (local.set $o (array.new_default $u8s (local.get $n)))
+    (array.copy $u8s $u8s (local.get $o) (i32.const 0) (local.get $d) (i32.const 0) (local.get $n))
+    (call $rt.mkstr (local.get $o) (struct.get $buf $cp (local.get $b))))
+
+  ;; ---- Unicode properties ----
+  ;; Tables are generated per program by snekc/unicode.py and cover only the
+  ;; code points the program can produce. Flag bits match unicode.py:
+  ;; NONPRINT 1, SPACE 2, ALPHA 4, DECIMAL 8, DIGIT 16, NUMERIC 32, UPPER 64,
+  ;; LOWER 128, TITLE 256, XID_START 512, XID_CONTINUE 1024, CASE_IGNORABLE 2048.
+
+  (global $rt.ua (mut (ref null $u16s)) (ref.null $u16s))
+  (global $rt.uf (mut (ref null $u32s)) (ref.null $u32s))
+  (global $rt.uc (mut (ref null $u32s)) (ref.null $u32s))
+  (global $rt.usp (mut (ref null $u32s)) (ref.null $u32s))
+  (global $rt.uz (mut (ref null $u32s)) (ref.null $u32s))
+
+  (func $rt.flags (param $cp i32) (result i32)
+    (if (i32.lt_u (local.get $cp) (i32.const 128))
+      (then
+        (if (ref.is_null (global.get $rt.ua))
+          (then (global.set $rt.ua (array.new_data $u16s $uascii (i32.const 0) (i32.const 128)))))
+        (return (array.get_u $u16s (ref.as_non_null (global.get $rt.ua)) (local.get $cp)))))
+    (call $rt.flags_hi (local.get $cp)))
+
+  ;; flags of a code point >= 128 (callers that never ask about ASCII use this
+  ;; directly, so the ASCII table stays out of their modules)
+  (func $rt.flags_hi (param $cp i32) (result i32)
+    (local $t (ref $u32s)) (local $lo i32) (local $hi i32) (local $mid i32)
+    (if (i32.eqz (global.get $rt.uf.n)) (then (return (i32.const 0))))
+    (if (ref.is_null (global.get $rt.uf))
+      (then (global.set $rt.uf (array.new_data $u32s $uflags (i32.const 0) (i32.shl (global.get $rt.uf.n) (i32.const 1))))))
+    (local.set $t (ref.as_non_null (global.get $rt.uf)))
+    ;; the last run starting at or before cp
+    (local.set $hi (global.get $rt.uf.n))
+    (block $done
+      (loop $l
+        (br_if $done (i32.ge_u (i32.add (local.get $lo) (i32.const 1)) (local.get $hi)))
+        (local.set $mid (i32.shr_u (i32.add (local.get $lo) (local.get $hi)) (i32.const 1)))
+        (if (i32.le_u (array.get $u32s (local.get $t) (i32.shl (local.get $mid) (i32.const 1))) (local.get $cp))
+          (then (local.set $lo (local.get $mid)))
+          (else (local.set $hi (local.get $mid))))
+        (br $l)))
+    (array.get $u32s (local.get $t) (i32.add (i32.shl (local.get $lo) (i32.const 1)) (i32.const 1))))
+
+  (func $rt.has (param $cp i32) (param $mask i32) (result i32)
+    (i32.ne (i32.and (call $rt.flags (local.get $cp)) (local.get $mask)) (i32.const 0)))
+
+  ;; every code point has one of the flags (False for "")
+  (func $rt.all_flags (param $s (ref $str)) (param $mask i32) (result i32)
+    (local $i i32) (local $n i32) (local $cp i32)
+    (local.set $n (call $rt.blen (local.get $s)))
+    (if (i32.eqz (local.get $n)) (then (return (i32.const 0))))
+    (block $d
+      (loop $l
+        (br_if $d (i32.ge_u (local.get $i) (local.get $n)))
+        (local.set $cp (call $rt.dec (local.get $s) (local.get $i)))
+        (if (i32.eqz (call $rt.has (local.get $cp) (local.get $mask))) (then (return (i32.const 0))))
+        (local.set $i (i32.add (local.get $i) (call $rt.cpw (local.get $cp))))
+        (br $l)))
+    (i32.const 1))
+
+  ;; some code point has one of the flags
+  (func $rt.any_flags (param $s (ref $str)) (param $mask i32) (result i32)
+    (local $i i32) (local $n i32) (local $cp i32)
+    (local.set $n (call $rt.blen (local.get $s)))
+    (block $d
+      (loop $l
+        (br_if $d (i32.ge_u (local.get $i) (local.get $n)))
+        (local.set $cp (call $rt.dec (local.get $s) (local.get $i)))
+        (if (call $rt.has (local.get $cp) (local.get $mask)) (then (return (i32.const 1))))
+        (local.set $i (i32.add (local.get $i) (call $rt.cpw (local.get $cp))))
+        (br $l)))
+    (i32.const 0))
+
+  ;; decimal digit value of cp, or -1 (int() accepts every Unicode decimal digit)
+  (func $rt.decimal (param $cp i32) (result i32)
+    (local $t (ref $u32s)) (local $lo i32) (local $hi i32) (local $mid i32)
+    (if (i32.lt_u (local.get $cp) (i32.const 128))
+      (then (return (select (i32.sub (local.get $cp) (i32.const 48)) (i32.const -1)
+                            (i32.lt_u (i32.sub (local.get $cp) (i32.const 48)) (i32.const 10))))))
+    (if (i32.eqz (i32.and (call $rt.flags_hi (local.get $cp)) (i32.const 8))) (then (return (i32.const -1))))  ;; DECIMAL
+    (if (ref.is_null (global.get $rt.uz))
+      (then (global.set $rt.uz (array.new_data $u32s $uzeros (i32.const 0) (global.get $rt.uz.n)))))
+    (local.set $t (ref.as_non_null (global.get $rt.uz)))
+    ;; the last zero digit at or before cp: digits come in runs of ten
+    (local.set $hi (array.len (local.get $t)))
+    (block $done
+      (loop $l
+        (br_if $done (i32.ge_u (i32.add (local.get $lo) (i32.const 1)) (local.get $hi)))
+        (local.set $mid (i32.shr_u (i32.add (local.get $lo) (local.get $hi)) (i32.const 1)))
+        (if (i32.le_u (array.get $u32s (local.get $t) (local.get $mid)) (local.get $cp))
+          (then (local.set $lo (local.get $mid)))
+          (else (local.set $hi (local.get $mid))))
+        (br $l)))
+    (i32.sub (local.get $cp) (array.get $u32s (local.get $t) (local.get $lo))))
+
+  ;; Append the full case mapping of cp; kind 0 upper, 1 lower, 2 title,
+  ;; 3 casefold. ($ucases starts with the run count of each kind, then the
+  ;; runs, 4 words each: start, end, stride, delta. Stride 0 maps to several
+  ;; code points: delta is (offset << 2) | count into $uspecial.)
+  (func $rt.buf_case (param $b (ref $buf)) (param $cp i32) (param $kind i32)
+    (local $t (ref $u32s)) (local $base i32) (local $lo i32) (local $hi i32) (local $mid i32) (local $k i32)
+    (local $start i32) (local $stride i32) (local $d i32) (local $sp (ref $u32s))
+    (if (i32.lt_u (local.get $cp) (i32.const 128))
+      (then
+        (if (i32.and (i32.lt_u (i32.sub (local.get $cp) (i32.const 97)) (i32.const 26))
+                     (i32.eqz (i32.and (local.get $kind) (i32.const 1))))
+          (then (local.set $cp (i32.sub (local.get $cp) (i32.const 32)))))
+        (if (i32.and (i32.lt_u (i32.sub (local.get $cp) (i32.const 65)) (i32.const 26))
+                     (i32.and (local.get $kind) (i32.const 1)))
+          (then (local.set $cp (i32.add (local.get $cp) (i32.const 32)))))
+        (call $rt.buf_cp (local.get $b) (local.get $cp))
+        (return)))
+    (if (ref.is_null (global.get $rt.uc))
+      (then (global.set $rt.uc (array.new_data $u32s $ucases (i32.const 0) (global.get $rt.uc.n)))))
+    (local.set $t (ref.as_non_null (global.get $rt.uc)))
+    (local.set $base (i32.const 4))
+    (block $d0
+      (loop $l0
+        (br_if $d0 (i32.ge_u (local.get $k) (local.get $kind)))
+        (local.set $base (i32.add (local.get $base) (i32.shl (array.get $u32s (local.get $t) (local.get $k)) (i32.const 2))))
+        (local.set $k (i32.add (local.get $k) (i32.const 1)))
+        (br $l0)))
+    (local.set $hi (array.get $u32s (local.get $t) (local.get $kind)))
+    (if (i32.eqz (local.get $hi)) (then (call $rt.buf_cp (local.get $b) (local.get $cp)) (return)))
+    (block $d1
+      (loop $l1
+        (br_if $d1 (i32.ge_u (i32.add (local.get $lo) (i32.const 1)) (local.get $hi)))
+        (local.set $mid (i32.shr_u (i32.add (local.get $lo) (local.get $hi)) (i32.const 1)))
+        (if (i32.le_u (array.get $u32s (local.get $t) (i32.add (local.get $base) (i32.shl (local.get $mid) (i32.const 2))))
+                      (local.get $cp))
+          (then (local.set $lo (local.get $mid)))
+          (else (local.set $hi (local.get $mid))))
+        (br $l1)))
+    (local.set $k (i32.add (local.get $base) (i32.shl (local.get $lo) (i32.const 2))))
+    (local.set $start (array.get $u32s (local.get $t) (local.get $k)))
+    (if (i32.or (i32.lt_u (local.get $cp) (local.get $start))
+                (i32.ge_u (local.get $cp) (array.get $u32s (local.get $t) (i32.add (local.get $k) (i32.const 1)))))
+      (then (call $rt.buf_cp (local.get $b) (local.get $cp)) (return)))
+    (local.set $stride (array.get $u32s (local.get $t) (i32.add (local.get $k) (i32.const 2))))
+    (local.set $d (array.get $u32s (local.get $t) (i32.add (local.get $k) (i32.const 3))))
+    (if (i32.eqz (local.get $stride))
+      (then
+        (if (ref.is_null (global.get $rt.usp))
+          (then (global.set $rt.usp (array.new_data $u32s $uspecial (i32.const 0) (global.get $rt.usp.n)))))
+        (local.set $sp (ref.as_non_null (global.get $rt.usp)))
+        (local.set $k (i32.shr_u (local.get $d) (i32.const 2)))
+        (local.set $d (i32.add (local.get $k) (i32.and (local.get $d) (i32.const 3))))
+        (block $d2
+          (loop $l2
+            (br_if $d2 (i32.ge_u (local.get $k) (local.get $d)))
+            (call $rt.buf_cp (local.get $b) (array.get $u32s (local.get $sp) (local.get $k)))
+            (local.set $k (i32.add (local.get $k) (i32.const 1)))
+            (br $l2)))
+        (return)))
+    (if (i32.eqz (i32.rem_u (i32.sub (local.get $cp) (local.get $start)) (local.get $stride)))
+      (then (local.set $cp (i32.add (local.get $cp) (local.get $d)))))
+    (call $rt.buf_cp (local.get $b) (local.get $cp)))
+
+  ;; ---- concatenation, comparison, hashing ----
 
   (func $rt.str_concat (param $x (ref $str)) (param $y (ref $str)) (result (ref $str))
     (local $a (ref $u8s)) (local $b (ref $u8s)) (local $r (ref $u8s)) (local $n i32)
@@ -94,19 +736,20 @@
     (local.set $r (array.new_default $u8s (i32.add (local.get $n) (array.len (local.get $b)))))
     (array.copy $u8s $u8s (local.get $r) (i32.const 0) (local.get $a) (i32.const 0) (local.get $n))
     (array.copy $u8s $u8s (local.get $r) (local.get $n) (local.get $b) (i32.const 0) (array.len (local.get $b)))
-    (struct.new $str (local.get $r) (i32.const 0)))
+    (call $rt.mkstr (local.get $r) (call $rt.cp_sum (struct.get $str $cp (local.get $x)) (struct.get $str $cp (local.get $y)))))
 
   ;; a + b + c ... and f-strings: one exact-size allocation and one copy per
   ;; part, instead of re-copying the growing prefix at every `+`.
   (func $rt.str_concat_n (param $parts (ref $strs)) (result (ref $str))
-    (local $i i32) (local $n i32) (local $len i32) (local $pos i32)
-    (local $r (ref $u8s)) (local $a (ref $u8s))
+    (local $i i32) (local $n i32) (local $len i32) (local $pos i32) (local $cp i32)
+    (local $r (ref $u8s)) (local $a (ref $u8s)) (local $p (ref $str))
     (local.set $n (array.len (local.get $parts)))
     (block $d1
       (loop $l1
         (br_if $d1 (i32.ge_u (local.get $i) (local.get $n)))
-        (local.set $len (i32.add (local.get $len)
-          (array.len (struct.get $str $bytes (array.get $strs (local.get $parts) (local.get $i))))))
+        (local.set $p (array.get $strs (local.get $parts) (local.get $i)))
+        (local.set $len (i32.add (local.get $len) (call $rt.blen (local.get $p))))
+        (local.set $cp (call $rt.cp_sum (local.get $cp) (struct.get $str $cp (local.get $p))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $l1)))
     (local.set $r (array.new_default $u8s (local.get $len)))
@@ -119,7 +762,7 @@
         (local.set $pos (i32.add (local.get $pos) (array.len (local.get $a))))
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $l2)))
-    (struct.new $str (local.get $r) (i32.const 0)))
+    (call $rt.mkstr (local.get $r) (local.get $cp)))
 
   (func $rt.str_eq (param $x (ref $str)) (param $y (ref $str)) (result i32)
     (local $a (ref $u8s)) (local $b (ref $u8s)) (local $i i32) (local $n i32)
@@ -137,6 +780,11 @@
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $l)))
     (i32.const 1))
+
+  (func $rt.opt_str_eq (param $x (ref null $str)) (param $y (ref null $str)) (result i32)
+    (if (ref.is_null (local.get $x)) (then (return (ref.is_null (local.get $y)))))
+    (if (ref.is_null (local.get $y)) (then (return (i32.const 0))))
+    (call $rt.str_eq (ref.as_non_null (local.get $x)) (ref.as_non_null (local.get $y))))
 
   ;; Bytewise comparison. For valid UTF-8 this is code point order, which is
   ;; also what CPython uses for str < str.
@@ -206,7 +854,7 @@
       (local.set $u (i64.div_u (local.get $u) (i64.const 10)))
       (br_if $l (i64.ne (local.get $u) (i64.const 0))))
     (if (local.get $neg) (then (array.set $u8s (local.get $out) (i32.const 0) (i32.const 45))))
-    (struct.new $str (local.get $out) (i32.const 0)))
+    (call $rt.mkstr (local.get $out) (array.len (local.get $out))))
 
   (func $rt.pow10 (param $n i32) (result f64)
     (local $r f64)
@@ -388,7 +1036,7 @@
           (i32.add (i32.const 48) (i32.rem_u (local.get $ae) (i32.const 10)))))))
     (local.set $r (array.new_default $u8s (local.get $op)))
     (array.copy $u8s $u8s (local.get $r) (i32.const 0) (local.get $o) (i32.const 0) (local.get $op))
-    (struct.new $str (local.get $r) (i32.const 0)))
+    (call $rt.mkstr (local.get $r) (local.get $op)))
 
   ;; ---- Python division semantics ---------------------------------------
   ;; // floors and % takes the sign of the divisor; Wasm's div_s/rem_s
@@ -499,33 +1147,7 @@
   ;; CPython's quoting: single quotes unless the text contains ' and no ", with
   ;; \\ \n \r \t escaped, other ASCII controls as \xNN, and every non-printable
   ;; code point (str.isprintable() is False) as \xNN, \uNNNN or \UNNNNNNNN.
-  ;;
-  ;; Printability needs Unicode tables, but a snek program has no input: every
-  ;; string it can build comes from its own literals, numbers and class names.
-  ;; So the compiler emits only the non-printable code points that occur in
-  ;; the program's literals, as a sorted table ($nonprint, $rt.np.n entries),
-  ;; which is usually empty.
-
-  (global $rt.np.cache (mut (ref null $u32s)) (ref.null $u32s))
-
-  (func $rt.nonprint (param $cp i32) (result i32)
-    (local $t (ref $u32s)) (local $lo i32) (local $hi i32) (local $mid i32) (local $v i32)
-    (if (i32.eqz (global.get $rt.np.n)) (then (return (i32.const 0))))
-    (if (ref.is_null (global.get $rt.np.cache))
-      (then (global.set $rt.np.cache (array.new_data $u32s $nonprint (i32.const 0) (global.get $rt.np.n)))))
-    (local.set $t (ref.as_non_null (global.get $rt.np.cache)))
-    (local.set $hi (array.len (local.get $t)))
-    (block $done
-      (loop $search
-        (br_if $done (i32.ge_u (local.get $lo) (local.get $hi)))
-        (local.set $mid (i32.shr_u (i32.add (local.get $lo) (local.get $hi)) (i32.const 1)))
-        (local.set $v (array.get $u32s (local.get $t) (local.get $mid)))
-        (if (i32.eq (local.get $v) (local.get $cp)) (then (return (i32.const 1))))
-        (if (i32.lt_u (local.get $v) (local.get $cp))
-          (then (local.set $lo (i32.add (local.get $mid) (i32.const 1))))
-          (else (local.set $hi (local.get $mid))))
-        (br $search)))
-    (i32.const 0))
+  ;; Printability comes from the per-program Unicode table (NONPRINT flag).
 
   (func $rt.hexdigit (param $d i32) (result i32)
     (i32.add (local.get $d) (select (i32.const 87) (i32.const 48) (i32.ge_u (local.get $d) (i32.const 10)))))
@@ -570,25 +1192,13 @@
       (loop $l2
         (br_if $d2 (i32.ge_u (local.get $i) (local.get $n)))
         (local.set $c (array.get_u $u8s (local.get $a) (local.get $i)))
+        (local.set $k (i32.const 1))
         (block $next
           (if (i32.ge_u (local.get $c) (i32.const 0x80))
             (then
-              ;; decode one UTF-8 sequence (literals are valid UTF-8; the checker rejects surrogates)
-              (local.set $k (select (i32.const 4) (select (i32.const 3) (i32.const 2)
-                                                          (i32.ge_u (local.get $c) (i32.const 0xE0)))
-                                    (i32.ge_u (local.get $c) (i32.const 0xF0))))
-              (local.set $cp (i32.and (local.get $c) (select (i32.const 0x07) (select (i32.const 0x0F) (i32.const 0x1F)
-                                                          (i32.eq (local.get $k) (i32.const 3)))
-                                                          (i32.eq (local.get $k) (i32.const 4)))))
-              (local.set $c (i32.const 1))
-              (block $dd
-                (loop $dl
-                  (br_if $dd (i32.ge_u (local.get $c) (local.get $k)))
-                  (local.set $cp (i32.or (i32.shl (local.get $cp) (i32.const 6))
-                    (i32.and (array.get_u $u8s (local.get $a) (i32.add (local.get $i) (local.get $c))) (i32.const 0x3F))))
-                  (local.set $c (i32.add (local.get $c) (i32.const 1)))
-                  (br $dl)))
-              (if (call $rt.nonprint (local.get $cp))
+              (local.set $cp (call $rt.dec (local.get $s) (local.get $i)))
+              (local.set $k (call $rt.u8w (local.get $c)))
+              (if (i32.and (call $rt.flags_hi (local.get $cp)) (i32.const 1))  ;; NONPRINT
                 (then
                   (local.set $pos
                     (if (result i32) (i32.le_u (local.get $cp) (i32.const 0xFF))
@@ -599,7 +1209,6 @@
                 (else
                   (array.copy $u8s $u8s (local.get $o) (local.get $pos) (local.get $a) (local.get $i) (local.get $k))
                   (local.set $pos (i32.add (local.get $pos) (local.get $k)))))
-              (local.set $i (i32.add (local.get $i) (i32.sub (local.get $k) (i32.const 1))))
               (br $next)))
           (if (i32.or (i32.eq (local.get $c) (local.get $q)) (i32.eq (local.get $c) (i32.const 92)))
             (then (local.set $pos (call $rt.put2 (local.get $o) (local.get $pos) (local.get $c))) (br $next)))
@@ -614,12 +1223,14 @@
               (local.set $pos (call $rt.put_escape (local.get $o) (local.get $pos) (i32.const 120) (local.get $c) (i32.const 2)))
               (br $next)))
           (local.set $pos (call $rt.put (local.get $o) (local.get $pos) (local.get $c))))
-        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (local.set $i (i32.add (local.get $i) (local.get $k)))
         (br $l2)))
     (local.set $pos (call $rt.put (local.get $o) (local.get $pos) (local.get $q)))
     (local.set $r (array.new_default $u8s (local.get $pos)))
     (array.copy $u8s $u8s (local.get $r) (i32.const 0) (local.get $o) (i32.const 0) (local.get $pos))
-    (struct.new $str (local.get $r) (i32.const 0)))
+    ;; escapes are ASCII, so an ASCII string has an ASCII repr
+    (call $rt.mkstr (local.get $r)
+      (select (local.get $pos) (i32.const -1) (i32.eq (struct.get $str $cp (local.get $s)) (local.get $n)))))
 
   (func $rt.opt_str_repr (param $s (ref null $str)) (result (ref $str))
     (if (result (ref $str)) (ref.is_null (local.get $s))
@@ -639,6 +1250,18 @@
     (if (ref.test (ref $KeyError) (local.get $e))
       (then (return (call $rt.str_repr (ref.as_non_null (local.get $m))))))
     (ref.as_non_null (local.get $m)))
+
+  ;; repr(e): Name('message'), or Name() without one
+  (func $rt.exc_repr (param $e (ref $BaseException)) (result (ref $str))
+    (local $m (ref null $str))
+    (local.set $m (struct.get $BaseException $__message (local.get $e)))
+    (call $rt.str_concat_n (array.new_fixed $strs 4
+      (struct.get $BaseException.vt $__name__ (struct.get $BaseException $__vt__ (local.get $e)))
+      (str.lit "(")
+      (if (result (ref $str)) (ref.is_null (local.get $m))
+        (then (str.lit ""))
+        (else (call $rt.str_repr (ref.as_non_null (local.get $m)))))
+      (str.lit ")"))))
 
   ;; An exception escaped the program: print `Name: message` (CPython's last
   ;; traceback line, just `Name` when str(e) is empty) to stderr and exit 1.

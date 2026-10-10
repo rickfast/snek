@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .types import ClassInfo, FieldInfo, MethodInfo, Type
+from .unicode import UnicodeUse
 
 # ---- expressions ------------------------------------------------------------
 
@@ -158,6 +159,15 @@ class ListPop(Expr):
 class ListAppend(Expr):
     lst: Expr
     value: Expr
+
+
+@dataclass
+class ListOp(Expr):
+    """A per-element-type list runtime helper, $list.<T>.<op>(lst, *args), e.g. slice, insert, eq."""
+
+    op: str
+    lst: Expr
+    args: list[Expr]
 
 
 @dataclass
@@ -322,3 +332,4 @@ class Module:
     funcs: list[Func]
     classes: list[ClassInfo]  # supertypes before subtypes
     main: str
+    unicode: UnicodeUse = field(default_factory=UnicodeUse)  # which Unicode tables to embed

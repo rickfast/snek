@@ -111,8 +111,11 @@ The IR is the seam. A binary encoder, a component-model back end, or a Rust port
   - An uncaught exception reports CPython's last traceback line and exits 1.
 - **Functions.** Default values (literals) and keyword arguments, with CPython's evaluation order.
 - **Optionals and narrowing.** `T | None` works for reference types. Locals narrow after `is None` and `is not None` checks, `isinstance`, `assert`, early exits, `except ... as`, and inside `and`/`or` and conditional expressions.
-- **Strings.** UTF-8 `str` with literals, concatenation, comparison, f-strings, and `str()` of numbers, bools, exceptions and lists. List elements print with `repr`.
-- **Lists.** `list[T]` is monomorphized per element type. It supports literals, indexing (including negative indices), `append`, `pop`, `len`, iteration and nesting. `list[bool]` uses a packed i8 array.
+- **Strings.** UTF-8 `str` with CPython's code-point semantics: `len`, indexing, slicing, iteration and `in` count code points, with an ASCII fast path.
+  - The common methods: `split`/`rsplit`/`splitlines`, `join`, `strip` and friends, `find`/`index`/`count`, `replace`, `startswith`/`endswith`, `upper`/`lower`/`title`/`casefold`, the `is…()` checks, `ljust`/`center`/`zfill` and more.
+  - Unicode-correct, with tables embedded per program: `"straße".upper()` is `"STRASSE"`, and `i32("٤٢")` is 42.
+  - f-strings (with `!r`), `repr()`, `ord()`, `chr()`, `s * n`, and `str()` of numbers, bools, exceptions and lists.
+- **Lists.** `list[T]` is monomorphized per element type: literals, indexing, slicing, iteration, nesting, `in`, `+`, `*`, `==`, and `append`, `pop`, `insert`, `extend`, `remove`, `index`, `count`, `reverse`, `clear`, `copy`. `list[bool]` uses a packed i8 array.
 - **Control flow.** `if`/`elif`/`else`, `while`, `for` over `range()` and lists, `break`, `continue`, `assert`, and recursion.
 
 ## Performance
@@ -133,7 +136,7 @@ The same six programs run on every runtime: calls, float loops, allocation, list
 ## Roadmap, roughly in order
 
 1. **`dict[K, V]` and tuples.** Open addressing keyed off the cached string hash; tuples as immutable structs. `KeyError` is ready for it.
-2. **Strings.** Settle code-point versus byte indexing, then add iteration, slicing and methods.
+2. **`sorted`, `sum`, `min`/`max` over lists, and format specs in f-strings.**
 3. **Special methods.** `__eq__`, `__str__`, `__len__`, then `with` statements via `__enter__`/`__exit__`.
 4. **Generators and `async def`.** Lower both to state machines; `async def` targets WASI 0.3's callback-style async ABI.
 5. **Component model output.** Emit a component with WIT instead of preview1 imports, and adopt the GC canonical ABI once runtimes support it.
