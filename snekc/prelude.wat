@@ -96,6 +96,31 @@
     (array.copy $u8s $u8s (local.get $r) (local.get $n) (local.get $b) (i32.const 0) (array.len (local.get $b)))
     (struct.new $str (local.get $r) (i32.const 0)))
 
+  ;; a + b + c ... and f-strings: one exact-size allocation and one copy per
+  ;; part, instead of re-copying the growing prefix at every `+`.
+  (func $rt.str_concat_n (param $parts (ref $strs)) (result (ref $str))
+    (local $i i32) (local $n i32) (local $len i32) (local $pos i32)
+    (local $r (ref $u8s)) (local $a (ref $u8s))
+    (local.set $n (array.len (local.get $parts)))
+    (block $d1
+      (loop $l1
+        (br_if $d1 (i32.ge_u (local.get $i) (local.get $n)))
+        (local.set $len (i32.add (local.get $len)
+          (array.len (struct.get $str $bytes (array.get $strs (local.get $parts) (local.get $i))))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $l1)))
+    (local.set $r (array.new_default $u8s (local.get $len)))
+    (local.set $i (i32.const 0))
+    (block $d2
+      (loop $l2
+        (br_if $d2 (i32.ge_u (local.get $i) (local.get $n)))
+        (local.set $a (struct.get $str $bytes (array.get $strs (local.get $parts) (local.get $i))))
+        (array.copy $u8s $u8s (local.get $r) (local.get $pos) (local.get $a) (i32.const 0) (array.len (local.get $a)))
+        (local.set $pos (i32.add (local.get $pos) (array.len (local.get $a))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $l2)))
+    (struct.new $str (local.get $r) (i32.const 0)))
+
   (func $rt.str_eq (param $x (ref $str)) (param $y (ref $str)) (result i32)
     (local $a (ref $u8s)) (local $b (ref $u8s)) (local $i i32) (local $n i32)
     (if (ref.eq (local.get $x) (local.get $y)) (then (return (i32.const 1))))
@@ -161,26 +186,26 @@
       (then (str.lit "True"))
       (else (str.lit "False"))))
 
+  ;; Count the digits first so the bytes are allocated once, at their final size.
   (func $rt.i64_to_str (param $v i64) (result (ref $str))
-    (local $buf (ref $u8s)) (local $out (ref $u8s)) (local $pos i32) (local $u i64) (local $neg i32)
-    (local.set $buf (array.new_default $u8s (i32.const 20)))
-    (local.set $pos (i32.const 20))
+    (local $out (ref $u8s)) (local $n i32) (local $u i64) (local $t i64) (local $neg i32)
     (local.set $neg (i64.lt_s (local.get $v) (i64.const 0)))
     ;; 0 - INT64_MIN wraps to itself, which is 2^63 read as unsigned: correct.
     (local.set $u (select (i64.sub (i64.const 0) (local.get $v)) (local.get $v) (local.get $neg)))
+    (local.set $t (local.get $u))
+    (local.set $n (local.get $neg))
+    (loop $count
+      (local.set $n (i32.add (local.get $n) (i32.const 1)))
+      (local.set $t (i64.div_u (local.get $t) (i64.const 10)))
+      (br_if $count (i64.ne (local.get $t) (i64.const 0))))
+    (local.set $out (array.new_default $u8s (local.get $n)))
     (loop $l
-      (local.set $pos (i32.sub (local.get $pos) (i32.const 1)))
-      (array.set $u8s (local.get $buf) (local.get $pos)
+      (local.set $n (i32.sub (local.get $n) (i32.const 1)))
+      (array.set $u8s (local.get $out) (local.get $n)
         (i32.add (i32.const 48) (i32.wrap_i64 (i64.rem_u (local.get $u) (i64.const 10)))))
       (local.set $u (i64.div_u (local.get $u) (i64.const 10)))
       (br_if $l (i64.ne (local.get $u) (i64.const 0))))
-    (if (local.get $neg)
-      (then
-        (local.set $pos (i32.sub (local.get $pos) (i32.const 1)))
-        (array.set $u8s (local.get $buf) (local.get $pos) (i32.const 45))))
-    (local.set $out (array.new_default $u8s (i32.sub (i32.const 20) (local.get $pos))))
-    (array.copy $u8s $u8s (local.get $out) (i32.const 0) (local.get $buf) (local.get $pos)
-                (i32.sub (i32.const 20) (local.get $pos)))
+    (if (local.get $neg) (then (array.set $u8s (local.get $out) (i32.const 0) (i32.const 45))))
     (struct.new $str (local.get $out) (i32.const 0)))
 
   (func $rt.pow10 (param $n i32) (result f64)

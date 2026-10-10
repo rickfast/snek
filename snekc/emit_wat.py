@@ -257,6 +257,7 @@ class Emitter:
         lines = ["  (rec",
                  "    (type $u8s (array (mut i8)))",
                  "    (type $u32s (array i32))",
+                 "    (type $strs (array (ref $str)))",
                  "    (type $str (struct (field $bytes (ref $u8s)) (field $hash (mut i32))))"]
         done: set[str] = set()
         while len(done) < len(self.list_types):  # element types can register further list types
@@ -777,7 +778,20 @@ class Emitter:
         if isinstance(e, ir.StrLen):
             return f"(call $rt.str_len {self.ex(e.s)})"
         if isinstance(e, ir.StrConcat):
-            return f"(call $rt.str_concat {self.ex(e.left)} {self.ex(e.right)})"
+            # Flatten a + b + c (and f-strings, which lower to concat chains) into one
+            # n-ary concat: one allocation instead of one per `+`. Parts stay in order.
+            parts: list[ir.Expr] = []
+            stack: list[ir.Expr] = [e]
+            while stack:
+                x = stack.pop()
+                if isinstance(x, ir.StrConcat):
+                    stack += [x.right, x.left]
+                else:
+                    parts.append(x)
+            if len(parts) == 2:
+                return f"(call $rt.str_concat {self.ex(parts[0])} {self.ex(parts[1])})"
+            codes = "".join(" " + self.ex(p) for p in parts)
+            return f"(call $rt.str_concat_n (array.new_fixed $strs {len(parts)}{codes}))"
         if isinstance(e, ir.ToStr):
             if isinstance(e.operand.ty, ListT):
                 self.heap(e.operand.ty)
