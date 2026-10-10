@@ -56,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
     except CompileError as e:
         print(e.format(str(ns.src), source), file=sys.stderr)
         return 1
-    except driver.ToolError as e:
+    except (driver.ToolError, RuntimeError) as e:
         print(f"snekc: {e}", file=sys.stderr)
         return 2
 

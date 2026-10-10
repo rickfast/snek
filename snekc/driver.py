@@ -21,6 +21,7 @@ WASM_FEATURES = [
     "--enable-nontrapping-float-to-int",
     "--enable-sign-ext",
     "--enable-multivalue",
+    "--enable-exception-handling",
 ]
 
 

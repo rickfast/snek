@@ -1,7 +1,9 @@
 """Test runner.
 
   examples/*.py      differential: compiled Wasm must print exactly what CPython
-                     prints (with the snek shim) and exit with the same status.
+                     prints (with the snek shim) and exit with the same status;
+                     for an uncaught exception, the last stderr line (`Name:
+                     message`) must match too.
                      Each example runs both unoptimized and through wasm-opt -O3.
   tests/errors/*.py  must fail to compile; the first line `# error: <text>`
                      must appear in the error message.
@@ -46,7 +48,16 @@ def check_example(src: Path, tmp: Path) -> list[str]:
                             f"{got.stderr}")
         if (got.code == 0) != (expected.code == 0):
             failures.append(f"[{mode}] exit status {got.code}, cpython {expected.code}\n{got.stderr}")
+        elif expected.code != 0 and last_line(got.stderr) != last_line(expected.stderr):
+            # An uncaught exception: CPython's last traceback line is `Name: message`.
+            failures.append(f"[{mode}] uncaught exception differs\n  cpython: {last_line(expected.stderr)}\n"
+                            f"  wasm:    {last_line(got.stderr)}")
     return failures
+
+
+def last_line(text: str) -> str:
+    lines = text.strip().splitlines()
+    return lines[-1] if lines else ""
 
 
 def check_error(src: Path) -> list[str]:

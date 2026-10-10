@@ -95,6 +95,7 @@ class IfExpr(Expr):
     cond: Expr
     then: Expr
     else_: Expr
+    mixed_int: bool = False  # float-typed, but one branch is an int (CPython would keep the int)
 
 
 @dataclass
@@ -175,6 +176,22 @@ class ToStr(Expr):
     operand: Expr
 
 
+@dataclass
+class TypeName(Expr):
+    """type(x).__name__: read from the vtable, so it reflects the dynamic class."""
+
+    operand: Expr
+    cls: ClassInfo  # static class of operand
+
+
+@dataclass
+class Seq(Expr):
+    """Run stmts, then evaluate value (used to keep CPython's argument evaluation order)."""
+
+    stmts: list[Stmt]
+    value: Expr
+
+
 # ---- statements -------------------------------------------------------------
 
 
@@ -231,6 +248,18 @@ class Loop(Stmt):
 
 
 @dataclass
+class InlineBlock(Stmt):
+    """A base-class __init__ inlined by super().__init__(); ExitInline leaves it early."""
+
+    body: list[Stmt]
+
+
+@dataclass
+class ExitInline(Stmt):
+    """`return` inside an inlined base __init__: continue after the InlineBlock."""
+
+
+@dataclass
 class Break(Stmt):
     pass
 
@@ -243,11 +272,33 @@ class Continue(Stmt):
 @dataclass
 class Print(Stmt):
     args: list[Expr]  # already converted to str
+    sep: str = " "
+    end: str = "\n"
 
 
 @dataclass
-class Panic(Stmt):
-    msg: Expr
+class Raise(Stmt):
+    """throw. exc is None for a bare `raise`, which rethrows the exception held in reraise."""
+
+    exc: Expr | None
+    reraise: str | None = None
+
+
+@dataclass
+class Handler:
+    classes: list[ClassInfo] | None  # None: bare `except:` (catches everything)
+    var: str | None  # `as` name
+    var_decl: Type | None  # declared type of that local (a supertype of every class caught)
+    body: list[Stmt]
+
+
+@dataclass
+class Try(Stmt):
+    body: list[Stmt]
+    handlers: list[Handler]
+    else_: list[Stmt]
+    finally_: list[Stmt] | None
+    exc_local: str  # local that receives the caught exception
 
 
 # ---- top level --------------------------------------------------------------

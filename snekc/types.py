@@ -107,9 +107,18 @@ class FieldInfo:
 class FuncSig:
     params: list[tuple[str, Type]]
     ret: Type
+    defaults: list[ast.expr | None] = field(default_factory=list)  # one per param; literals only
+
+    def __post_init__(self) -> None:
+        if not self.defaults:
+            self.defaults = [None] * len(self.params)
 
     def same_as(self, other: FuncSig) -> bool:
-        return self.ret == other.ret and [t for _, t in self.params] == [t for _, t in other.params]
+        """Exact match, as required for overrides: callers bind arguments by name and fill
+        defaults from the static receiver type, so names and defaults must agree too."""
+        dump = lambda ds: [ast.dump(d) if d is not None else None for d in ds]  # noqa: E731
+        return (self.ret == other.ret and self.params == other.params
+                and dump(self.defaults) == dump(other.defaults))
 
 
 @dataclass
@@ -131,6 +140,7 @@ class ClassInfo:
     methods: dict[str, MethodInfo] = field(default_factory=dict)  # slot order
     subclasses: list[ClassInfo] = field(default_factory=list)
     init_node: ast.FunctionDef | None = None
+    builtin: bool = False  # defined by snekc/builtins.py (the exception hierarchy)
 
     @property
     def is_final(self) -> bool:

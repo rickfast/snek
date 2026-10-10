@@ -58,9 +58,8 @@
         (local.set $i (i32.add (local.get $i) (i32.const 1)))
         (br $l))))
 
-  ;; Fatal runtime error: flush stdout, write the message to stderr, exit 1.
-  ;; (Becomes `throw` once exceptions are in — Wasm EH is on by default in
-  ;; Wasmtime 47+.)
+  ;; Fatal error: flush stdout, write the message to stderr, exit 1. Only used
+  ;; for uncaught exceptions; everything recoverable is thrown as an exception.
   (func $rt.panic (param $msg (ref $str))
     (local $a (ref $u8s)) (local $i i32) (local $n i32) (local $k i32)
     (call $rt.flush)
@@ -369,14 +368,15 @@
   ;; ---- Python division semantics ---------------------------------------
   ;; // floors and % takes the sign of the divisor; Wasm's div_s/rem_s
   ;; truncate and take the sign of the dividend. Division by zero is a Wasm
-  ;; trap (uncatchable), so it is checked explicitly here.
+  ;; trap (uncatchable), so it is checked here and raised as a real
+  ;; ZeroDivisionError, with CPython's messages.
 
-  (func $rt.zerodiv
-    (call $rt.panic (str.lit "ZeroDivisionError: integer division or modulo by zero")))
+  (func $rt.zerodiv (param $msg (ref $str))
+    (throw $snek.exc (call $ZeroDivisionError.__new__ (local.get $msg))))
 
   (func $rt.i32.floordiv (param $a i32) (param $b i32) (result i32)
     (local $q i32) (local $r i32)
-    (if (i32.eqz (local.get $b)) (then (call $rt.zerodiv)))
+    (if (i32.eqz (local.get $b)) (then (call $rt.zerodiv (str.lit "integer division or modulo by zero"))))
     ;; INT_MIN // -1 traps in Wasm; fixed-width semantics wrap instead
     (if (i32.eq (local.get $b) (i32.const -1)) (then (return (i32.sub (i32.const 0) (local.get $a)))))
     (local.set $q (i32.div_s (local.get $a) (local.get $b)))
@@ -388,7 +388,7 @@
 
   (func $rt.i32.mod (param $a i32) (param $b i32) (result i32)
     (local $r i32)
-    (if (i32.eqz (local.get $b)) (then (call $rt.zerodiv)))
+    (if (i32.eqz (local.get $b)) (then (call $rt.zerodiv (str.lit "integer modulo by zero"))))
     (local.set $r (i32.rem_s (local.get $a) (local.get $b)))
     (if (result i32) (i32.and (i32.ne (local.get $r) (i32.const 0))
                               (i32.lt_s (i32.xor (local.get $r) (local.get $b)) (i32.const 0)))
@@ -397,7 +397,7 @@
 
   (func $rt.i64.floordiv (param $a i64) (param $b i64) (result i64)
     (local $q i64) (local $r i64)
-    (if (i64.eqz (local.get $b)) (then (call $rt.zerodiv)))
+    (if (i64.eqz (local.get $b)) (then (call $rt.zerodiv (str.lit "integer division or modulo by zero"))))
     (if (i64.eq (local.get $b) (i64.const -1)) (then (return (i64.sub (i64.const 0) (local.get $a)))))
     (local.set $q (i64.div_s (local.get $a) (local.get $b)))
     (local.set $r (i64.rem_s (local.get $a) (local.get $b)))
@@ -408,27 +408,30 @@
 
   (func $rt.i64.mod (param $a i64) (param $b i64) (result i64)
     (local $r i64)
-    (if (i64.eqz (local.get $b)) (then (call $rt.zerodiv)))
+    (if (i64.eqz (local.get $b)) (then (call $rt.zerodiv (str.lit "integer modulo by zero"))))
     (local.set $r (i64.rem_s (local.get $a) (local.get $b)))
     (if (result i64) (i32.and (i64.ne (local.get $r) (i64.const 0))
                               (i64.lt_s (i64.xor (local.get $r) (local.get $b)) (i64.const 0)))
       (then (i64.add (local.get $r) (local.get $b)))
       (else (local.get $r))))
 
+  ;; i32 / i32: computed in f64 (exact), but CPython's message is the int one
+  (func $rt.f64.div_int (param $a f64) (param $b f64) (result f64)
+    (if (f64.eq (local.get $b) (f64.const 0)) (then (call $rt.zerodiv (str.lit "division by zero"))))
+    (f64.div (local.get $a) (local.get $b)))
+
   (func $rt.f64.div (param $a f64) (param $b f64) (result f64)
-    (if (f64.eq (local.get $b) (f64.const 0))
-      (then (call $rt.panic (str.lit "ZeroDivisionError: float division by zero"))))
+    (if (f64.eq (local.get $b) (f64.const 0)) (then (call $rt.zerodiv (str.lit "float division by zero"))))
     (f64.div (local.get $a) (local.get $b)))
 
   (func $rt.f64.floordiv (param $a f64) (param $b f64) (result f64)
     (if (f64.eq (local.get $b) (f64.const 0))
-      (then (call $rt.panic (str.lit "ZeroDivisionError: float floor division by zero"))))
+      (then (call $rt.zerodiv (str.lit "float floor division by zero"))))
     (f64.floor (f64.div (local.get $a) (local.get $b))))
 
   (func $rt.f64.mod (param $a f64) (param $b f64) (result f64)
     (local $r f64)
-    (if (f64.eq (local.get $b) (f64.const 0))
-      (then (call $rt.panic (str.lit "ZeroDivisionError: float modulo by zero"))))
+    (if (f64.eq (local.get $b) (f64.const 0)) (then (call $rt.zerodiv (str.lit "float modulo by zero"))))
     ;; Wasm has no fmod; a - b*trunc(a/b) is exact for moderate magnitudes
     (local.set $r (f64.sub (local.get $a)
                            (f64.mul (local.get $b) (f64.trunc (f64.div (local.get $a) (local.get $b))))))
@@ -438,3 +441,187 @@
     (if (f64.eq (local.get $r) (f64.const 0))
       (then (local.set $r (f64.copysign (f64.const 0) (local.get $b)))))
     (local.get $r))
+
+  ;; ---- float -> int ---------------------------------------------------------
+  ;; i32(x) / i64(x) on a float truncate toward zero like int(x). NaN and
+  ;; infinity raise like CPython; values that do not fit the target width raise
+  ;; OverflowError (CPython would return a big int, which snek cannot represent).
+
+  (func $rt.check_float_int (param $a f64)
+    (if (f64.ne (local.get $a) (local.get $a))
+      (then (throw $snek.exc (call $ValueError.__new__ (str.lit "cannot convert float NaN to integer")))))
+    (if (f64.eq (f64.abs (local.get $a)) (f64.const inf))
+      (then (throw $snek.exc (call $OverflowError.__new__ (str.lit "cannot convert float infinity to integer"))))))
+
+  (func $rt.f64_to_i32 (param $a f64) (result i32)
+    (local $t f64)
+    (call $rt.check_float_int (local.get $a))
+    (local.set $t (f64.trunc (local.get $a)))
+    (if (i32.or (f64.lt (local.get $t) (f64.const -2147483648)) (f64.gt (local.get $t) (f64.const 2147483647)))
+      (then (throw $snek.exc (call $OverflowError.__new__ (str.lit "float too large to convert to i32")))))
+    (i32.trunc_f64_s (local.get $t)))
+
+  (func $rt.f64_to_i64 (param $a f64) (result i64)
+    (local $t f64)
+    (call $rt.check_float_int (local.get $a))
+    (local.set $t (f64.trunc (local.get $a)))
+    (if (i32.or (f64.lt (local.get $t) (f64.const -9223372036854775808))
+                (f64.ge (local.get $t) (f64.const 9223372036854775808)))
+      (then (throw $snek.exc (call $OverflowError.__new__ (str.lit "float too large to convert to i64")))))
+    (i64.trunc_f64_s (local.get $t)))
+
+  ;; ---- repr(str) --------------------------------------------------------------
+  ;; CPython's quoting: single quotes unless the text contains ' and no ", with
+  ;; \\ \n \r \t escaped, other ASCII controls as \xNN, and every non-printable
+  ;; code point (str.isprintable() is False) as \xNN, \uNNNN or \UNNNNNNNN.
+  ;;
+  ;; Printability needs Unicode tables, but a snek program has no input: every
+  ;; string it can build comes from its own literals, numbers and class names.
+  ;; So the compiler emits only the non-printable code points that occur in
+  ;; the program's literals, as a sorted table ($nonprint, $rt.np.n entries),
+  ;; which is usually empty.
+
+  (global $rt.np.cache (mut (ref null $u32s)) (ref.null $u32s))
+
+  (func $rt.nonprint (param $cp i32) (result i32)
+    (local $t (ref $u32s)) (local $lo i32) (local $hi i32) (local $mid i32) (local $v i32)
+    (if (i32.eqz (global.get $rt.np.n)) (then (return (i32.const 0))))
+    (if (ref.is_null (global.get $rt.np.cache))
+      (then (global.set $rt.np.cache (array.new_data $u32s $nonprint (i32.const 0) (global.get $rt.np.n)))))
+    (local.set $t (ref.as_non_null (global.get $rt.np.cache)))
+    (local.set $hi (array.len (local.get $t)))
+    (block $done
+      (loop $search
+        (br_if $done (i32.ge_u (local.get $lo) (local.get $hi)))
+        (local.set $mid (i32.shr_u (i32.add (local.get $lo) (local.get $hi)) (i32.const 1)))
+        (local.set $v (array.get $u32s (local.get $t) (local.get $mid)))
+        (if (i32.eq (local.get $v) (local.get $cp)) (then (return (i32.const 1))))
+        (if (i32.lt_u (local.get $v) (local.get $cp))
+          (then (local.set $lo (i32.add (local.get $mid) (i32.const 1))))
+          (else (local.set $hi (local.get $mid))))
+        (br $search)))
+    (i32.const 0))
+
+  (func $rt.hexdigit (param $d i32) (result i32)
+    (i32.add (local.get $d) (select (i32.const 87) (i32.const 48) (i32.ge_u (local.get $d) (i32.const 10)))))
+
+  ;; backslash, a letter, then `digits` lowercase hex digits of v
+  (func $rt.put_escape (param $o (ref $u8s)) (param $pos i32) (param $letter i32) (param $v i32)
+                       (param $digits i32) (result i32)
+    (local.set $pos (call $rt.put2 (local.get $o) (local.get $pos) (local.get $letter)))
+    (block $done
+      (loop $l
+        (br_if $done (i32.eqz (local.get $digits)))
+        (local.set $digits (i32.sub (local.get $digits) (i32.const 1)))
+        (local.set $pos (call $rt.put (local.get $o) (local.get $pos)
+          (call $rt.hexdigit (i32.and (i32.shr_u (local.get $v) (i32.shl (local.get $digits) (i32.const 2)))
+                                      (i32.const 15)))))
+        (br $l)))
+    (local.get $pos))
+
+  ;; backslash followed by one letter
+  (func $rt.put2 (param $o (ref $u8s)) (param $pos i32) (param $b i32) (result i32)
+    (call $rt.put (local.get $o) (call $rt.put (local.get $o) (local.get $pos) (i32.const 92)) (local.get $b)))
+
+  (func $rt.str_repr (param $s (ref $str)) (result (ref $str))
+    (local $a (ref $u8s)) (local $n i32) (local $i i32) (local $c i32) (local $q i32) (local $k i32)
+    (local $sq i32) (local $dq i32) (local $o (ref $u8s)) (local $pos i32) (local $r (ref $u8s)) (local $cp i32)
+    (local.set $a (struct.get $str $bytes (local.get $s)))
+    (local.set $n (array.len (local.get $a)))
+    (block $d1
+      (loop $l1
+        (br_if $d1 (i32.ge_u (local.get $i) (local.get $n)))
+        (local.set $c (array.get_u $u8s (local.get $a) (local.get $i)))
+        (if (i32.eq (local.get $c) (i32.const 39)) (then (local.set $sq (i32.const 1))))
+        (if (i32.eq (local.get $c) (i32.const 34)) (then (local.set $dq (i32.const 1))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $l1)))
+    (local.set $q (select (i32.const 34) (i32.const 39) (i32.and (local.get $sq) (i32.eqz (local.get $dq)))))
+    ;; worst case: an ASCII control byte becomes \xNN (4 bytes), plus the quotes
+    (local.set $o (array.new_default $u8s (i32.add (i32.mul (local.get $n) (i32.const 4)) (i32.const 2))))
+    (local.set $pos (call $rt.put (local.get $o) (i32.const 0) (local.get $q)))
+    (local.set $i (i32.const 0))
+    (block $d2
+      (loop $l2
+        (br_if $d2 (i32.ge_u (local.get $i) (local.get $n)))
+        (local.set $c (array.get_u $u8s (local.get $a) (local.get $i)))
+        (block $next
+          (if (i32.ge_u (local.get $c) (i32.const 0x80))
+            (then
+              ;; decode one UTF-8 sequence (literals are valid UTF-8; the checker rejects surrogates)
+              (local.set $k (select (i32.const 4) (select (i32.const 3) (i32.const 2)
+                                                          (i32.ge_u (local.get $c) (i32.const 0xE0)))
+                                    (i32.ge_u (local.get $c) (i32.const 0xF0))))
+              (local.set $cp (i32.and (local.get $c) (select (i32.const 0x07) (select (i32.const 0x0F) (i32.const 0x1F)
+                                                          (i32.eq (local.get $k) (i32.const 3)))
+                                                          (i32.eq (local.get $k) (i32.const 4)))))
+              (local.set $c (i32.const 1))
+              (block $dd
+                (loop $dl
+                  (br_if $dd (i32.ge_u (local.get $c) (local.get $k)))
+                  (local.set $cp (i32.or (i32.shl (local.get $cp) (i32.const 6))
+                    (i32.and (array.get_u $u8s (local.get $a) (i32.add (local.get $i) (local.get $c))) (i32.const 0x3F))))
+                  (local.set $c (i32.add (local.get $c) (i32.const 1)))
+                  (br $dl)))
+              (if (call $rt.nonprint (local.get $cp))
+                (then
+                  (local.set $pos
+                    (if (result i32) (i32.le_u (local.get $cp) (i32.const 0xFF))
+                      (then (call $rt.put_escape (local.get $o) (local.get $pos) (i32.const 120) (local.get $cp) (i32.const 2)))
+                      (else (if (result i32) (i32.le_u (local.get $cp) (i32.const 0xFFFF))
+                        (then (call $rt.put_escape (local.get $o) (local.get $pos) (i32.const 117) (local.get $cp) (i32.const 4)))
+                        (else (call $rt.put_escape (local.get $o) (local.get $pos) (i32.const 85) (local.get $cp) (i32.const 8))))))))
+                (else
+                  (array.copy $u8s $u8s (local.get $o) (local.get $pos) (local.get $a) (local.get $i) (local.get $k))
+                  (local.set $pos (i32.add (local.get $pos) (local.get $k)))))
+              (local.set $i (i32.add (local.get $i) (i32.sub (local.get $k) (i32.const 1))))
+              (br $next)))
+          (if (i32.or (i32.eq (local.get $c) (local.get $q)) (i32.eq (local.get $c) (i32.const 92)))
+            (then (local.set $pos (call $rt.put2 (local.get $o) (local.get $pos) (local.get $c))) (br $next)))
+          (if (i32.eq (local.get $c) (i32.const 10))
+            (then (local.set $pos (call $rt.put2 (local.get $o) (local.get $pos) (i32.const 110))) (br $next)))
+          (if (i32.eq (local.get $c) (i32.const 13))
+            (then (local.set $pos (call $rt.put2 (local.get $o) (local.get $pos) (i32.const 114))) (br $next)))
+          (if (i32.eq (local.get $c) (i32.const 9))
+            (then (local.set $pos (call $rt.put2 (local.get $o) (local.get $pos) (i32.const 116))) (br $next)))
+          (if (i32.or (i32.lt_u (local.get $c) (i32.const 32)) (i32.eq (local.get $c) (i32.const 127)))
+            (then
+              (local.set $pos (call $rt.put_escape (local.get $o) (local.get $pos) (i32.const 120) (local.get $c) (i32.const 2)))
+              (br $next)))
+          (local.set $pos (call $rt.put (local.get $o) (local.get $pos) (local.get $c))))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br $l2)))
+    (local.set $pos (call $rt.put (local.get $o) (local.get $pos) (local.get $q)))
+    (local.set $r (array.new_default $u8s (local.get $pos)))
+    (array.copy $u8s $u8s (local.get $r) (i32.const 0) (local.get $o) (i32.const 0) (local.get $pos))
+    (struct.new $str (local.get $r) (i32.const 0)))
+
+  (func $rt.opt_str_repr (param $s (ref null $str)) (result (ref $str))
+    (if (result (ref $str)) (ref.is_null (local.get $s))
+      (then (str.lit "None"))
+      (else (call $rt.str_repr (ref.as_non_null (local.get $s))))))
+
+  ;; ---- exceptions ---------------------------------------------------------
+  ;; Exception objects are instances of the classes in snekc/builtins.py; the
+  ;; message is the hidden field $__message (null when the exception was created
+  ;; without an argument) and the class name is the first field of every vtable.
+
+  ;; str(e): the message; '' without one; KeyError shows repr(key) like CPython
+  (func $rt.exc_str (param $e (ref $BaseException)) (result (ref $str))
+    (local $m (ref null $str))
+    (local.set $m (struct.get $BaseException $__message (local.get $e)))
+    (if (ref.is_null (local.get $m)) (then (return (str.lit ""))))
+    (if (ref.test (ref $KeyError) (local.get $e))
+      (then (return (call $rt.str_repr (ref.as_non_null (local.get $m))))))
+    (ref.as_non_null (local.get $m)))
+
+  ;; An exception escaped the program: print `Name: message` (CPython's last
+  ;; traceback line, just `Name` when str(e) is empty) to stderr and exit 1.
+  (func $rt.uncaught (param $e (ref $BaseException))
+    (local $name (ref $str)) (local $msg (ref $str))
+    (local.set $name (struct.get $BaseException.vt $__name__ (struct.get $BaseException $__vt__ (local.get $e))))
+    (local.set $msg (call $rt.exc_str (local.get $e)))
+    (call $rt.panic
+      (if (result (ref $str)) (call $rt.str_len (local.get $msg))
+        (then (call $rt.str_concat (call $rt.str_concat (local.get $name) (str.lit ": ")) (local.get $msg)))
+        (else (local.get $name)))))

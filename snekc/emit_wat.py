@@ -1,4 +1,4 @@
-"""Typed IR -> WebAssembly text (WAT) using WasmGC.
+"""Typed IR -> WebAssembly text (WAT) using WasmGC and Wasm exception handling.
 
 Layout decisions (see DESIGN.md):
   str          (struct (field $bytes (ref $u8s)) (field $hash (mut i32)))   UTF-8 bytes
@@ -6,8 +6,12 @@ Layout decisions (see DESIGN.md):
                monomorphized per T; list[bool] uses a packed (array (mut i8))
   class C      (struct (field $__vt__ (ref $C.vt)) (field $f T) ...)
                single inheritance = WasmGC struct subtyping; vtables are structs
-               of typed funcrefs, one immutable global instance per class
+               holding the class name and typed funcrefs, one immutable global
+               instance per class
   T | None     (ref null $T); everything else is non-nullable
+  exceptions   one tag, (tag $snek.exc (param (ref $BaseException))); `except C`
+               is a ref.test on the caught object, so handlers follow the class
+               hierarchy exactly like isinstance
   locals       reference locals are stored nullable and read with ref.as_non_null
                (or ref.cast when narrowed); wasm-opt removes most of these
 
@@ -19,6 +23,7 @@ method is reachable from the receiver's static type.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import ir
@@ -40,6 +45,7 @@ from .types import (
 )
 
 PRELUDE = Path(__file__).with_name("prelude.wat")
+EXC = "$BaseException"  # payload type of the exception tag
 
 CONVERSIONS = {
     (I32, I64): "i64.extend_i32_s", (I32, F32): "f32.convert_i32_s", (I32, F64): "f64.convert_i32_s",
@@ -55,6 +61,14 @@ FLOAT_CMP = {"eq": "eq", "ne": "ne", "lt": "lt", "le": "le", "gt": "gt", "ge": "
 SIMPLE_BIN = {"add": "add", "sub": "sub", "mul": "mul", "bitand": "and", "bitor": "or", "bitxor": "xor",
               "shl": "shl", "shr": "shr_s"}
 
+# Pending-action codes for leaving a try/finally region (see Emitter.try_finally).
+EXCEPTION, FALLTHROUGH = -1, 0
+JUMP_CODES = {"return": 1, "break": 2, "continue": 3, "exit_inline": 4}
+
+# float -> int conversions are checked (nan/inf/out of range raise, like CPython's int())
+CHECKED_TRUNC = {(F64, I32): "$rt.f64_to_i32", (F64, I64): "$rt.f64_to_i64",
+                 (F32, I32): "$rt.f64_to_i32", (F32, I64): "$rt.f64_to_i64"}
+
 
 def wat_string(data: bytes) -> str:
     out = []
@@ -68,23 +82,57 @@ def wat_string(data: bytes) -> str:
 
 
 def mangle(t: Type) -> str:
+    """Name fragment for a monomorphized type: list[list[Node | None]] -> list<list<Node?>>.
+    `<`, `>` and `?` are legal in WAT names but not in Python identifiers, so these never
+    collide with user class names."""
     if isinstance(t, Prim):
         return t.name
     if t == STR:
         return "str"
     if isinstance(t, ListT):
-        return "list_" + mangle(t.elem)
+        return f"list<{mangle(t.elem)}>"
     if isinstance(t, ClassT):
         return t.info.name
     if isinstance(t, OptionalT):
-        return "opt_" + mangle(t.inner)
+        return mangle(t.inner) + "?"
     raise AssertionError(t)
 
 
+def indent(lines: list[str], n: int = 2) -> list[str]:
+    pad = " " * n
+    return [pad + line for line in lines]
+
+
+def closed(lines: list[str]) -> list[str]:
+    """Append ')' to the last line, inserting a nop if there is nothing to close over."""
+    lines = lines or ["(nop)"]
+    lines[-1] += ")"
+    return lines
+
+
+@dataclass
+class LoopCtl:
+    brk: str
+    cont: str
+
+
+@dataclass
+class InlineCtl:
+    exit: str
+
+
+@dataclass
+class FinallyCtl:
+    exit: str  # label of the block that leads to the finally body
+    k: str  # local holding the pending action
+    ret: str | None = None  # local holding a pending return value
+    used: set[str] = field(default_factory=set)
+
+
 class FnState:
-    def __init__(self, f: ir.Func, emitter: Emitter):
+    def __init__(self, f: ir.Func):
         self.f = f
-        self.loops: list[tuple[str, str]] = []
+        self.ctl: list[LoopCtl | FinallyCtl | InlineCtl] = []
         self.labels = 0
         self.temps: list[tuple[str, str]] = []
         self.nonnull = set(f.nonnull_locals) | {n for n, t in f.params if t.is_ref and not isinstance(t, OptionalT)}
@@ -158,29 +206,43 @@ class Emitter:
     def emit(self) -> str:
         prelude = self.expand_lits(PRELUDE.read_text())
         funcs = [self.emit_func(f) for f in self.m.funcs]
-        start = f'  (func $snek.start (export "_start")\n    (call ${self.m.main})\n    (call $rt.flush))'
         class_types = self.class_types()
         vtables = self.vtable_globals()
         self.close_list_types()
         list_funcs = self.list_helpers()  # registers literals used by the helpers
         lits = self.literal_funcs()
+        nonprint = self.nonprint_table()  # after every literal is known
         types = self.type_section(class_types)
         parts = [
             "(module",
             '  (import "wasi_snapshot_preview1" "fd_write" (func $wasi.fd_write (param i32 i32 i32 i32) (result i32)))',
             '  (import "wasi_snapshot_preview1" "proc_exit" (func $wasi.proc_exit (param i32)))',
             types,
+            f"  (tag $snek.exc (param (ref {EXC})))",
             '  (memory (export "memory") 1)',
             f"  (data $lits {wat_string(bytes(self.lit_data))})",
+            nonprint,
             prelude,
             lits,
             list_funcs,
             vtables,
             *funcs,
-            start,
+            self.start_func(),
             ")",
         ]
         return "\n".join(p for p in parts if p) + "\n"
+
+    def start_func(self) -> str:
+        # An exception escaping __main__ is reported like CPython's last traceback line, exit 1.
+        return "\n".join([
+            '  (func $snek.start (export "_start")',
+            "    (call $rt.uncaught",
+            f"      (block $uncaught (result (ref {EXC}))",
+            "        (try_table (catch $snek.exc $uncaught)",
+            f"          (call ${self.m.main}))",
+            "        (call $rt.flush)",
+            "        (return))))",
+        ])
 
     def close_list_types(self) -> None:
         """list[list[T]] needs list[T] too: register element list types transitively."""
@@ -194,6 +256,7 @@ class Emitter:
     def type_section(self, class_types: list[str]) -> str:
         lines = ["  (rec",
                  "    (type $u8s (array (mut i8)))",
+                 "    (type $u32s (array i32))",
                  "    (type $str (struct (field $bytes (ref $u8s)) (field $hash (mut i32))))"]
         done: set[str] = set()
         while len(done) < len(self.list_types):  # element types can register further list types
@@ -210,7 +273,7 @@ class Emitter:
     def class_types(self) -> list[str]:
         out: list[str] = []
         for cls in self.m.classes:
-            sub = "final" if cls.is_final else ""
+            sub = "sub final" if cls.is_final else "sub"
             sup_vt = f" ${cls.base.name}.vt" if cls.base else ""
             sup = f" ${cls.base.name}" if cls.base else ""
             for m in cls.methods.values():
@@ -219,20 +282,33 @@ class Emitter:
                     result = f" (result {self.valtype(m.sig.ret)})" if m.sig.ret != NONE else ""
                     out.append(f"    (type ${cls.name}.{m.name}.sig (func (param (ref ${cls.name})){params}{result}))")
             slots = "".join(f" (field ${m.name} (ref ${m.decl.name}.{m.name}.sig))" for m in cls.methods.values())
-            out.append(f"    (type ${cls.name}.vt (sub {sub}{sup_vt} (struct{slots})))".replace("(sub  ", "(sub "))
+            out.append(f"    (type ${cls.name}.vt ({sub}{sup_vt} (struct (field $__name__ (ref $str)){slots})))")
             fields = "".join(
                 f" (field ${f.name} {self.valtype(f.ty) if f.final else f'(mut {self.valtype(f.ty)})'})"
                 for f in cls.fields.values())
-            out.append(f"    (type ${cls.name} (sub {sub}{sup} (struct (field $__vt__ (ref ${cls.name}.vt)){fields})))"
-                       .replace("(sub  ", "(sub "))
+            out.append(f"    (type ${cls.name} ({sub}{sup} (struct (field $__vt__ (ref ${cls.name}.vt)){fields})))")
         return out
 
     def vtable_globals(self) -> str:
         out = []
         for cls in self.m.classes:
+            # Constant-expression string for the class name (array.new_fixed is a const op).
+            data = cls.name.encode()
+            chars = " ".join(f"(i32.const {b})" for b in data)
+            out.append(f"  (global ${cls.name}.name (ref $str) "
+                       f"(struct.new $str (array.new_fixed $u8s {len(data)} {chars}) (i32.const 0)))")
             refs = "".join(f" (ref.func ${m.owner.name}.{m.name})" for m in cls.methods.values())
-            out.append(f"  (global ${cls.name}.vt.inst (ref ${cls.name}.vt) (struct.new ${cls.name}.vt{refs}))")
+            out.append(f"  (global ${cls.name}.vt.inst (ref ${cls.name}.vt) "
+                       f"(struct.new ${cls.name}.vt (global.get ${cls.name}.name){refs}))")
         return "\n".join(out)
+
+    def nonprint_table(self) -> str:
+        """Non-printable code points that occur in the program's string literals, for repr().
+        snek programs read no input, so these are the only ones a string can ever contain."""
+        cps = sorted({ord(ch) for text in self.lit_index for ch in text if ord(ch) >= 0x80 and not ch.isprintable()})
+        data = b"".join(cp.to_bytes(4, "little") for cp in cps)
+        return (f"  (data $nonprint {wat_string(data)})\n"
+                f"  (global $rt.np.n i32 (i32.const {len(cps)}))")
 
     def literal_funcs(self) -> str:
         out = []
@@ -258,6 +334,9 @@ class Emitter:
                     out.append(self.list_helper(m, t))
         return "\n".join(out)
 
+    def raise_code(self, cls_name: str, message: str) -> str:
+        return f"(throw $snek.exc (call ${cls_name}.__new__ {self.lit(message)}))"
+
     def list_helper(self, m: str, t: ListT) -> str:
         e = t.elem
         R = self.valtype(e)
@@ -269,20 +348,20 @@ class Emitter:
         clear = (f"\n    (array.set $arr.{m} (local.get $d) (local.get $n) (ref.null {self.heap(e)}))"
                  "  ;; drop the reference so the GC can reclaim it" if e.is_ref else "")
         pop_val = "(ref.as_non_null (local.get $v))" if nn else "(local.get $v)"
-        oob = self.lit("IndexError: list index out of range")
-        oob_set = self.lit("IndexError: list assignment index out of range")
-        empty = self.lit("IndexError: pop from empty list")
+        oob = self.raise_code("IndexError", "list index out of range")
+        oob_set = self.raise_code("IndexError", "list assignment index out of range")
+        empty = self.raise_code("IndexError", "pop from empty list")
         code = f"""  (func $list.{m}.get (param $l (ref $list.{m})) (param $i i32) (result {R})
     (local $n i32)
     (local.set $n (struct.get $list.{m} $len (local.get $l)))
     (if (i32.lt_s (local.get $i) (i32.const 0)) (then (local.set $i (i32.add (local.get $i) (local.get $n)))))
-    (if (i32.ge_u (local.get $i) (local.get $n)) (then (call $rt.panic {oob})))
+    (if (i32.ge_u (local.get $i) (local.get $n)) (then {oob}))
     {load})
   (func $list.{m}.set (param $l (ref $list.{m})) (param $i i32) (param $v {R})
     (local $n i32)
     (local.set $n (struct.get $list.{m} $len (local.get $l)))
     (if (i32.lt_s (local.get $i) (i32.const 0)) (then (local.set $i (i32.add (local.get $i) (local.get $n)))))
-    (if (i32.ge_u (local.get $i) (local.get $n)) (then (call $rt.panic {oob_set})))
+    (if (i32.ge_u (local.get $i) (local.get $n)) (then {oob_set}))
     (array.set $arr.{m} (struct.get $list.{m} $data (local.get $l)) (local.get $i) (local.get $v)))
   (func $list.{m}.append (param $l (ref $list.{m})) (param $v {R})
     (local $n i32) (local $d (ref $arr.{m})) (local $grown (ref null $arr.{m}))
@@ -300,7 +379,7 @@ class Emitter:
   (func $list.{m}.pop (param $l (ref $list.{m})) (result {R})
     (local $n i32) (local $d (ref $arr.{m})) (local $v {self.storage(e)})
     (local.set $n (struct.get $list.{m} $len (local.get $l)))
-    (if (i32.eqz (local.get $n)) (then (call $rt.panic {empty})))
+    (if (i32.eqz (local.get $n)) (then {empty}))
     (local.set $n (i32.sub (local.get $n) (i32.const 1)))
     (local.set $d (struct.get $list.{m} $data (local.get $l)))
     (local.set $v ({get} $arr.{m} (local.get $d) (local.get $n))){clear}
@@ -309,8 +388,8 @@ class Emitter:
         inner = e
         while isinstance(inner, ListT):
             inner = inner.elem
-        if isinstance(inner, Prim):
-            item = self.to_str_code(e, f"(call $list.{m}.get (local.get $l) (local.get $i))")
+        if isinstance(inner, Prim) or inner in (STR, OptionalT(STR)):
+            item = self.repr_code(e, f"(call $list.{m}.get (local.get $l) (local.get $i))")
             code += f"""
   (func $list.{m}.to_str (param $l (ref $list.{m})) (result (ref $str))
     (local $s (ref null $str)) (local $i i32) (local $n i32)
@@ -349,10 +428,18 @@ class Emitter:
             return f"(call $list.{mangle(t.elem)}.to_str {code})"
         raise AssertionError(f"to_str of {t}")
 
+    def repr_code(self, t: Type, code: str) -> str:
+        """repr() as used for list elements: strings are quoted, None prints as None."""
+        if t == STR:
+            return f"(call $rt.str_repr {code})"
+        if t == OptionalT(STR):
+            return f"(call $rt.opt_str_repr {code})"
+        return self.to_str_code(t, code)
+
     # ---- functions -------------------------------------------------------------
 
     def emit_func(self, f: ir.Func) -> str:
-        self.fn = FnState(f, self)
+        self.fn = FnState(f)
         body: list[str] = []
         if f.self_cast is not None:
             body.append(f"(local.set $self (ref.cast (ref ${f.self_cast.name}) (local.get $self.in)))")
@@ -373,7 +460,7 @@ class Emitter:
         lines = [head + params + result]
         if locals_:
             lines.append("    " + " ".join(locals_))
-        lines += ["    " + line for line in body]
+        lines += indent(body, 4)
         lines[-1] += ")"
         self.fn = None
         return "\n".join(lines)
@@ -401,46 +488,215 @@ class Emitter:
             code = self.ex(s.expr)
             return [code if s.expr.ty == NONE else f"(drop {code})"]
         if isinstance(s, ir.Return):
-            return [f"(return {self.ex(s.value)})" if s.value is not None else "(return)"]
+            return self.jump("return", self.ex(s.value) if s.value is not None else None)
         if isinstance(s, ir.If):
             out = [f"(if {self.ex(s.cond)}", "  (then"]
-            out += ["    " + line for line in self.block(s.then)]
-            out[-1] += ")"
+            out += closed(indent(self.block(s.then), 4))
             if s.else_:
                 out.append("  (else")
-                out += ["    " + line for line in self.block(s.else_)]
-                out[-1] += ")"
+                out += closed(indent(self.block(s.else_), 4))
             out[-1] += ")"
             return out
         if isinstance(s, ir.Loop):
             n = fn.label()
             brk, cont, top = f"$brk.{n}", f"$cont.{n}", f"$top.{n}"
-            fn.loops.append((brk, cont))
+            fn.ctl.append(LoopCtl(brk, cont))
             out = [f"(block {brk}", f"  (loop {top}"]
             if s.cond is not None:
                 out.append(f"    (br_if {brk} (i32.eqz {self.ex(s.cond)}))")
             out.append(f"    (block {cont}")
-            out += ["      " + line for line in self.block(s.body)] or ["      (nop)"]
-            out[-1] += ")"
-            out += ["    " + line for line in self.block(s.step)]
+            out += closed(indent(self.block(s.body), 6))
+            fn.ctl.pop()
+            out += indent(self.block(s.step), 4)
             out.append(f"    (br {top})))")
-            fn.loops.pop()
             return out
+        if isinstance(s, ir.InlineBlock):
+            n = fn.label()
+            fn.ctl.append(InlineCtl(f"$inl.{n}"))
+            out = [f"(block $inl.{n}"] + closed(indent(self.block(s.body)))
+            fn.ctl.pop()
+            return out
+        if isinstance(s, ir.ExitInline):
+            return self.jump("exit_inline")
         if isinstance(s, ir.Break):
-            return [f"(br {fn.loops[-1][0]})"]
+            return self.jump("break")
         if isinstance(s, ir.Continue):
-            return [f"(br {fn.loops[-1][1]})"]
+            return self.jump("continue")
         if isinstance(s, ir.Print):
-            out = []
-            for i, a in enumerate(s.args):
+            # CPython evaluates every argument before writing anything, so an argument with
+            # side effects (or one that raises) must not run after earlier ones were printed.
+            # str() itself runs at write time, so a list argument shows mutations made by later
+            # arguments: the unconverted value is what gets saved.
+            out, codes = [], []
+            for a in s.args:
+                if len(s.args) == 1 or self.order_free(a):
+                    codes.append(self.ex(a))
+                    continue
+                v = a.operand if isinstance(a, ir.ToStr) else a
+                tmp = fn.temp(self.storage(v.ty))
+                out.append(f"(local.set {tmp} {self.ex(v)})")
+                read = f"(local.get {tmp})"
+                if v.ty.is_ref and not isinstance(v.ty, OptionalT):
+                    read = f"(ref.as_non_null {read})"
+                codes.append(self.to_str_code(v.ty, read) if isinstance(a, ir.ToStr) else read)
+            for i, code in enumerate(codes):
                 if i:
-                    out.append("(call $rt.out_byte (i32.const 32))")
-                out.append(f"(call $rt.out_str {self.ex(a)})")
-            out.append("(call $rt.out_byte (i32.const 10))")
-            return out
-        if isinstance(s, ir.Panic):
-            return [f"(call $rt.panic {self.ex(s.msg)})"]
+                    out.append(self.out_text(s.sep))
+                out.append(f"(call $rt.out_str {code})")
+            if s.end:
+                out.append(self.out_text(s.end))
+            return [line for line in out if line]
+        if isinstance(s, ir.Raise):
+            if s.exc is None:
+                return [f"(throw $snek.exc (ref.as_non_null (local.get ${s.reraise})))"]
+            return [f"(throw $snek.exc {self.ex(s.exc)})"]
+        if isinstance(s, ir.Try):
+            return self.try_finally(s) if s.finally_ is not None else self.try_except(s)
         raise AssertionError(f"unknown stmt {s}")
+
+    def order_free(self, e: ir.Expr) -> bool:
+        """True if evaluating e later gives the same result and cannot raise. Locals qualify
+        because nothing else can assign them (there are no closures)."""
+        if isinstance(e, ir.ToStr):
+            return self.order_free(e.operand)
+        return isinstance(e, (ir.Const, ir.StrLit, ir.NoneLit, ir.LocalGet))
+
+    def out_text(self, text: str) -> str:
+        data = text.encode()
+        if not data:
+            return ""
+        if len(data) == 1:
+            return f"(call $rt.out_byte (i32.const {data[0]}))"
+        return f"(call $rt.out_str {self.lit(text)})"
+
+    # ---- control transfer and exceptions ---------------------------------------
+
+    def jump(self, kind: str, value: str | None = None) -> list[str]:
+        """Emit return/break/continue. Leaving a try/finally region does not jump directly:
+        it records a pending action, branches to the region's finally body, and the region
+        re-issues the jump after the finally body has run (possibly through outer regions)."""
+        fn = self.fn
+        assert fn is not None
+        for c in reversed(fn.ctl):
+            if isinstance(c, FinallyCtl):
+                c.used.add(kind)
+                out = []
+                if kind == "return" and value is not None:
+                    if c.ret is None:
+                        c.ret = fn.temp(self.storage(fn.f.ret))
+                    out.append(f"(local.set {c.ret} {value})")
+                return out + [f"(local.set {c.k} (i32.const {JUMP_CODES[kind]}))", f"(br {c.exit})"]
+            if isinstance(c, LoopCtl) and kind in ("break", "continue"):
+                return [f"(br {c.brk if kind == 'break' else c.cont})"]
+            if isinstance(c, InlineCtl) and kind == "exit_inline":
+                return [f"(br {c.exit})"]
+        assert kind == "return", f"{kind} outside a loop"
+        return [f"(return {value})" if value is not None else "(return)"]
+
+    def try_except(self, s: ir.Try) -> list[str]:
+        """
+        (block $try.N
+          (local.set $exc
+            (block $catch.N (result (ref $BaseException))
+              (try_table (catch $snek.exc $catch.N) <body>)
+              <else>
+              (br $try.N)))
+          (if (ref.test (ref $ValueError) (local.get $exc)) (then <handler> (br $try.N)))
+          ...
+          (throw $snek.exc (local.get $exc)))     ;; no handler matched: propagate
+        """
+        fn = self.fn
+        assert fn is not None
+        n = fn.label()
+        exc = f"${s.exc_local}"
+        out = [f"(block $try.{n}",
+               f"  (local.set {exc}",
+               f"    (block $catch.{n} (result (ref {EXC}))",
+               f"      (try_table (catch $snek.exc $catch.{n})"]
+        out += closed(indent(self.block(s.body), 8))
+        out += indent(self.block(s.else_), 6)
+        out.append(f"      (br $try.{n})))")
+        catch_all = False
+        for h in s.handlers:
+            hb: list[str] = []
+            if h.var:
+                src = f"(local.get {exc})"
+                heap = self.heap(h.var_decl)  # type: ignore[arg-type]
+                if h.var in fn.nonnull:  # a parameter (non-nullable local) reused as the name
+                    src = f"(ref.cast (ref {heap}) {src})"
+                elif h.var_decl != ClassT(self.exc_info()):  # declared with a narrower class
+                    src = f"(ref.cast (ref null {heap}) {src})"
+                hb.append(f"(local.set ${h.var} {src})")
+            hb += self.block(h.body)
+            hb.append(f"(br $try.{n})")
+            if h.classes is None:
+                catch_all = True
+                out += indent(hb)
+                break
+            tests = [f"(ref.test (ref ${c.name}) (local.get {exc}))" for c in h.classes]
+            test = tests[0]
+            for t in tests[1:]:
+                test = f"(i32.or {test} {t})"
+            out.append(f"  (if {test}")
+            out.append("    (then")
+            out += closed(closed(indent(hb, 6)))
+        if not catch_all:
+            out.append(f"  (throw $snek.exc (ref.as_non_null (local.get {exc})))")
+        out[-1] += ")"
+        return out
+
+    def try_finally(self, s: ir.Try) -> list[str]:
+        """
+        (local.set $k (i32.const 0))
+        (block $fin.N                                ;; every way out of the region lands here
+          (local.set $fin.exc
+            (block $fin.catch.N (result (ref $BaseException))
+              (try_table (catch $snek.exc $fin.catch.N)
+                <try/except/else; return/break/continue set $k and br $fin.N>)
+              (br $fin.N)))
+          (local.set $k (i32.const -1)))             ;; an exception escaped the region
+        <finally body>                               ;; emitted once, outside the try_table
+        (if (k == -1) (then (throw $snek.exc $fin.exc)))
+        (if (k == 1) (then <return $ret>)) ...       ;; re-issued in the enclosing context
+
+        The finally body sits outside the try_table, so an exception raised inside it
+        propagates normally instead of re-entering this handler.
+        """
+        fn = self.fn
+        assert fn is not None
+        n = fn.label()
+        k = fn.temp("i32")
+        exc = fn.temp(f"(ref null {EXC})")
+        ctl = FinallyCtl(exit=f"$fin.{n}", k=k)
+        fn.ctl.append(ctl)
+        inner = self.try_except(s) if s.handlers else self.block(s.body)
+        fn.ctl.pop()
+        out = [f"(local.set {k} (i32.const {FALLTHROUGH}))",
+               f"(block $fin.{n}",
+               f"  (local.set {exc}",
+               f"    (block $fin.catch.{n} (result (ref {EXC}))",
+               f"      (try_table (catch $snek.exc $fin.catch.{n})"]
+        out += closed(indent(inner, 8))
+        out.append(f"      (br $fin.{n})))")
+        out.append(f"  (local.set {k} (i32.const {EXCEPTION})))")
+        out += self.block(s.finally_ or [])
+        out.append(f"(if (i32.eq (local.get {k}) (i32.const {EXCEPTION})) "
+                   f"(then (throw $snek.exc (ref.as_non_null (local.get {exc})))))")
+        for kind in JUMP_CODES:
+            if kind not in ctl.used:
+                continue
+            value = None
+            if kind == "return" and ctl.ret is not None:
+                value = f"(local.get {ctl.ret})"
+                if fn.f.ret.is_ref and not isinstance(fn.f.ret, OptionalT):
+                    value = f"(ref.as_non_null {value})"
+            out.append(f"(if (i32.eq (local.get {k}) (i32.const {JUMP_CODES[kind]}))")
+            out.append("  (then")
+            out += closed(closed(indent(self.jump(kind, value), 4)))
+        return out
+
+    def exc_info(self) -> ClassInfo:
+        return next(c for c in self.m.classes if c.name == "BaseException")
 
     # ---- expressions -----------------------------------------------------------
 
@@ -457,7 +713,7 @@ class Emitter:
             code = f"(local.get ${e.name})"
             if e.ty.is_ref and not isinstance(e.ty, OptionalT):
                 if e.ty != strip_optional(e.declared):
-                    return f"(ref.cast (ref {self.heap(e.ty)}) {code})"  # narrowed by isinstance
+                    return f"(ref.cast (ref {self.heap(e.ty)}) {code})"  # narrowed by isinstance/except
                 if e.name not in fn.nonnull:
                     return f"(ref.as_non_null {code})"
             return code
@@ -478,8 +734,13 @@ class Emitter:
                 return f"(if (result i32) {l} (then {r}) (else (i32.const 0)))"
             return f"(if (result i32) {l} (then (i32.const 1)) (else {r}))"
         if isinstance(e, ir.Convert):
-            op = CONVERSIONS[(e.operand.ty, e.ty)]  # type: ignore[index]
+            key = (e.operand.ty, e.ty)
             inner = self.ex(e.operand)
+            if key in CHECKED_TRUNC:
+                if e.operand.ty == F32:
+                    inner = f"(f64.promote_f32 {inner})"
+                return f"(call {CHECKED_TRUNC[key]} {inner})"  # type: ignore[index]
+            op = CONVERSIONS[key]  # type: ignore[index]
             return f"({op} {inner})" if op else inner
         if isinstance(e, ir.IfExpr):
             return (f"(if (result {self.valtype(e.ty)}) {self.ex(e.cond)} "
@@ -487,7 +748,7 @@ class Emitter:
         if isinstance(e, ir.Call):
             return self.call(f"${e.func}", e.args)
         if isinstance(e, ir.New):
-            return self.call(f"${e.cls.name}.new", e.args)
+            return self.call(f"${e.cls.name}.__new__", e.args)
         if isinstance(e, ir.CallMethod):
             return self.call_method(e)
         if isinstance(e, ir.StructNew):
@@ -521,6 +782,13 @@ class Emitter:
             if isinstance(e.operand.ty, ListT):
                 self.heap(e.operand.ty)
             return self.to_str_code(e.operand.ty, self.ex(e.operand))
+        if isinstance(e, ir.TypeName):
+            c = e.cls.name
+            return f"(struct.get ${c}.vt $__name__ (struct.get ${c} $__vt__ {self.ex(e.operand)}))"
+        if isinstance(e, ir.Seq):
+            result = f" (result {self.valtype(e.ty)})" if e.ty != NONE else ""
+            stmts = " ".join(self.block(e.stmts))
+            return f"(block{result} {stmts} {self.ex(e.value)})"
         raise AssertionError(f"unknown expr {e}")
 
     def const(self, t: Type, v: int | float | bool) -> str:
@@ -596,6 +864,8 @@ class Emitter:
         else:
             if e.op in ("min", "max"):
                 return f"({n}.{e.op} {l} {r})"
+            if e.op == "div_int":
+                return f"(call $rt.f64.div_int {l} {r})"
             if e.op in ("div", "floordiv", "mod"):
                 if t == F64:
                     return f"(call $rt.f64.{e.op} {l} {r})"

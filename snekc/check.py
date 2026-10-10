@@ -3,6 +3,7 @@
 Two passes:
   1. declare  - collect classes (fields, vtable slots), function signatures and
                 top-level code, so bodies can reference anything in the module.
+                The built-in exception classes (builtins.py) are declared first.
   2. check    - type-check every body with local bidirectional inference,
                 flow-sensitive narrowing and definite-assignment tracking, and
                 lower it to ir.* as it goes.
@@ -11,15 +12,21 @@ Rules this enforces (see DESIGN.md for the reasoning):
   * signatures and class fields are annotated; locals are inferred
   * numbers are i32/i64/f32/f64; only lossless widening is implicit
   * `T | None` only for reference types; narrowing via `is not None`/isinstance
-  * __init__ assigns every field before `self` is used (one struct.new)
+  * __init__ assigns every field before `self` is used (one struct.new);
+    super().__init__(...) takes part in that phase and is inlined
+  * exceptions are classes deriving from BaseException; no return/break/
+    continue out of a finally block (PEP 765)
 """
 
 from __future__ import annotations
 
 import ast
+import copy
 from dataclasses import dataclass, field
+from functools import reduce
 
 from . import ir
+from .builtins import BUILTINS_SOURCE
 from .errors import CompileError
 from .types import (
     BOOL,
@@ -40,6 +47,7 @@ from .types import (
     OptionalT,
     Prim,
     Type,
+    common_class,
     is_assignable,
     join_numeric,
     join_types,
@@ -54,7 +62,7 @@ ALLOWED_IMPORTS = {
     "__future__": {"annotations"},
 }
 
-BUILTINS = {"print", "len", "str", "range", "isinstance", "abs", "min", "max", "bool",
+BUILTINS = {"print", "len", "str", "range", "isinstance", "abs", "min", "max", "bool", "type",
             "i32", "i64", "f32", "f64", "int", "float", "list", "object", "super"}
 
 ARITH_OPS = {
@@ -66,6 +74,10 @@ ARITH_OPS = {
 INT_ONLY_OPS = {"bitand", "bitor", "bitxor", "shl", "shr"}
 
 CMP_OPS = {ast.Eq: "eq", ast.NotEq: "ne", ast.Lt: "lt", ast.LtE: "le", ast.Gt: "gt", ast.GtE: "ge"}
+
+EXCEPTION_ATTRS = {"args", "with_traceback", "add_note"}  # BaseException attributes in CPython
+
+PEP765 = ("would swallow any in-flight exception, so snek rejects it (PEP 765; CPython 3.14 warns about it)")
 
 
 # ---- AST helpers ------------------------------------------------------------
@@ -95,19 +107,56 @@ def names_assigned(stmts: list[ast.stmt]) -> set[str]:
         for n in ast.walk(s):
             if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
                 out.add(n.id)
+            elif isinstance(n, ast.ExceptHandler) and n.name:
+                out.add(n.name)
     return out
 
 
+def local_names(fn: ast.FunctionDef) -> set[str]:
+    """Parameters and assigned names of a function (everything that is a local)."""
+    out = {a.arg for a in fn.args.args} | names_assigned(fn.body)
+    out.discard("self")
+    return out
+
+
+class _Renamer(ast.NodeTransformer):
+    def __init__(self, mapping: dict[str, str]):
+        self.mapping = mapping
+
+    def visit_Name(self, node: ast.Name) -> ast.Name:
+        node.id = self.mapping.get(node.id, node.id)
+        return node
+
+    def visit_ExceptHandler(self, node: ast.ExceptHandler) -> ast.ExceptHandler:
+        self.generic_visit(node)
+        if node.name:
+            node.name = self.mapping.get(node.name, node.name)
+        return node
+
+
+def rename_locals(stmts: list[ast.stmt], mapping: dict[str, str]) -> list[ast.stmt]:
+    renamer = _Renamer(mapping)
+    return [renamer.visit(copy.deepcopy(s)) for s in stmts]
+
+
 def has_direct_break(stmts: list[ast.stmt]) -> bool:
-    for s in stmts:
-        if isinstance(s, ast.Break):
+    """Does a `break` in stmts exit the loop whose body they are? Looks inside if/try/except
+    handlers/finally, but not into nested loops (their breaks are their own)."""
+
+    def visit(node: ast.AST) -> bool:
+        if isinstance(node, ast.Break):
             return True
-        if isinstance(s, (ast.While, ast.For)):
-            continue  # a break in a nested loop exits that loop
-        for child in ast.iter_child_nodes(s):
-            if isinstance(child, ast.stmt) and has_direct_break([child]):
-                return True
-    return False
+        if isinstance(node, (ast.While, ast.For, ast.FunctionDef, ast.ClassDef)):
+            return False
+        return any(visit(c) for c in ast.iter_child_nodes(node))
+
+    return any(visit(s) for s in stmts)
+
+
+def except_names(nodes: list[ast.AST]) -> set[str]:
+    """Names bound by `except ... as name` anywhere in nodes. CPython deletes the name when
+    the handler ends, so afterwards it is unbound even if it was assigned before."""
+    return {n.name for node in nodes for n in ast.walk(node) if isinstance(n, ast.ExceptHandler) and n.name}
 
 
 def is_main_guard(s: ast.stmt) -> bool:
@@ -122,6 +171,32 @@ def is_main_guard(s: ast.stmt) -> bool:
 
 def is_docstring(s: ast.stmt) -> bool:
     return isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant) and isinstance(s.value.value, str)
+
+
+def is_super(node: ast.AST) -> bool:
+    return isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "super"
+
+
+def super_init_call(s: ast.stmt) -> ast.Call | None:
+    if (isinstance(s, ast.Expr) and isinstance(s.value, ast.Call) and isinstance(s.value.func, ast.Attribute)
+            and s.value.func.attr == "__init__" and is_super(s.value.func.value)):
+        return s.value
+    return None
+
+
+def int_tainted(e: ir.Expr) -> bool:
+    """A float-typed expression whose CPython value may be an int (see check_ifexp)."""
+    if isinstance(e, ir.IfExpr):
+        return e.mixed_int or int_tainted(e.then) or int_tainted(e.else_)
+    if isinstance(e, ir.Unary) and e.op in ("neg", "abs"):
+        return int_tainted(e.operand)
+    if isinstance(e, ir.Seq):
+        return int_tainted(e.value)
+    return False
+
+
+def is_pure(e: ir.Expr) -> bool:
+    return isinstance(e, (ir.Const, ir.StrLit, ir.NoneLit, ir.LocalGet))
 
 
 # ---- per-function state -------------------------------------------------------
@@ -144,10 +219,12 @@ class Flow:
 
 
 class FuncCtx:
-    def __init__(self, name: str, ret: Type, cls: ClassInfo | None = None, is_init: bool = False):
+    def __init__(self, name: str, ret: Type, cls: ClassInfo | None = None, is_init: bool = False,
+                 owner: ClassInfo | None = None):
         self.name = name
         self.ret = ret
         self.cls = cls
+        self.owner = owner  # class whose body the code belongs to; super() starts at its base
         self.is_init = is_init
         self.constructed = not is_init
         self.params: list[tuple[str, Type]] = []
@@ -156,6 +233,13 @@ class FuncCtx:
         self.flow = Flow()
         self.loop_depth = 0
         self.ntemps = 0
+        self.handler_excs: list[str | None] = []  # caught-exception locals, innermost last; None = finally
+        self.finally_loops: list[int] = []  # loop depth at entry to each enclosing finally block
+        self.inline_depth = 0  # > 0 while checking a base __init__ inlined by super().__init__()
+        self.inline_exits: list[bool] = []  # per inlined __init__: does a `return` leave it early?
+        self.ctor_state: CtorState | None = None
+        self.inline_return_ok = False  # may a `return` here leave the inlined base __init__?
+        self.ninline = 0
 
     def add_param(self, name: str, ty: Type) -> None:
         self.params.append((name, ty))
@@ -178,12 +262,20 @@ class FuncCtx:
         return ir.LocalGet(self.flow.narrowed.get(name, declared), name, declared)
 
 
+@dataclass
+class CtorState:
+    cls: ClassInfo  # the class being constructed
+    assigned: dict[str, str] = field(default_factory=dict)  # field -> local holding its value
+    out: list[ir.Stmt] = field(default_factory=list)
+
+
 # ---- the checker ---------------------------------------------------------------
 
 
 class Checker:
     def __init__(self, tree: ast.Module):
         self.tree = tree
+        self.builtin_tree = ast.parse(BUILTINS_SOURCE, filename="<snek builtins>")
         self.classes: dict[str, ClassInfo] = {}
         self.class_order: list[ClassInfo] = []
         self.funcs: dict[str, tuple[FuncSig, ast.FunctionDef]] = {}
@@ -192,6 +284,13 @@ class Checker:
         self.out: list[ir.Func] = []
         self.ctor_sigs: dict[ClassInfo, FuncSig] = {}
         self.ctx: FuncCtx = FuncCtx("<module>", NONE)
+
+    @property
+    def exc_base(self) -> ClassInfo:
+        return self.classes["BaseException"]
+
+    def is_exception(self, t: Type) -> bool:
+        return isinstance(t, ClassT) and t.info.is_subclass_of(self.exc_base)
 
     # ==== pass 1: declarations ====================================================
 
@@ -205,9 +304,12 @@ class Checker:
         for name, (sig, node) in self.funcs.items():
             self.out.append(self.check_function(name, sig, node))
         self.out.append(self.check_main())
-        return ir.Module(self.out, self.class_order, "__main__")
+        return ir.Module(self.out, self.class_order, "snek.main")
 
     def declare_module(self) -> None:
+        for s in self.builtin_tree.body:
+            assert isinstance(s, ast.ClassDef)
+            self.classes[s.name] = ClassInfo(s.name, s, builtin=True)
         pending: list[ast.FunctionDef] = []
         for s in self.tree.body:
             if isinstance(s, ast.ImportFrom):
@@ -237,7 +339,7 @@ class Checker:
                 self.main_stmts.extend(s.body)
             elif is_docstring(s):
                 continue
-            elif isinstance(s, ast.Expr):
+            elif isinstance(s, (ast.Expr, ast.If, ast.While, ast.For, ast.Try, ast.Raise, ast.Assert)):
                 self.main_stmts.append(s)
             elif isinstance(s, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
                 raise CompileError("module-level variables are not supported yet; "
@@ -252,9 +354,12 @@ class Checker:
             self.funcs[node.name] = (self.signature(node, is_method=False), node)
 
     def check_new_name(self, name: str, node: ast.AST) -> None:
+        existing = self.classes.get(name)
+        if existing is not None and existing.builtin:
+            raise CompileError(f"'{name}' is a built-in exception class and cannot be redefined", node)
         if name in self.classes or name in self.funcs:
             raise CompileError(f"'{name}' is already defined", node)
-        if name in BUILTINS or name in ("str", "u8s", "rt", "lit") or name.startswith(("list_", "opt_")):
+        if name in BUILTINS or name in ("str", "u8s", "rt", "lit", "snek"):
             raise CompileError(f"'{name}' is a reserved name", node)
         if not name.isascii():
             raise CompileError("identifiers must be ASCII", node)
@@ -275,7 +380,8 @@ class Checker:
                 if isinstance(b, ast.Name) and b.id == "object":
                     continue
                 if not (isinstance(b, ast.Name) and b.id in self.classes):
-                    raise CompileError("base class must be a class defined in this module", b)
+                    raise CompileError("base class must be a class defined in this module or a built-in "
+                                       "exception class", b)
                 cls.base = self.classes[b.id]
                 if any(isinstance(d, ast.Name) and d.id == "final" for d in cls.base.node.decorator_list):
                     raise CompileError(f"cannot subclass @final class '{cls.base.name}'", b)
@@ -322,13 +428,15 @@ class Checker:
                     raise CompileError(f"special method {name} is not supported yet", item)
                 if name in cls.fields:
                     raise CompileError(f"'{name}' is already a field of {cls.name}", item)
+                self.check_exception_attr(cls, name, item)
                 sig = self.signature(item, is_method=True)
                 inherited = cls.methods.get(name)
                 if inherited:
                     if not sig.same_as(inherited.sig):
                         raise CompileError(
                             f"{cls.name}.{name} overrides {inherited.decl.name}.{name} with a different "
-                            f"signature; overrides must match exactly", item)
+                            f"signature; overrides must keep the same parameter names, types, defaults and "
+                            f"return type", item)
                     cls.methods[name] = MethodInfo(name, inherited.sig, inherited.decl, inherited.slot, item, cls)
                 else:
                     cls.methods[name] = MethodInfo(name, sig, cls, len(cls.methods), item, cls)
@@ -337,6 +445,11 @@ class Checker:
                                    "fields): `name: T = value`", item)
             else:
                 raise CompileError(f"unsupported statement in class body: {type(item).__name__}", item)
+
+    def check_exception_attr(self, cls: ClassInfo, name: str, node: ast.AST) -> None:
+        if name in EXCEPTION_ATTRS and cls.is_subclass_of(self.classes["BaseException"]):
+            raise CompileError(f"'{name}' is reserved on exception classes (it is a BaseException attribute "
+                               f"in CPython, and snek does not model it)", node)
 
     def declare_field(self, cls: ClassInfo, item: ast.AnnAssign) -> None:
         assert isinstance(item.target, ast.Name)
@@ -350,8 +463,9 @@ class Checker:
         ty = self.resolve_type(ann)
         if ty == NONE:
             raise CompileError("a field cannot have type None", ann)
-        if name.startswith("__"):
+        if name.startswith("__") and not cls.builtin:
             raise CompileError("field names starting with '__' are reserved", item)
+        self.check_exception_attr(cls, name, item)
         if name in cls.fields:
             owner = cls.fields[name].owner.name
             raise CompileError(f"field '{name}' is already declared in {owner}", item)
@@ -363,17 +477,18 @@ class Checker:
         a = node.args
         if a.vararg or a.kwarg or a.kwonlyargs or a.posonlyargs:
             raise CompileError("*args, **kwargs and keyword-only parameters are not supported yet", node)
-        if a.defaults:
-            raise CompileError("default parameter values are not supported yet", a.defaults[0])
         if node.decorator_list and not is_method:
             raise CompileError("function decorators are not supported yet", node.decorator_list[0])
         args = list(a.args)
+        defaults: list[ast.expr | None] = [None] * (len(args) - len(a.defaults)) + list(a.defaults)
         if is_method:
             if not args or args[0].arg != "self":
                 raise CompileError("methods must take `self` as their first parameter", node)
-            args = args[1:]
+            if defaults[0] is not None:
+                raise CompileError("`self` cannot have a default value", defaults[0])
+            args, defaults = args[1:], defaults[1:]
         params: list[tuple[str, Type]] = []
-        for arg in args:
+        for arg, d in zip(args, defaults):
             if arg.annotation is None:
                 raise CompileError(f"parameter '{arg.arg}' needs a type annotation", arg)
             t = self.resolve_type(arg.annotation)
@@ -381,6 +496,11 @@ class Checker:
                 raise CompileError("a parameter cannot have type None", arg.annotation)
             if not arg.arg.isascii():
                 raise CompileError("identifiers must be ASCII", arg)
+            if d is not None:
+                if not (isinstance(d, ast.Constant) or is_num_literal(d)):
+                    raise CompileError("default values must be literals (numbers, strings, bools or None); "
+                                       "CPython evaluates defaults once, so anything mutable would be shared", d)
+                self.coerce(self.check_expr(d, t), t, d, f"default for '{arg.arg}'")
             params.append((arg.arg, t))
         if node.returns is None:
             if node.name == "__init__":
@@ -389,7 +509,7 @@ class Checker:
                 raise CompileError(f"'{node.name}' needs a return annotation (`-> T` or `-> None`)", node)
         else:
             ret = self.resolve_type(node.returns)
-        return FuncSig(params, ret)
+        return FuncSig(params, ret, defaults)
 
     def resolve_type(self, node: ast.expr) -> Type:
         if isinstance(node, ast.Constant):
@@ -466,7 +586,7 @@ class Checker:
         return ir.Func(name, self.ctx.params, sig.ret, self.ctx.locals, body)
 
     def check_method(self, cls: ClassInfo, m: MethodInfo) -> ir.Func:
-        self.ctx = FuncCtx(f"{cls.name}.{m.name}", m.sig.ret, cls)
+        self.ctx = FuncCtx(f"{cls.name}.{m.name}", m.sig.ret, cls, owner=cls)
         nonnull: set[str] = set()
         self_cast = None
         if m.decl is cls:
@@ -478,8 +598,7 @@ class Checker:
             self.ctx.flow.assigned.add("self")
             nonnull.add("self")
             self_cast = cls
-        # Overrides share the slot's types but may rename parameters.
-        for p, t in self.signature(m.node, is_method=True).params:
+        for p, t in m.sig.params:
             self.ctx.add_param(p, t)
         body = self.check_body(m.node.body, m.sig.ret, m.node)
         return ir.Func(f"{cls.name}.{m.name}", self.ctx.params, m.sig.ret, self.ctx.locals, body,
@@ -488,7 +607,7 @@ class Checker:
     def check_main(self) -> ir.Func:
         self.ctx = FuncCtx("__main__", NONE)
         body, _ = self.check_block(self.main_stmts)
-        return ir.Func("__main__", [], NONE, self.ctx.locals, body)
+        return ir.Func("snek.main", [], NONE, self.ctx.locals, body)
 
     def check_body(self, stmts: list[ast.stmt], ret: Type, node: ast.AST) -> list[ir.Stmt]:
         body, terminated = self.check_block(stmts)
@@ -496,57 +615,132 @@ class Checker:
             raise CompileError(f"'{self.ctx.name}' can reach the end without returning a {ret}", node)
         return body
 
+    # ---- constructors -------------------------------------------------------------
+
     def check_ctor(self, cls: ClassInfo) -> ir.Func:
-        """Lower __init__ into `C.new(params) -> C`.
+        """Lower __init__ into `C.new(params) -> C`, Swift-style two-phase init.
 
         WasmGC allocates a struct with all field values at once (struct.new), and
         non-null reference fields have no default. So the leading statements of
         __init__ may assign `self.f = <expr not using self>` (evaluated into
-        temporaries) and run code that does not touch self; the first statement
-        that uses self triggers the allocation, by which point every field must
-        have a value. The rest of __init__ then runs on the real object.
+        temporaries), call super().__init__(...) (whose body is inlined and takes
+        part in the same phase) and run code that does not touch self. The first
+        statement that uses self triggers the allocation, by which point every
+        field must have a value. The rest of __init__ then runs on the real object.
         """
         sig = self.ctor_sig(cls)
         init = cls.effective_init()
         self.ctx = ctx = FuncCtx(f"{cls.name}.__init__", NONE, cls, is_init=True)
         for p, t in sig.params:
             ctx.add_param(p, t)
-        stmts = init[0].body if init else []
-        out: list[ir.Stmt] = []
-        assigned: dict[str, str] = {}
+        st = CtorState(cls)
+        ctx.ctor_state = st
         terminated = False
-        for s in stmts:
+        if init is not None:
+            node, owner = init
+            if owner is cls:
+                self.require_exception_super(cls, node)
+            terminated = self.init_body(st, node.body, owner)
+        if not ctx.constructed and not terminated:
+            st.out.append(self.construct(cls, st.assigned, init[0] if init else cls.node))
+        if not terminated:
+            st.out.append(ir.Return(ctx.get("self")))
+        return ir.Func(f"{cls.name}.__new__", ctx.params, ClassT(cls), ctx.locals, st.out)
+
+    def require_exception_super(self, cls: ClassInfo, node: ast.FunctionDef) -> None:
+        if cls is self.exc_base or not cls.is_subclass_of(self.exc_base):
+            return
+        if not any(super_init_call(s) for s in node.body):
+            raise CompileError(
+                f"{cls.name}.__init__ must call super().__init__(message): CPython derives str(e) from the "
+                f"constructor arguments when it is skipped, which snek does not emulate", node)
+
+    def init_body(self, st: CtorState, stmts: list[ast.stmt], owner: ClassInfo) -> bool:
+        ctx = self.ctx
+        saved_owner, ctx.owner = ctx.owner, owner
+        terminated = False
+        for i, s in enumerate(stmts):
+            call = super_init_call(s)
+            if call is not None:
+                if ctx.constructed:
+                    raise CompileError("super().__init__() must come before `self` is used: the object is "
+                                       "allocated once every field (including inherited ones) has a value", s)
+                terminated = self.inline_super_init(st, call, owner) or terminated
+                continue
             if not ctx.constructed:
                 fa = self.self_field_assign(s)
                 if fa is not None and not refers_to_self(fa[1]):
-                    fname, vnode = fa
-                    f = cls.fields.get(fname)
-                    if f is None:
-                        raise CompileError(f"{cls.name} has no field '{fname}'; declare it in the class "
-                                           f"body: `{fname}: T`", s)
-                    tmp = assigned.get(fname) or f"init.{fname}"
-                    if fname not in assigned:
-                        ctx.declare(tmp, f.ty)
-                        assigned[fname] = tmp
-                    out.append(ir.SetLocal(tmp, self.coerce(self.check_expr(vnode, f.ty), f.ty, vnode)))
-                    ctx.flow.assigned.add(tmp)
+                    self.prefix_field_assign(st, fa[0], fa[1], owner, s)
                     continue
                 if is_docstring(s):
                     continue
                 if not refers_to_self(s):
+                    # An early return from an inlined base __init__ is sound only if nothing after
+                    # this statement allocates the object or assigns a field.
+                    ctx.inline_return_ok = ctx.inline_depth > 0 and not any(
+                        refers_to_self(t) or super_init_call(t) for t in stmts[i + 1:])
                     stmts_ir, term = self.check_stmt(s)
-                    out += stmts_ir
+                    ctx.inline_return_ok = False
+                    st.out += stmts_ir
                     terminated = terminated or term
                     continue
-                out.append(self.construct(cls, assigned, s))
+                if any(super_init_call(later) for later in stmts[i + 1:]):
+                    raise CompileError("super().__init__() must come before `self` is used: the object is "
+                                       "allocated once every field (including inherited ones) has a value, "
+                                       "so move the super().__init__(...) call above this line", s)
+                st.out.append(self.construct(st.cls, st.assigned, s))
             stmts_ir, term = self.check_stmt(s)
-            out += stmts_ir
+            st.out += stmts_ir
             terminated = terminated or term
-        if not ctx.constructed:
-            out.append(self.construct(cls, assigned, init[0] if init else cls.node))
-        if not terminated:
-            out.append(ir.Return(ctx.get("self")))
-        return ir.Func(f"{cls.name}.new", ctx.params, ClassT(cls), ctx.locals, out)
+        ctx.owner = saved_owner
+        return terminated
+
+    def prefix_field_assign(self, st: CtorState, fname: str, vnode: ast.expr, owner: ClassInfo,
+                            s: ast.stmt) -> None:
+        ctx = self.ctx
+        f = st.cls.fields.get(fname)
+        if f is None or (fname.startswith("__") and not owner.builtin):
+            raise CompileError(f"{st.cls.name} has no field '{fname}'; declare it in the class body: "
+                               f"`{fname}: T`", s)
+        tmp = st.assigned.get(fname) or f"init.{fname}"
+        if fname not in st.assigned:
+            ctx.declare(tmp, f.ty)
+            st.assigned[fname] = tmp
+        st.out.append(ir.SetLocal(tmp, self.coerce(self.check_expr(vnode, f.ty), f.ty, vnode)))
+        ctx.flow.assigned.add(tmp)
+
+    def inline_super_init(self, st: CtorState, call: ast.Call, owner: ClassInfo) -> bool:
+        """super().__init__(args): bind the arguments, then check the base __init__ body in place
+        (locals renamed apart) as part of the same construction phase."""
+        ctx = self.ctx
+        sup = call.func.value  # type: ignore[attr-defined]
+        if sup.args or sup.keywords:
+            raise CompileError("super() with arguments is not supported; write super()", sup)
+        base = owner.base
+        init = base.effective_init() if base else None
+        if init is None:
+            if call.args or call.keywords:
+                raise CompileError("object.__init__() takes no arguments", call)
+            return False
+        node, init_owner = init
+        sig = self.signature(node, is_method=True)
+        prelude, args = self.bind_args(sig, call, f"{base.name}.__init__")  # type: ignore[union-attr]
+        st.out += prelude
+        ctx.ninline += 1
+        mapping = {n: f"{init_owner.name}.{ctx.ninline}.{n}" for n in local_names(node)}
+        for (p, t), a in zip(sig.params, args):
+            ctx.declare(mapping[p], t)
+            st.out.append(ir.SetLocal(mapping[p], a))
+            ctx.flow.assigned.add(mapping[p])
+        outer, st.out = st.out, []
+        ctx.inline_depth += 1
+        ctx.inline_exits.append(False)
+        terminated = self.init_body(st, rename_locals(node.body, mapping), init_owner)
+        exited = ctx.inline_exits.pop()
+        ctx.inline_depth -= 1
+        outer.append(ir.InlineBlock(st.out))  # a `return` in the base __init__ leaves just this block
+        st.out = outer
+        return terminated and not exited
 
     def self_field_assign(self, s: ast.stmt) -> tuple[str, ast.expr] | None:
         target = value = None
@@ -559,7 +753,7 @@ class Checker:
             return target.attr, value
         return None
 
-    def construct(self, cls: ClassInfo, assigned: dict[str, str], at: ast.AST) -> ir.Stmt:
+    def field_values(self, cls: ClassInfo, assigned: dict[str, str], at: ast.AST, when: str) -> list[ir.Expr]:
         values: list[ir.Expr] = []
         missing: list[str] = []
         for f in cls.fields.values():
@@ -572,9 +766,13 @@ class Checker:
         if missing:
             names = ", ".join(f"self.{m}" for m in missing)
             raise CompileError(
-                f"{cls.name}.__init__ must assign {names} before `self` is used (or the field needs a "
-                f"default in the class body). Objects are allocated in one step with every field set, "
-                f"so field assignments have to come first.", at)
+                f"{cls.name}.__init__ must assign {names} {when} (or the field needs a default in the class "
+                f"body). Objects are allocated in one step with every field set, so field assignments have "
+                f"to come first.", at)
+        return values
+
+    def construct(self, cls: ClassInfo, assigned: dict[str, str], at: ast.AST) -> ir.Stmt:
+        values = self.field_values(cls, assigned, at, "before `self` is used")
         self.ctx.declare("self", ClassT(cls))
         self.ctx.flow.assigned.add("self")
         self.ctx.constructed = True
@@ -623,7 +821,7 @@ class Checker:
         if isinstance(s, ast.AugAssign):
             return self.check_augassign(s), False
         if isinstance(s, ast.Return):
-            return [self.check_return(s)], True
+            return self.check_return(s), True
         if isinstance(s, ast.If):
             return self.check_if(s)
         if isinstance(s, ast.While):
@@ -631,16 +829,24 @@ class Checker:
         if isinstance(s, ast.For):
             return self.check_for(s), False
         if isinstance(s, (ast.Break, ast.Continue)):
+            word = type(s).__name__.lower()
             if ctx.loop_depth == 0:
-                raise CompileError(f"'{type(s).__name__.lower()}' outside a loop", s)
+                raise CompileError(f"'{word}' outside a loop", s)
+            if ctx.finally_loops and ctx.loop_depth == ctx.finally_loops[-1]:
+                raise CompileError(f"'{word}' out of a finally block {PEP765}", s)
             return [ir.Break() if isinstance(s, ast.Break) else ir.Continue()], True
         if isinstance(s, ast.Pass):
             return [], False
         if isinstance(s, ast.Assert):
             return self.check_assert(s), False
-        if isinstance(s, (ast.Raise, ast.Try)):
-            raise CompileError("exceptions are not supported yet (planned: Wasm exception handling, "
-                               "on by default in Wasmtime 47+)", s)
+        if isinstance(s, ast.Raise):
+            return [self.check_raise(s)], True
+        if isinstance(s, ast.Try):
+            return self.check_try(s)
+        if isinstance(s, ast.TryStar):
+            raise CompileError("except* (exception groups) is not supported", s)
+        if isinstance(s, (ast.With, ast.AsyncWith)):
+            raise CompileError("with statements are not supported yet (they need __enter__/__exit__)", s)
         if isinstance(s, (ast.FunctionDef, ast.ClassDef, ast.Lambda)):
             raise CompileError("nested functions and classes are not supported yet", s)
         if isinstance(s, (ast.Global, ast.Nonlocal)):
@@ -648,9 +854,16 @@ class Checker:
         raise CompileError(f"unsupported statement: {type(s).__name__}", s)
 
     def check_print(self, call: ast.Call) -> ir.Stmt:
-        if call.keywords:
-            raise CompileError("print() keyword arguments (sep=, end=) are not supported yet", call)
-        return ir.Print([self.to_str(self.check_expr(a), a) for a in call.args])
+        opts = {"sep": " ", "end": "\n"}
+        for kw in call.keywords:
+            if kw.arg not in opts:
+                raise CompileError(f"print() keyword '{kw.arg}' is not supported (sep= and end= are)", kw)
+            if not (isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str)):
+                raise CompileError(f"print({kw.arg}=...) must be a string literal", kw.value)
+            opts[kw.arg] = kw.value.value
+        if any(isinstance(a, ast.Starred) for a in call.args):
+            raise CompileError("print(*args) is not supported", call)
+        return ir.Print([self.to_str(self.check_expr(a), a) for a in call.args], opts["sep"], opts["end"])
 
     def check_assign(self, target: ast.expr, value: ast.expr, ann: Type | None, node: ast.AST) -> list[ir.Stmt]:
         ctx = self.ctx
@@ -665,6 +878,7 @@ class Checker:
                 v = self.coerce(self.check_expr(value, declared), declared, value)
             else:
                 v = self.check_expr(value)
+                self.no_int_taint(v, value)
                 if v.ty == NONE:
                     raise CompileError(f"cannot infer a type for '{name}' from None; annotate it, "
                                        f"e.g. `{name}: Node | None = None`", node)
@@ -679,21 +893,30 @@ class Checker:
             else:
                 ctx.flow.narrowed.pop(name, None)
             return [ir.SetLocal(name, v)]
+        # CPython evaluates the right-hand side before the target object and index.
         if isinstance(target, ast.Attribute):
             obj = self.check_expr(target.value)
             cls, f = self.field_of(obj, target)
             if f.final:
                 raise CompileError(f"'{f.name}' is Final and can only be assigned in __init__ before `self` "
                                    f"is used", target)
-            return [ir.SetField(obj, cls, f, self.coerce(self.check_expr(value, f.ty), f.ty, value))]
+            pre, v = self.value_first(self.coerce(self.check_expr(value, f.ty), f.ty, value), f.ty, [obj])
+            return pre + [ir.SetField(obj, cls, f, v)]
         if isinstance(target, ast.Subscript):
             lst = self.check_expr(target.value)
             elem = self.list_elem(lst, target.value)
             idx = self.check_index(target.slice)
-            return [ir.SetIndex(lst, idx, self.coerce(self.check_expr(value, elem), elem, value))]
+            pre, v = self.value_first(self.coerce(self.check_expr(value, elem), elem, value), elem, [lst, idx])
+            return pre + [ir.SetIndex(lst, idx, v)]
         if isinstance(target, (ast.Tuple, ast.List)):
             raise CompileError("tuple unpacking is not supported yet", target)
         raise CompileError("unsupported assignment target", target)
+
+    def value_first(self, v: ir.Expr, ty: Type, targets: list[ir.Expr]) -> tuple[list[ir.Stmt], ir.Expr]:
+        if is_pure(v) or all(is_pure(t) for t in targets):
+            return [], v
+        tmp = self.ctx.temp(ty)
+        return [ir.SetLocal(tmp, v)], self.ctx.get(tmp)
 
     def check_augassign(self, s: ast.AugAssign) -> list[ir.Stmt]:
         ctx = self.ctx
@@ -729,30 +952,175 @@ class Checker:
                     ir.SetIndex(ctx.get(ltmp), ctx.get(itmp), self.coerce(new, elem, s))]
         raise CompileError("unsupported augmented assignment target", t)
 
-    def check_return(self, s: ast.Return) -> ir.Stmt:
+    def check_return(self, s: ast.Return) -> list[ir.Stmt]:
         ctx = self.ctx
+        if ctx.finally_loops:
+            raise CompileError(f"'return' in a finally block {PEP765}", s)
         if ctx.is_init:
             if s.value is not None:
                 raise CompileError("__init__ cannot return a value", s)
             if not ctx.constructed:
-                raise CompileError("return in __init__ before all fields are assigned", s)
-            return ir.Return(ctx.get("self"))
+                if ctx.inline_depth:
+                    if not ctx.inline_return_ok:
+                        raise CompileError(
+                            "this return in a base __init__ (reached through super().__init__()) would skip code "
+                            "that uses `self` or assigns a field before the object exists; that is only "
+                            "supported when nothing after it in that __init__ does", s)
+                    ctx.inline_exits[-1] = True  # nothing skipped builds the object: just leave the block
+                    return [ir.ExitInline()]
+                # Every field has its value already: allocate the object on this path and return it.
+                st = ctx.ctor_state
+                assert st is not None
+                values = self.field_values(st.cls, st.assigned, s, "before returning")
+                if "self" not in ctx.types:
+                    ctx.declare("self", ClassT(st.cls))
+                return [ir.SetLocal("self", ir.StructNew(ClassT(st.cls), st.cls, values)),
+                        ir.Return(ir.LocalGet(ClassT(st.cls), "self", ClassT(st.cls)))]
+            if ctx.inline_depth:  # returns from the base __init__ to the subclass __init__
+                ctx.inline_exits[-1] = True
+                return [ir.ExitInline()]
+            return [ir.Return(ctx.get("self"))]
         if ctx.ret == NONE:
             if s.value is not None and not (isinstance(s.value, ast.Constant) and s.value.value is None):
                 raise CompileError(f"'{ctx.name}' is declared `-> None` but returns a value", s)
-            return ir.Return(None)
+            return [ir.Return(None)]
         if s.value is None:
             raise CompileError(f"'{ctx.name}' must return a {ctx.ret}", s)
-        return ir.Return(self.coerce(self.check_expr(s.value, ctx.ret), ctx.ret, s.value))
+        return [ir.Return(self.coerce(self.check_expr(s.value, ctx.ret), ctx.ret, s.value))]
 
     def check_assert(self, s: ast.Assert) -> list[ir.Stmt]:
         cond = self.check_cond(s.test)
-        msg: ir.Expr = ir.StrLit(STR, "AssertionError")
-        if s.msg is not None:
-            msg = ir.StrConcat(STR, ir.StrLit(STR, "AssertionError: "), self.to_str(self.check_expr(s.msg), s.msg))
+        msg = None if s.msg is None else self.to_str(self.check_expr(s.msg), s.msg)
         true_facts, _ = self.facts(s.test)
         self.ctx.flow.narrowed.update(true_facts)  # a failed assert never falls through
-        return [ir.If(ir.Unary(BOOL, "not", cond), [ir.Panic(msg)], [])]
+        exc = self.new_exception("AssertionError", msg)
+        return [ir.If(ir.Unary(BOOL, "not", cond), [ir.Raise(exc)], [])]
+
+    def new_exception(self, cls_name: str, msg: ir.Expr | None) -> ir.Expr:
+        cls = self.classes[cls_name]
+        return ir.New(ClassT(cls), cls, [msg if msg is not None else ir.NoneLit(OptionalT(STR))])
+
+    # ---- exceptions -------------------------------------------------------------
+
+    def check_raise(self, s: ast.Raise) -> ir.Stmt:
+        ctx = self.ctx
+        if s.cause is not None:
+            raise CompileError("`raise ... from ...` is not supported yet (no exception chaining)", s)
+        if s.exc is None:
+            if not ctx.handler_excs:
+                raise CompileError("bare `raise` is only allowed inside an except block", s)
+            if ctx.handler_excs[-1] is None:
+                raise CompileError("bare `raise` in a finally block is not supported: it re-raises "
+                                   "whichever exception is in flight, which depends on the path taken", s)
+            return ir.Raise(None, ctx.handler_excs[-1])
+        e = s.exc
+        if isinstance(e, ast.Name) and e.id in self.classes and e.id not in ctx.types:
+            # `raise ValueError` instantiates the class with no arguments
+            cls = self.classes[e.id]
+            if not cls.is_subclass_of(self.exc_base):
+                raise CompileError(f"exceptions must derive from BaseException, and {cls.name} does not", e)
+            call = ast.copy_location(ast.Call(func=e, args=[], keywords=[]), e)
+            prelude, args = self.bind_args(self.ctor_sig(cls), call, cls.name)
+            return ir.Raise(self.seq(prelude, ir.New(ClassT(cls), cls, args)))
+        v = self.check_expr(e)
+        if isinstance(v.ty, OptionalT) and self.is_exception(v.ty.inner):
+            raise CompileError(f"this may be None (type {v.ty}); check `is not None` before raising it", e)
+        if not self.is_exception(v.ty):
+            raise CompileError(f"exceptions must derive from BaseException, got {v.ty}", e)
+        return ir.Raise(v)
+
+    def exc_classes(self, node: ast.expr) -> list[ClassInfo]:
+        elts = node.elts if isinstance(node, ast.Tuple) else [node]
+        out: list[ClassInfo] = []
+        for e in elts:
+            if not (isinstance(e, ast.Name) and e.id in self.classes):
+                raise CompileError("except needs an exception class or a tuple of them", e)
+            c = self.classes[e.id]
+            if not c.is_subclass_of(self.exc_base):
+                raise CompileError(f"'{c.name}' is not an exception class (it does not derive from "
+                                   f"BaseException)", e)
+            out.append(c)
+        return out
+
+    def check_try(self, s: ast.Try) -> tuple[list[ir.Stmt], bool]:
+        """Flow rules: a handler can start after any prefix of the try body, so it sees only what
+        was definitely assigned before `try`, minus narrowings the body may have invalidated. The
+        finally block can start almost anywhere, so it gets the same treatment for the whole
+        statement. After the statement, the paths that fall through are merged."""
+        ctx = self.ctx
+        before = ctx.flow
+        exc_local = ctx.temp(OptionalT(ClassT(self.exc_base)))
+        body_names = names_assigned(s.body)
+
+        ctx.flow = before.copy()
+        body_ir, body_term = self.check_block(s.body)
+        else_ir, else_term = self.check_block(s.orelse)
+        normal_term = body_term or else_term
+        exits: list[Flow] = [] if normal_term else [ctx.flow]
+        all_term = normal_term
+
+        handlers: list[ir.Handler] = []
+        for i, h in enumerate(s.handlers):
+            if h.type is None and i != len(s.handlers) - 1:
+                raise CompileError("a bare `except:` must be the last handler", h)
+            classes = None if h.type is None else self.exc_classes(h.type)
+            ctx.flow = before.copy()
+            for n in body_names:
+                ctx.flow.narrowed.pop(n, None)
+            ctx.flow.assigned -= except_names(s.body)  # a nested handler in the body may have run
+            var_decl: Type | None = None
+            if h.name:
+                caught = ClassT(reduce(lambda a, b: common_class(a, b) or self.exc_base,  # type: ignore[arg-type]
+                                       classes or [self.exc_base]))
+                var_decl = ctx.types.get(h.name)
+                if var_decl is None:
+                    var_decl = ClassT(self.exc_base)
+                    ctx.declare(h.name, var_decl)
+                elif not (isinstance(strip_optional(var_decl), ClassT) and is_assignable(caught, var_decl)):
+                    raise CompileError(f"'{h.name}' is already a local of type {var_decl}; pick another name "
+                                       f"for the exception", h)
+                ctx.flow.assigned.add(h.name)
+                if caught != var_decl:
+                    ctx.flow.narrowed[h.name] = caught
+                else:
+                    ctx.flow.narrowed.pop(h.name, None)
+            ctx.handler_excs.append(exc_local)
+            h_ir, h_term = self.check_block(h.body)
+            ctx.handler_excs.pop()
+            ctx.flow.assigned -= except_names(h.body)
+            if h.name:  # CPython deletes the name at the end of the handler
+                ctx.flow.assigned.discard(h.name)
+                ctx.flow.narrowed.pop(h.name, None)
+            handlers.append(ir.Handler(classes, h.name, var_decl, h_ir))
+            if not h_term:
+                exits.append(ctx.flow)
+            all_term = all_term and h_term
+
+        merged = reduce(Flow.merge, exits) if exits else before.copy()
+        fin_ir: list[ir.Stmt] | None = None
+        fin_term = False
+        if s.finalbody:
+            ctx.flow = before.copy()
+            region: list[ast.AST] = [*s.body, *s.orelse, *s.handlers]
+            for n in names_assigned(region):  # type: ignore[arg-type]
+                ctx.flow.narrowed.pop(n, None)
+            ctx.flow.assigned -= except_names(region)
+            ctx.finally_loops.append(ctx.loop_depth)
+            ctx.handler_excs.append(None)  # a bare raise here would depend on the path taken
+            fin_ir, fin_term = self.check_block(s.finalbody)
+            ctx.handler_excs.pop()
+            ctx.finally_loops.pop()
+            # the finally body runs on every path: what it deletes is gone, what it assigns is there
+            merged.assigned = (merged.assigned - except_names(s.finalbody)) | ctx.flow.assigned
+            for n in names_assigned(s.finalbody):
+                merged.narrowed.pop(n, None)
+                if n in ctx.flow.narrowed:
+                    merged.narrowed[n] = ctx.flow.narrowed[n]
+        terminated = all_term or fin_term
+        ctx.flow = before.copy() if terminated else merged
+        return [ir.Try(body_ir, handlers, else_ir, fin_ir, exc_local)], terminated
+
+    # ---- if / loops ---------------------------------------------------------------
 
     def check_if(self, s: ast.If) -> tuple[list[ir.Stmt], bool]:
         ctx = self.ctx
@@ -783,6 +1151,7 @@ class Checker:
         loop_flow = before.copy()
         for n in names_assigned(body):
             loop_flow.narrowed.pop(n, None)
+        loop_flow.assigned -= except_names(body)  # deleted by a handler in an earlier iteration
         self.ctx.flow = loop_flow
         return loop_flow
 
@@ -827,7 +1196,7 @@ class Checker:
             ltmp, itmp = ctx.temp(seq.ty), ctx.temp(I32)
             head = [ir.SetLocal(var, ir.ListGet(elem, ctx.get(ltmp), ctx.get(itmp)))]
             ctx.flow = loop_flow.copy()  # the loop variable is only assigned inside the body
-            ctx.flow.assigned.add(var)
+            ctx.flow.assigned |= {var, ltmp, itmp}
             body = self.check_loop_body(s.body, head)
             cond = ir.Compare(BOOL, "lt", I32, ctx.get(itmp), ir.ListLen(I32, ctx.get(ltmp)))
             step = [ir.SetLocal(itmp, ir.Binary(I32, "add", ctx.get(itmp), ir.Const(I32, 1)))]
@@ -865,7 +1234,7 @@ class Checker:
         ctr, end = ctx.temp(hint), ctx.temp(hint)
         head = [ir.SetLocal(var, ctx.get(ctr))]
         ctx.flow = loop_flow.copy()  # the loop variable is only assigned inside the body
-        ctx.flow.assigned.add(var)
+        ctx.flow.assigned |= {var, ctr, end}
         body = self.check_loop_body(s.body, head)
         cond = ir.Compare(BOOL, "lt" if step > 0 else "gt", hint, ctx.get(ctr), ctx.get(end))
         inc = [ir.SetLocal(ctr, ir.Binary(hint, "add", ctx.get(ctr), ir.Const(hint, step)))]
@@ -931,7 +1300,8 @@ class Checker:
         return self.check_expr(node)
 
     def check_operands(self, left: ast.expr, right: ast.expr, expected: Type | None) -> tuple[ir.Expr, ir.Expr]:
-        num_expected = expected if isinstance(expected, Prim) and expected.is_numeric else None
+        # Only an int context flows into literal operands: in a float context, 2 + 3 is still the int 5.
+        num_expected = expected if isinstance(expected, Prim) and expected.is_int else None
         if is_num_literal(left) and not is_num_literal(right):
             r = self.check_expr(right, num_expected)
             return self.check_operand(left, r.ty), r
@@ -939,7 +1309,6 @@ class Checker:
         return l, self.check_operand(right, l.ty)
 
     def check_expr(self, node: ast.expr, expected: Type | None = None) -> ir.Expr:
-        ctx = self.ctx
         if isinstance(node, ast.Constant):
             return self.check_constant(node, expected)
         if isinstance(node, ast.Name):
@@ -949,7 +1318,8 @@ class Checker:
                 return self.number(literal_value(node), expected, node)
             if isinstance(node.op, ast.Not):
                 return ir.Unary(BOOL, "not", self.check_cond(node.operand))
-            v = self.check_expr(node.operand, expected)
+            int_only = isinstance(node.op, ast.Invert) and not (isinstance(expected, Prim) and expected.is_int)
+            v = self.check_expr(node.operand, None if int_only else expected)
             if not (isinstance(v.ty, Prim) and v.ty.is_numeric):
                 raise CompileError(f"unary operator on non-number {v.ty}", node)
             if isinstance(node.op, ast.UAdd):
@@ -969,11 +1339,7 @@ class Checker:
         if isinstance(node, ast.Call):
             return self.check_call(node, expected)
         if isinstance(node, ast.Attribute):
-            obj = self.check_expr(node.value)
-            if isinstance(obj.ty, ClassT) and node.attr in obj.ty.info.methods and node.attr not in obj.ty.info.fields:
-                raise CompileError("bound methods are not first-class values yet; call the method directly", node)
-            cls, f = self.field_of(obj, node)
-            return ir.GetField(f.ty, obj, cls, f)
+            return self.check_attribute(node)
         if isinstance(node, ast.Subscript):
             if isinstance(node.slice, ast.Slice):
                 raise CompileError("slicing is not supported yet", node)
@@ -999,6 +1365,31 @@ class Checker:
             raise CompileError("the walrus operator is not supported", node)
         raise CompileError(f"unsupported expression: {type(node).__name__}", node)
 
+    def check_attribute(self, node: ast.Attribute) -> ir.Expr:
+        v = node.value
+        if (node.attr == "__name__" and isinstance(v, ast.Call) and isinstance(v.func, ast.Name)
+                and v.func.id == "type" and "type" not in self.ctx.types):
+            if len(v.args) != 1 or v.keywords:
+                raise CompileError("type() takes exactly one argument", v)
+            obj = self.check_expr(v.args[0])
+            self.no_int_taint(obj, v.args[0])
+            t = obj.ty
+            if isinstance(t, ClassT):
+                return ir.TypeName(STR, obj, t.info)
+            static = {I32: "int", I64: "int", F32: "float", F64: "float", BOOL: "bool", STR: "str"}
+            if t in static:
+                return ir.StrLit(STR, static[t])  # the names CPython reports under the snek shim
+            if isinstance(t, ListT):
+                return ir.StrLit(STR, "list")
+            raise CompileError(f"type(x).__name__ of {t} is not supported (narrow it first)", node)
+        if isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id == "type":
+            raise CompileError("type() is only supported as type(x).__name__; use isinstance() for checks", node)
+        obj = self.check_expr(v)
+        if isinstance(obj.ty, ClassT) and node.attr in obj.ty.info.methods and node.attr not in obj.ty.info.fields:
+            raise CompileError("bound methods are not first-class values yet; call the method directly", node)
+        cls, f = self.field_of(obj, node)
+        return ir.GetField(f.ty, obj, cls, f)
+
     def check_constant(self, node: ast.Constant, expected: Type | None) -> ir.Expr:
         v = node.value
         if isinstance(v, bool):
@@ -1006,10 +1397,17 @@ class Checker:
         if isinstance(v, (int, float)):
             return self.number(v, expected, node)
         if isinstance(v, str):
-            return ir.StrLit(STR, v)
+            return ir.StrLit(STR, self.utf8_text(v, node))
         if v is None:
             return ir.NoneLit(expected if isinstance(expected, OptionalT) else NONE)
         raise CompileError(f"unsupported literal {v!r}", node)
+
+    def utf8_text(self, v: str, node: ast.AST) -> str:
+        try:
+            v.encode("utf-8")
+        except UnicodeEncodeError:
+            raise CompileError("string literal contains a lone surrogate, which is not valid UTF-8", node) from None
+        return v
 
     def number(self, v: int | float, expected: Type | None, node: ast.AST) -> ir.Expr:
         if isinstance(v, float):
@@ -1060,10 +1458,13 @@ class Checker:
             if target != I32:
                 raise CompileError("/ on i64 would lose precision as f64; use // for integer division or "
                                    "convert explicitly with f64(x)", node)
-            target = F64  # i32 widens losslessly to f64
+            # i32 widens losslessly to f64; "div_int" keeps CPython's int/int error message
+            return ir.Binary(F64, "div_int", self.coerce(l, F64, node, arith=True),
+                             self.coerce(r, F64, node, arith=True))
         if name in INT_ONLY_OPS and not target.is_int:
             raise CompileError(f"{sym} needs integer operands", node)
-        return ir.Binary(target, name, self.coerce(l, target, node), self.coerce(r, target, node))
+        return ir.Binary(target, name, self.coerce(l, target, node, arith=True),
+                         self.coerce(r, target, node, arith=True))
 
     def suggest(self, a: Type, b: Type) -> str:
         if F64 in (a, b):
@@ -1092,7 +1493,8 @@ class Checker:
             for a, b in ((left_n, right_n), (right_n, left_n)):
                 if isinstance(b, ast.Constant) and b.value is None:
                     v = self.check_expr(a)
-                    if not isinstance(v.ty, OptionalT):
+                    declared_optional = isinstance(v, ir.LocalGet) and isinstance(v.declared, OptionalT)
+                    if not isinstance(v.ty, OptionalT) and not declared_optional:
                         raise CompileError(f"this is never None (its type is {v.ty}); declare it as "
                                            f"`{v.ty} | None` if it can be", a)
                     return ir.IsNull(BOOL, v, negate)
@@ -1108,7 +1510,8 @@ class Checker:
             target = join_numeric(l.ty, r.ty)
             if target is None:
                 raise CompileError(f"cannot compare {l.ty} with {r.ty}; convert one explicitly", node)
-            return ir.Compare(BOOL, name, target, self.coerce(l, target, node), self.coerce(r, target, node))
+            return ir.Compare(BOOL, name, target, self.coerce(l, target, node, arith=True),
+                              self.coerce(r, target, node, arith=True))
         if l.ty == BOOL and r.ty == BOOL and name in ("eq", "ne"):
             return ir.Compare(BOOL, name, BOOL, l, r)
         if l.ty == STR and r.ty == STR:
@@ -1117,84 +1520,33 @@ class Checker:
             raise CompileError("== on objects is not supported yet (no __eq__); use `is` for identity", node)
         raise CompileError(f"cannot compare {l.ty} with {r.ty}", node)
 
+    def seq(self, prelude: list[ir.Stmt], e: ir.Expr) -> ir.Expr:
+        return ir.Seq(e.ty, prelude, e) if prelude else e
+
     def check_call(self, node: ast.Call, expected: Type | None) -> ir.Expr:
-        if node.keywords:
-            raise CompileError("keyword arguments are not supported yet", node.keywords[0])
         f, args = node.func, node.args
         if isinstance(f, ast.Name):
             n = f.id
             if n in self.ctx.types:
                 raise CompileError(f"'{n}' is a variable, not a function", f)
-            if n == "print":
-                raise CompileError("print() can only be used as a statement", node)
-            if n == "len":
-                self.arity(node, 1)
-                v = self.check_expr(args[0])
-                if isinstance(v.ty, ListT):
-                    return ir.ListLen(I32, v)
-                if v.ty == STR:
-                    return ir.StrLen(I32, v)
-                raise CompileError(f"len() of {v.ty}", node)
-            if n == "str":
-                self.arity(node, 1)
-                return self.to_str(self.check_expr(args[0]), args[0])
-            if n in NUMERIC:
-                if n not in self.imported:
-                    raise CompileError(f"'{n}' must be imported: `from snek import {n}`", f)
-                self.arity(node, 1)
-                target = NUMERIC[n]
-                v = self.check_expr(args[0], target)
-                if v.ty == target:
-                    return v
-                if not (isinstance(v.ty, Prim)):
-                    raise CompileError(f"cannot convert {v.ty} to {target}", node)
-                return ir.Convert(target, v)
-            if n == "bool":
-                self.arity(node, 1)
-                v = self.check_expr(args[0])
-                if v.ty == BOOL:
-                    return v
-                if isinstance(v.ty, Prim):
-                    return ir.Compare(BOOL, "ne", v.ty, v, ir.Const(v.ty, 0))
-                raise CompileError(f"bool() of {v.ty} is not supported (no implicit truthiness)", node)
-            if n == "isinstance":
-                self.arity(node, 2)
-                v = self.check_expr(args[0])
-                cn = args[1]
-                if not (isinstance(cn, ast.Name) and cn.id in self.classes):
-                    raise CompileError("isinstance() needs a class defined in this module", cn)
-                target = self.classes[cn.id]
-                st = strip_optional(v.ty)
-                if not (isinstance(st, ClassT) and target.is_subclass_of(st.info)):
-                    raise CompileError(f"isinstance(x, {target.name}) is always False for a {v.ty}", node)
-                return ir.IsInstance(BOOL, v, target)
-            if n == "abs":
-                self.arity(node, 1)
-                v = self.check_expr(args[0], expected)
-                if not (isinstance(v.ty, Prim) and v.ty.is_numeric):
-                    raise CompileError(f"abs() of {v.ty}", node)
-                return ir.Unary(v.ty, "abs", v)
-            if n in ("min", "max"):
-                self.arity(node, 2)
-                l, r = self.check_operands(args[0], args[1], expected)
-                target = join_numeric(l.ty, r.ty)
-                if target is None:
-                    raise CompileError(f"{n}() needs two numbers of compatible types, got {l.ty} and {r.ty}", node)
-                return ir.Binary(target, n, self.coerce(l, target, node), self.coerce(r, target, node))
-            if n == "range":
-                raise CompileError("range() is only supported directly in a for loop", node)
-            if n in ("int", "float"):
-                raise CompileError(f"use the fixed-width conversions (i32(), i64(), f64()) instead of {n}()", node)
+            if n in BUILTINS:
+                if node.keywords:
+                    raise CompileError(f"{n}() does not take keyword arguments here", node.keywords[0])
+                if any(isinstance(a, ast.Starred) for a in args):
+                    raise CompileError("*args in calls is not supported", node)
+                return self.check_builtin_call(n, node, expected)
             if n in self.funcs:
                 sig, _ = self.funcs[n]
-                return ir.Call(sig.ret, n, self.check_args(sig, args, node, n))
+                prelude, bound = self.bind_args(sig, node, n)
+                return self.seq(prelude, ir.Call(sig.ret, n, bound))
             if n in self.classes:
                 cls = self.classes[n]
-                return ir.New(ClassT(cls), cls, self.check_args(self.ctor_sig(cls), args, node, n))
+                prelude, bound = self.bind_args(self.ctor_sig(cls), node, n)
+                return self.seq(prelude, ir.New(ClassT(cls), cls, bound))
             raise CompileError(f"undefined function '{n}'", f)
         if isinstance(f, ast.Attribute):
-            if isinstance(f.value, ast.Call) and isinstance(f.value.func, ast.Name) and f.value.func.id == "super":
-                raise CompileError("super() is not supported yet; in __init__, assign inherited fields directly", f)
+            if is_super(f.value):
+                return self.check_super_call(node, f)
             recv = self.check_expr(f.value)
             t = recv.ty
             if isinstance(t, OptionalT):
@@ -1204,7 +1556,14 @@ class Checker:
                 if m is None:
                     what = "a field, not a method" if f.attr in t.info.fields else "not a method"
                     raise CompileError(f"'{f.attr}' is {what} of {t.info.name}", f)
-                return ir.CallMethod(m.sig.ret, recv, t.info, m, self.check_args(m.sig, args, node, f.attr))
+                prelude, bound = self.bind_args(m.sig, node, f.attr)
+                if prelude and not is_pure(recv):  # keep the receiver first in evaluation order
+                    tmp = self.ctx.temp(recv.ty)
+                    prelude.insert(0, ir.SetLocal(tmp, recv))
+                    recv = self.ctx.get(tmp)
+                return self.seq(prelude, ir.CallMethod(m.sig.ret, recv, t.info, m, bound))
+            if node.keywords:
+                raise CompileError(f"{t}.{f.attr}() does not take keyword arguments", node.keywords[0])
             if isinstance(t, ListT):
                 if f.attr == "append":
                     self.arity(node, 1)
@@ -1218,15 +1577,177 @@ class Checker:
             raise CompileError(f"{t} has no methods", f)
         raise CompileError("unsupported call target", node)
 
+    def check_super_call(self, node: ast.Call, f: ast.Attribute) -> ir.Expr:
+        ctx = self.ctx
+        sup = f.value
+        assert isinstance(sup, ast.Call)
+        if sup.args or sup.keywords:
+            raise CompileError("super() with arguments is not supported; write super()", sup)
+        if f.attr == "__init__":
+            raise CompileError("super().__init__(...) must be a statement of its own at the top level of "
+                               "__init__ (not nested in if/loops/try or other expressions)", node)
+        owner = ctx.owner
+        if owner is None:
+            raise CompileError("super() is only allowed inside methods", sup)
+        if owner.base is None:
+            raise CompileError(f"{owner.name} has no base class, so super().{f.attr}() has nothing to call", f)
+        m = owner.base.methods.get(f.attr)
+        if m is None:
+            raise CompileError(f"{owner.base.name} has no method '{f.attr}'", f)
+        if "self" not in ctx.types or "self" not in ctx.flow.assigned:
+            raise CompileError("super() calls need `self`, which does not exist yet at this point of "
+                               "__init__", node)
+        prelude, bound = self.bind_args(m.sig, node, f"super().{f.attr}")
+        # The base implementation is known statically: a direct call, no vtable.
+        impl = owner.base.methods[f.attr].owner
+        return self.seq(prelude, ir.Call(m.sig.ret, f"{impl.name}.{m.name}", [ctx.get("self"), *bound]))
+
+    def check_builtin_call(self, n: str, node: ast.Call, expected: Type | None) -> ir.Expr:
+        args = node.args
+        if n == "print":
+            raise CompileError("print() can only be used as a statement", node)
+        if n == "len":
+            self.arity(node, 1)
+            v = self.check_expr(args[0])
+            if isinstance(v.ty, ListT):
+                return ir.ListLen(I32, v)
+            if v.ty == STR:
+                return ir.StrLen(I32, v)
+            raise CompileError(f"len() of {v.ty}", node)
+        if n == "str":
+            self.arity(node, 1)
+            return self.to_str(self.check_expr(args[0]), args[0])
+        if n in NUMERIC:
+            if n not in self.imported:
+                raise CompileError(f"'{n}' must be imported: `from snek import {n}`", node.func)
+            self.arity(node, 1)
+            target = NUMERIC[n]
+            v = self.check_expr(args[0], target)
+            if v.ty == target:
+                return v
+            if not (isinstance(v.ty, Prim)):
+                raise CompileError(f"cannot convert {v.ty} to {target}", node)
+            return ir.Convert(target, v)
+        if n == "bool":
+            self.arity(node, 1)
+            v = self.check_expr(args[0])
+            if v.ty == BOOL:
+                return v
+            if isinstance(v.ty, Prim):
+                return ir.Compare(BOOL, "ne", v.ty, v, ir.Const(v.ty, 0))
+            raise CompileError(f"bool() of {v.ty} is not supported (no implicit truthiness)", node)
+        if n == "isinstance":
+            self.arity(node, 2)
+            v = self.check_expr(args[0])
+            cn = args[1]
+            if not (isinstance(cn, ast.Name) and cn.id in self.classes):
+                raise CompileError("isinstance() needs a class defined in this module or a built-in "
+                                   "exception class", cn)
+            target = self.classes[cn.id]
+            now = strip_optional(v.ty)
+            # Judge "always False" against the declared type: after narrowing, an unrelated class is
+            # just False at run time.
+            st = strip_optional(v.declared if isinstance(v, ir.LocalGet) else v.ty)
+            if not (isinstance(st, ClassT) and isinstance(now, ClassT)):
+                raise CompileError(f"isinstance() needs an object of a class type, got {v.ty}", node)
+            if now.info.is_subclass_of(target):  # always True, except for None
+                if isinstance(v.ty, OptionalT):
+                    return ir.IsNull(BOOL, v, True)
+                return ir.Const(BOOL, True) if is_pure(v) else ir.Seq(BOOL, [ir.ExprStmt(v)], ir.Const(BOOL, True))
+            if not target.is_subclass_of(st.info):
+                raise CompileError(f"isinstance(x, {target.name}) is always False for a {st}", node)
+            return ir.IsInstance(BOOL, v, target)
+        if n == "abs":
+            self.arity(node, 1)
+            int_lit = is_num_literal(args[0]) and isinstance(literal_value(args[0]), int)
+            v = self.check_expr(args[0], None if int_lit else expected)
+            if not (isinstance(v.ty, Prim) and v.ty.is_numeric):
+                raise CompileError(f"abs() of {v.ty}", node)
+            return ir.Unary(v.ty, "abs", v)
+        if n in ("min", "max"):
+            self.arity(node, 2)
+            l, r = self.check_operands(args[0], args[1], expected)
+            target = join_numeric(l.ty, r.ty)
+            if target is None:
+                raise CompileError(f"{n}() needs two numbers of compatible types, got {l.ty} and {r.ty}", node)
+            # CPython returns one argument unchanged (max(2, 1.5) is the int 2), so no int/float mixing
+            return ir.Binary(target, n, self.coerce(l, target, args[0], f"{n}() argument"),
+                             self.coerce(r, target, args[1], f"{n}() argument"))
+        if n == "range":
+            raise CompileError("range() is only supported directly in a for loop", node)
+        if n in ("int", "float"):
+            raise CompileError(f"use the fixed-width conversions (i32(), i64(), f64()) instead of {n}()", node)
+        if n == "type":
+            raise CompileError("type() is only supported as type(x).__name__; use isinstance() for checks", node)
+        if n == "super":
+            raise CompileError("super() must be followed by a method call: super().method(...)", node)
+        raise CompileError(f"'{n}' cannot be called", node)
+
     def arity(self, node: ast.Call, n: int) -> None:
         if len(node.args) != n:
             name = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "?")
             raise CompileError(f"{name}() takes {n} argument{'s' if n != 1 else ''}, got {len(node.args)}", node)
 
-    def check_args(self, sig: FuncSig, args: list[ast.expr], node: ast.AST, name: str) -> list[ir.Expr]:
-        if len(args) != len(sig.params):
-            raise CompileError(f"{name}() takes {len(sig.params)} argument(s), got {len(args)}", node)
-        return [self.coerce(self.check_expr(a, t), t, a, f"argument '{p}'") for a, (p, t) in zip(args, sig.params)]
+    def bind_args(self, sig: FuncSig, call: ast.Call, name: str) -> tuple[list[ir.Stmt], list[ir.Expr]]:
+        """Match positional and keyword arguments to parameters and fill in defaults.
+
+        Returns (prelude, args in parameter order). CPython evaluates arguments in source
+        order; when keywords are written out of parameter order, the impure ones are
+        evaluated into temporaries first (the prelude) so side effects happen in that order.
+        """
+        params = sig.params
+        names = [p for p, _ in params]
+        if any(isinstance(a, ast.Starred) for a in call.args):
+            raise CompileError("*args in calls is not supported", call)
+        if len(call.args) > len(params):
+            raise CompileError(f"{name}() takes {len(params)} argument{'s' if len(params) != 1 else ''} but "
+                               f"{len(call.args)} were given", call)
+
+        def label(p: str) -> str:
+            return "the exception message" if p.startswith("__") else f"argument '{p}'"
+
+        slots: list[ir.Expr | None] = [None] * len(params)
+        order: list[int] = []
+        def user_type(p: str, t: Type) -> Type:
+            # BaseException's hidden `__msg: str | None` (None = no argument) only accepts a str
+            return t.inner if p.startswith("__") and isinstance(t, OptionalT) else t
+
+        for i, a in enumerate(call.args):
+            p, t = params[i]
+            ut = user_type(p, t)
+            slots[i] = self.coerce(self.check_expr(a, ut), ut, a, label(p))
+            order.append(i)
+        for kw in call.keywords:
+            if kw.arg is None:
+                raise CompileError("**kwargs in calls is not supported", kw)
+            if kw.arg not in names or kw.arg.startswith("__"):
+                raise CompileError(f"{name}() got an unexpected keyword argument '{kw.arg}'", kw)
+            i = names.index(kw.arg)
+            if slots[i] is not None:
+                raise CompileError(f"{name}() got multiple values for argument '{kw.arg}'", kw)
+            p, t = params[i]
+            slots[i] = self.coerce(self.check_expr(kw.value, t), t, kw.value, label(p))
+            order.append(i)
+        missing = [names[i] for i in range(len(params)) if slots[i] is None and sig.defaults[i] is None]
+        if missing:
+            listed = ", ".join(f"'{m}'" for m in missing)
+            raise CompileError(f"{name}() missing required argument{'s' if len(missing) > 1 else ''}: {listed}",
+                               call)
+        prelude: list[ir.Stmt] = []
+        if order != sorted(order):
+            for i in order:
+                e = slots[i]
+                assert e is not None
+                if not is_pure(e):
+                    tmp = self.ctx.temp(params[i][1])
+                    prelude.append(ir.SetLocal(tmp, e))
+                    slots[i] = self.ctx.get(tmp)
+        for i, (p, t) in enumerate(params):
+            if slots[i] is None:
+                d = sig.defaults[i]
+                assert d is not None
+                slots[i] = self.coerce(self.check_expr(d, t), t, d)
+        return prelude, slots  # type: ignore[return-value]
 
     def check_index(self, node: ast.expr) -> ir.Expr:
         idx = self.check_expr(node, I32)
@@ -1249,16 +1770,23 @@ class Checker:
         if not isinstance(t, ClassT):
             raise CompileError(f"{t} has no attribute '{node.attr}'", node)
         f = t.info.fields.get(node.attr)
-        if f is None:
-            raise CompileError(f"{t.info.name} has no field '{node.attr}'", node)
+        if f is None or f.name.startswith("__"):
+            hint = "; read the message with str(e)" if self.is_exception(t) else ""
+            raise CompileError(f"{t.info.name} has no field '{node.attr}'{hint}", node)
         return t.info, f
 
     def check_list(self, node: ast.List, expected: Type | None) -> ir.Expr:
+        expected = strip_optional(expected) if expected is not None else None
         exp_elem = expected.elem if isinstance(expected, ListT) else None
         if not node.elts:
             if exp_elem is None:
                 raise CompileError("cannot infer the element type of []; annotate it: `xs: list[i32] = []`", node)
             return ir.ListLit(expected, [])
+        if exp_elem is None and any(isinstance(e, ast.List) and not e.elts for e in node.elts):
+            # [["a"], []]: infer from the non-empty elements, then type the empty ones to match
+            known = [self.check_expr(e) for e in node.elts if not (isinstance(e, ast.List) and not e.elts)]
+            if known:
+                exp_elem = reduce(lambda x, y: join_types(x, y) or x, [k.ty for k in known])
         items = [self.check_expr(e, exp_elem) for e in node.elts]
         elem = exp_elem
         if elem is None:
@@ -1277,7 +1805,7 @@ class Checker:
         parts: list[ir.Expr] = []
         for v in node.values:
             if isinstance(v, ast.Constant):
-                parts.append(ir.StrLit(STR, v.value))
+                parts.append(ir.StrLit(STR, self.utf8_text(v.value, v)))
             elif isinstance(v, ast.FormattedValue):
                 if v.conversion != -1 or v.format_spec is not None:
                     raise CompileError("f-string conversions and format specs are not supported yet", v)
@@ -1292,45 +1820,82 @@ class Checker:
     def check_ifexp(self, node: ast.IfExp, expected: Type | None) -> ir.Expr:
         cond = self.check_cond(node.test)
         t, f = self.facts(node.test)
+        # a float context must not turn an int literal branch into a float (CPython keeps it an int)
+        hint = None if isinstance(expected, Prim) and expected.is_float else expected
         saved = dict(self.ctx.flow.narrowed)
         self.ctx.flow.narrowed.update(t)
-        a = self.check_expr(node.body, expected)
+        a = self.check_expr(node.body, hint)
         self.ctx.flow.narrowed = dict(saved)
         self.ctx.flow.narrowed.update(f)
-        b = self.check_expr(node.orelse, expected)
+        b = self.check_expr(node.orelse, hint)
         self.ctx.flow.narrowed = saved
         ty = join_types(a.ty, b.ty)
         if ty is None:
             raise CompileError(f"branches have incompatible types {a.ty} and {b.ty}", node)
         if expected is not None and is_assignable(ty, expected):
             ty = expected
-        return ir.IfExpr(ty, cond, self.coerce(a, ty, node.body), self.coerce(b, ty, node.orelse))
+        # One int branch and one float branch: the value may be an int in CPython. That is fine
+        # inside arithmetic; coerce() rejects it where it would be stored as a float.
+        mixed = (isinstance(ty, Prim) and ty.is_float
+                 and any(isinstance(x.ty, Prim) and x.ty.is_int for x in (a, b)))
+        return ir.IfExpr(ty, cond, self.coerce(a, ty, node.body, arith=mixed),
+                         self.coerce(b, ty, node.orelse, arith=mixed), mixed)
 
     def to_str(self, e: ir.Expr, node: ast.AST) -> ir.Expr:
+        self.no_int_taint(e, node)
         t = e.ty
         if t == STR:
             return e
         if isinstance(t, Prim):
             return ir.ToStr(STR, e)
         if t == NONE:
-            return ir.StrLit(STR, "None")
+            if isinstance(e, ir.NoneLit):
+                return ir.StrLit(STR, "None")
+            return ir.Seq(STR, [ir.ExprStmt(e)], ir.StrLit(STR, "None"))  # keep the call's side effects
         if t == OptionalT(STR):
             return ir.ToStr(STR, e)
+        if self.is_exception(t):
+            return ir.Call(STR, "rt.exc_str", [e])  # CPython's str(exception)
         if isinstance(t, ListT):
             inner = t.elem
             while isinstance(inner, ListT):
                 inner = inner.elem
-            if isinstance(inner, Prim):
+            if isinstance(inner, Prim) or inner in (STR, OptionalT(STR)):
                 return ir.ToStr(STR, e)
-            raise CompileError(f"converting {t} to str is not supported yet (only lists of numbers/bools)", node)
+            raise CompileError(f"converting {t} to str is not supported yet (lists of numbers, bools and "
+                               f"strings are)", node)
         raise CompileError(f"converting {t} to str is not supported yet (no __str__/__repr__)", node)
 
-    def coerce(self, e: ir.Expr, target: Type, node: ast.AST, what: str = "value") -> ir.Expr:
+    def no_int_taint(self, e: ir.Expr, node: ast.AST, what: str = "value") -> None:
+        """A conditional mixing an int and a float branch is an int on one path in CPython: fine as an
+        arithmetic operand, but not where the value itself is kept, printed or inspected."""
+        if int_tainted(e):
+            raise CompileError(f"{what}: this can be an int at run time (one branch of a conditional "
+                               f"expression is an int), and CPython would keep it an int; make both branches "
+                               f"floats (1.0) or convert with f64(...)", node)
+
+    def coerce(self, e: ir.Expr, target: Type, node: ast.AST, what: str = "value", arith: bool = False) -> ir.Expr:
+        """Convert e to target where snek allows it implicitly.
+
+        Ints become floats only inside arithmetic and comparisons (arith=True), where CPython's
+        result is a float too. Anywhere a value is stored, passed or returned, CPython keeps an
+        int an int (it prints as 2, not 2.0), so snek asks for 2.0 or f64(n) instead."""
+        if (not arith and isinstance(target, Prim) and target.is_float and is_num_literal(node)
+                and isinstance(literal_value(node), int)):
+            v = literal_value(node)
+            raise CompileError(f"{what}: write {float(v)!r} for a {target}; CPython keeps {v} an int (it would "
+                               f"print as {v}, not {float(v)!r})", node)
+        if not arith and isinstance(target, Prim) and target.is_float:
+            self.no_int_taint(e, node, what)
         s = e.ty
         if s == target:
             return e
         if isinstance(s, Prim) and isinstance(target, Prim):
             if (s, target) in WIDEN:
+                if s.is_int and target.is_float and not arith:
+                    raise CompileError(f"{what}: expected {target}, got {s}. Ints only mix into floats inside "
+                                       f"arithmetic; here CPython would keep the int (printing 2, not 2.0), so "
+                                       f"convert explicitly with {target}(...)", node)
                 if isinstance(e, ir.Const):
                     return ir.Const(target, float(e.value) if target.is_float else e.value)
                 return ir.Convert(target, e)
