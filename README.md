@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/logo.png" alt="A blue snake and a yellow snake playing in a wooden sandbox with a bucket and spade" width="320">
+</p>
+
 # snek
 
 A statically typed subset of Python that compiles to WebAssembly, using WasmGC for objects and Wasm exception handling for `try`/`except`, and targeting WASI.
