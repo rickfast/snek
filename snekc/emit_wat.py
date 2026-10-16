@@ -25,10 +25,16 @@ method is reachable from the receiver's static type.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from . import ir, unicode
+from .collections_wat import CollectionEmitter
+from .closures_wat import ClosureEmitter
+from .list_builtins import list_builtin_code
+from .keyed_builtins import keyed_builtin_code
+from .protocols_wat import ProtocolEmitter
+from .machines import MachineEmitter, has_await
 from .types import (
     BOOL,
     BUF,
@@ -38,12 +44,24 @@ from .types import (
     I64,
     NONE,
     STR,
+    StreamT,
+    TRACEBACK,
+    TypeT,
     ClassInfo,
     ClassT,
+    DictT,
+    DictViewT,
     ListT,
+    IteratorT,
+    CoroutineT,
+    CallableT,
+    CellT,
+    EnvT,
+    TupleT,
     OptionalT,
     Prim,
     Type,
+    has_repr,
     strip_optional,
 )
 
@@ -94,14 +112,36 @@ def mangle(t: Type) -> str:
     """Name fragment for a monomorphized type: list[list[Node | None]] -> list<list<Node?>>.
     `<`, `>` and `?` are legal in WAT names but not in Python identifiers, so these never
     collide with user class names."""
+    if t == NONE:
+        return "none"
+    if isinstance(t, CallableT):
+        return "callable<" + "~".join(mangle(p) for p in t.params) + ":" + mangle(t.ret) + ">"
+    if isinstance(t, CellT):
+        return f"cell<{mangle(t.elem)}>"
+    if isinstance(t, EnvT):
+        return "env<>" if t.captures is None else "env<" + "~".join(mangle(p) for p in t.captures) + ">.scope"
+    if isinstance(t, (IteratorT, CoroutineT)):
+        return f"{'iter' if isinstance(t, IteratorT) else 'coro'}<{mangle(t.elem)}>"
     if isinstance(t, Prim):
         return t.name
     if t == STR:
         return "str"
+    if isinstance(t, StreamT):
+        return "stream." + t.kind
     if isinstance(t, ListT):
         return f"list<{mangle(t.elem)}>"
+    if isinstance(t, TupleT):
+        return "tuple<" + "~".join(mangle(e) for e in t.elems) + ">"
+    if isinstance(t, DictT):
+        return f"dict<{mangle(t.key)}~{mangle(t.value)}>"
+    if isinstance(t, DictViewT):
+        return mangle(t.mapping) + "." + t.kind + ".view"
     if isinstance(t, ClassT):
         return t.info.name
+    if isinstance(t, TypeT):
+        return f"type<{t.info.name}>"
+    if t == TRACEBACK:
+        return "traceback<>"
     if isinstance(t, OptionalT):
         return mangle(t.inner) + "?"
     raise AssertionError(t)
@@ -156,30 +196,81 @@ class FnState:
         return name
 
 
-class Emitter:
-    def __init__(self, module: ir.Module):
+class Emitter(CollectionEmitter, ProtocolEmitter, MachineEmitter, ClosureEmitter):
+    def __init__(self, module: ir.Module, component: bool = False, *, graph_factory=None, machine_backend=None):
         self.m = module
+        self.graph_factory = graph_factory
+        self.machine_backend = machine_backend
+        self.component = component
         self.lit_index: dict[str, int] = {}
         self.lit_data = bytearray()
         self.lit_spans: list[tuple[int, int, int]] = []  # byte offset, byte length, code points
         self.list_types: dict[str, ListT] = {}
         self.list_ops: dict[str, set[str]] = {}  # extra list helpers each element type needs
+        self.tuple_types: dict[str, TupleT] = {}
+        self.dict_types: dict[str, DictT] = {}
+        self.view_types: dict[str, DictViewT] = {}
+        self.collection_ops: dict[str, set[str]] = {}
+        self.optional_reprs: dict[str, Type] = {}
+        self.object_equalities: dict[str, tuple[Type, Type]] = {}
+        self.class_strings: set[ClassInfo] = set()
+        self.string_builders: set[str] = set()
         self.fn: FnState | None = None
+        self.machine_types = {}
+        self.machine_graphs = []
+        self.main_async = True
+        self.closure_types = {}
+        self.cell_types = {}
+        self.env_types = {}
+        self.function_refs = {}
+        self.closure_refs = set()
+        self.keyed_builtins = {}
+        self.byte_io = False
+        self.stdlib_io: set[str] = set()
+        self.wasi_features: set[str] = set()
 
     # ---- types -----------------------------------------------------------------
 
     def heap(self, t: Type) -> str:
         t = strip_optional(t)
+        if isinstance(t, (CallableT, CellT, EnvT)):
+            name = mangle(t)
+            registry = (self.closure_types if isinstance(t, CallableT) else
+                        self.cell_types if isinstance(t, CellT) else self.env_types)
+            if not (isinstance(t, EnvT) and t.captures is None) and name not in registry:
+                registry[name] = t
+                children = (*t.params, t.ret) if isinstance(t, CallableT) else ((t.elem,) if isinstance(t, CellT) else t.captures)
+                for p in children:
+                    if p != NONE:
+                        self.storage(p)
+            return "$" + name
         if t == STR:
             return "$str"
+        if isinstance(t, StreamT):
+            return "$io.stream"
         if t == BUF:
             return "$buf"
+        if isinstance(t, (IteratorT, CoroutineT)):
+            self.machine_types.setdefault(mangle(t), t)
+            if t.elem != NONE:
+                self.storage(t.elem)
+            return "$" + mangle(t)
         if isinstance(t, ListT):
             m = mangle(t.elem)
             self.list_types.setdefault(m, t)
             return f"$list.{m}"
+        if isinstance(t, (TupleT, DictT, DictViewT)):
+            m = mangle(t)
+            registry = (self.tuple_types if isinstance(t, TupleT) else
+                        self.dict_types if isinstance(t, DictT) else self.view_types)
+            registry.setdefault(m, t)
+            return f"${m}"
         if isinstance(t, ClassT):
             return f"${t.info.name}"
+        if isinstance(t, TypeT):
+            return f"${t.info.name}.vt"
+        if t == TRACEBACK:
+            return "$traceback<>"
         raise AssertionError(f"no heap type for {t}")
 
     def valtype(self, t: Type) -> str:
@@ -216,41 +307,93 @@ class Emitter:
     # ---- module ----------------------------------------------------------------
 
     def emit(self) -> str:
+        from . import component
         prelude = self.expand_lits(PRELUDE.read_text())
-        funcs = [self.emit_func(f) for f in self.m.funcs]
+        funcs = []
+        for f in self.m.funcs:
+            if f.name == self.m.main and not has_await(f.body):
+                # Preserve the direct structured path for synchronous programs.
+                # Components still need an async command shell, but not a CFG
+                # and spilled locals for an entirely synchronous main body.
+                name = f.name + ".body" if self.component else f.name
+                funcs.append(self.emit_func(replace(f, name=name, ret=NONE, machine=False)))
+                if not self.component:
+                    self.main_async = False
+                    continue
+                f = ir.Func(f.name, [], CoroutineT(NONE), {}, [ir.ExprStmt(ir.Call(NONE, name, []))], machine=True)
+            funcs.append(self.emit_func(f))
+        funcs.append(self.emit_machine(ir.Func("snek.checkpoint", [], CoroutineT(NONE), {},
+                                              [ir.Yield(None)], machine=True)))
+        from . import stdlib_io
+        funcs.extend(stdlib_io.machines(self))
+        from . import stdlib_host
+        funcs.extend(stdlib_host.machines(self))
         class_types = self.class_types()
         vtables = self.vtable_globals()
-        self.close_list_types()
-        list_funcs = self.list_helpers()  # registers literals used by the helpers
+        closures = self.closure_artifacts()
+        keyed = "\n".join(keyed_builtin_code(self, name, *spec) for name, spec in self.keyed_builtins.items())
+        from .byte_io import helpers as byte_io_helpers
+        byte_io = byte_io_helpers(self) if self.byte_io else ""
+        library_io = stdlib_io.helpers(self) if self.stdlib_io else '(func $snek.sys.reset)'
+        library_host = stdlib_host.helpers(self)
+        component_runtime = ""
+        if self.component:
+            component_runtime = component.RUNTIME.read_text()
+            component_runtime += (self.expand_lits(component.INPUT_RUNTIME.read_text()) if "stream_read" in self.stdlib_io else
+                                  '(func $io.input-pump (param i32 i32 i32) (result i32) (i32.const 0))\n(func $io.input-close)')
+        self.close_collection_types()
+        list_funcs = self.collection_helpers()  # registers all nested helpers and literals
+        protocols = self.object_equality_helpers() + "\n" + self.class_string_helpers()
+        machines = self.machine_helpers()
         lits = self.literal_funcs()
         tables = self.unicode_tables()  # after every literal is known
         types = self.type_section(class_types)
+        imports = (component.core_imports(stdin="stream_read" in self.stdlib_io, features=self.wasi_features) if self.component else
+                   '  (import "wasi_snapshot_preview1" "fd_write" (func $wasi.fd_write (param i32 i32 i32 i32) (result i32)))\n'
+                   '  (import "wasi_snapshot_preview1" "proc_exit" (func $wasi.proc_exit (param i32)))')
+        if self.byte_io or (not self.component and "stream_read" in self.stdlib_io):
+            imports += '\n  (import "wasi_snapshot_preview1" "fd_read" (func $wasi.fd_read (param i32 i32 i32 i32) (result i32)))'
+        if not self.component:
+            imports += '\n' + stdlib_host.core_imports(self.wasi_features)
         parts = [
             "(module",
-            '  (import "wasi_snapshot_preview1" "fd_write" (func $wasi.fd_write (param i32 i32 i32 i32) (result i32)))',
-            '  (import "wasi_snapshot_preview1" "proc_exit" (func $wasi.proc_exit (param i32)))',
+            imports,
             types,
             f"  (tag $snek.exc (param (ref {EXC})))",
-            '  (memory (export "memory") 1)',
+            '' if self.component else '  (memory (export "memory") 1)',
             tables,
             prelude,
+            byte_io,
+            library_io,
+            library_host,
             lits,
             list_funcs,
+            keyed,
+            protocols,
+            machines,
+            self.string_builder_helpers(),
             vtables,
+            closures,
             *funcs,
-            self.start_func(),
+            component_runtime if self.component else self.start_func(),
             ")",
         ]
         return "\n".join(p for p in parts if p) + "\n"
 
     def start_func(self) -> str:
         # An exception escaping __main__ is reported like CPython's last traceback line, exit 1.
+        run = ([f"          (local.set $main (call ${self.m.main}))",
+                "          (loop $run (br_if $run (call $coro<none>.advance (local.get $main)))))"]
+               if self.main_async else [f"          (call ${self.m.main}))"])
         return "\n".join([
             '  (func $snek.start (export "_start")',
+            '    (local $main (ref $coro<none>))',
+            '    (call $lib.reset)',
+            '    (call $snek.sys.reset)',
             "    (call $rt.uncaught",
             f"      (block $uncaught (result (ref {EXC}))",
             "        (try_table (catch $snek.exc $uncaught)",
-            f"          (call ${self.m.main}))",
+            *run,
             "        (call $rt.flush)",
             "        (return))))",
         ])
@@ -266,6 +409,7 @@ class Emitter:
 
     def type_section(self, class_types: list[str]) -> str:
         lines = ["  (rec",
+                 "    (type $traceback<> (struct))",
                  "    (type $u8s (array (mut i8)))",
                  "    (type $u16s (array (mut i16)))",
                  "    (type $u32s (array (mut i32)))",
@@ -274,6 +418,8 @@ class Emitter:
                  "    (type $str (struct (field $bytes (ref $u8s)) (field $hash (mut i32)) (field $cp (mut i32))"
                  " (field $idx (mut (ref null $u32s)))))",
                  "    (type $buf (struct (field $b (mut (ref $u8s))) (field $n (mut i32)) (field $cp (mut i32))))"]
+        lines += ["    (type $io.state (struct (field $fd i32) (field $closed (mut i32))))",
+                  "    (type $io.stream (struct (field $state (ref $io.state)) (field $buffer (ref null $io.stream))))"]
         done: set[str] = set()
         while len(done) < len(self.list_types):  # element types can register further list types
             for m, t in list(self.list_types.items()):
@@ -283,6 +429,11 @@ class Emitter:
                 lines.append(f"    (type $arr.{m} (array (mut {self.array_elem(t.elem)})))")
                 lines.append(f"    (type $list.{m} (struct (field $len (mut i32)) (field $data (mut (ref $arr.{m})))))")
         lines += class_types
+        lines += self.collection_types()
+        lines += self.machine_type_section()
+        lines += self.closure_types_wat()
+        if self.component:
+            lines.append('    (type $io.chunk (struct (field $fd i32) (field $bytes (ref $u8s)) (field $next (mut (ref null $io.chunk)))))')
         lines.append("  )")
         return "\n".join(lines)
 
@@ -353,27 +504,6 @@ class Emitter:
 
     # ---- list runtime, generated per element type ---------------------------------
 
-    def list_helpers(self) -> str:
-        """The basic helpers for every list type, plus the other operations the program uses.
-        Generating one can require more (eq on list[list[T]] needs eq on list[T])."""
-        out: list[str] = []
-        done: set[str] = set()
-        done_ops: set[tuple[str, str]] = set()
-        progress = True
-        while progress:
-            progress = False
-            for m, t in list(self.list_types.items()):
-                if m not in done:
-                    done.add(m)
-                    out.append(self.list_helper(m, t))
-                    progress = True
-                for op in sorted(self.list_ops.get(m, set())):
-                    if (m, op) not in done_ops:
-                        done_ops.add((m, op))
-                        out.append(self.list_op_code(m, t, op))
-                        progress = True
-        return "\n".join(out)
-
     def list_op(self, t: ListT, op: str) -> str:
         """Name of the helper for a list operation, generating it on demand."""
         self.heap(t)
@@ -392,11 +522,17 @@ class Emitter:
         if t == OptionalT(STR):
             return f"(call $rt.opt_str_eq {a} {b})"
         inner = strip_optional(t)
+        if isinstance(inner, ClassT):
+            return self.object_eq(t, t, a, b, identity=True)
         if isinstance(inner, ListT):
             return f"(call {self.list_op(inner, 'eq')} {a} {b})"
-        return f"(ref.eq {a} {b})"  # objects compare by identity (no __eq__ yet)
+        if isinstance(inner, (TupleT, DictT)):
+            return f"(call {self.collection_op(inner, 'eq')} {a} {b})"
+        return f"(ref.eq {a} {b})"
 
     def list_op_code(self, m: str, t: ListT, op: str) -> str:
+        if op == "sorted" or op.startswith(("sum_", "min", "max")):
+            return list_builtin_code(self, t, op)
         e = t.elem
         A, L = f"$arr.{m}", f"$list.{m}"
         R, S = self.valtype(e), self.storage(e)
@@ -439,9 +575,8 @@ class Emitter:
         elif op == "find":  # first index in [i, stop) equal to v, or -1
             body = f"""(param $l (ref {L})) (param $v {R}) (param $i i32) (param $stop i32) (result i32)
     (local $d (ref {A}))
-    (if (i32.gt_s (local.get $stop) {LEN}) (then (local.set $stop {LEN})))
-    (local.set $d {DATA})
-    {loop("$i", "(local.get $stop)", f"(if {self.eq_code(e, load('$d', '$i'), '(local.get $v)')} (then (return (local.get $i))))")}
+    {loop("$i", "(local.get $stop)", f"(br_if $done (i32.ge_u (local.get $i) {LEN})) (local.set $d {DATA}) "
+          f"(if {self.eq_code(e, load('$d', '$i'), '(local.get $v)')} (then (return (local.get $i))))")}
     (i32.const -1))"""
         elif op == "contains":
             self.list_ops[m].add("find")
@@ -461,8 +596,7 @@ class Emitter:
         elif op == "count":
             body = f"""(param $l (ref {L})) (param $v {R}) (result i32)
     (local $d (ref {A})) (local $i i32) (local $c i32)
-    (local.set $d {DATA})
-    {loop("$i", LEN, f"(if {self.eq_code(e, load('$d', '$i'), '(local.get $v)')} (then (local.set $c (i32.add (local.get $c) (i32.const 1)))))")}
+    {loop("$i", LEN, f"(local.set $d {DATA}) (if {self.eq_code(e, load('$d', '$i'), '(local.get $v)')} (then (local.set $c (i32.add (local.get $c) (i32.const 1)))))")}
     (local.get $c))"""
         elif op == "insert":
             body = f"""(param $l (ref {L})) (param $i i32) (param $v {R})
@@ -499,6 +633,7 @@ class Emitter:
     (local.set $i (call {L}.find (local.get $l) (local.get $v) (i32.const 0) (i32.const 0x7FFFFFFF)))
     (if (i32.lt_s (local.get $i) (i32.const 0))
       (then {self.raise_code("ValueError", "list.remove(x): x not in list")}))
+    (if (i32.ge_u (local.get $i) {LEN}) (then (return)))  ;; __eq__ may have shrunk the list
     (local.set $n (i32.sub {LEN} (i32.const 1)))
     (local.set $d {DATA})
     {shift_down}
@@ -574,10 +709,18 @@ class Emitter:
     (local.set $y (ref.as_non_null (local.get $b)))
     (local.set $n (struct.get {L} $len (local.get $x)))
     (if (i32.ne (local.get $n) (struct.get {L} $len (local.get $y))) (then (return (i32.const 0))))
-    (local.set $da (struct.get {L} $data (local.get $x)))
-    (local.set $db (struct.get {L} $data (local.get $y)))
-    {loop("$i", "(local.get $n)", f"(if (i32.eqz {self.eq_code(e, load('$da', '$i'), load('$db', '$i'))}) (then (return (i32.const 0))))")}
-    (i32.const 1))"""
+    (block $done (loop $next
+      (br_if $done (i32.ge_u (local.get $i) (struct.get {L} $len (local.get $x))))
+      (br_if $done (i32.ge_u (local.get $i) (struct.get {L} $len (local.get $y))))
+      (local.set $da (struct.get {L} $data (local.get $x)))
+      (local.set $db (struct.get {L} $data (local.get $y)))
+      (br_if $done (i32.eqz {self.eq_code(e, load('$da', '$i'), load('$db', '$i'))}))
+      (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
+    (if (result i32) (i32.or
+          (i32.ge_u (local.get $i) (struct.get {L} $len (local.get $x)))
+          (i32.ge_u (local.get $i) (struct.get {L} $len (local.get $y))))
+      (then (i32.eq (struct.get {L} $len (local.get $x)) (struct.get {L} $len (local.get $y))))
+      (else (i32.const 0))))"""
         else:
             raise AssertionError(f"list op {op}")
         return head + body
@@ -633,10 +776,7 @@ class Emitter:
     (local.set $v ({get} $arr.{m} (local.get $d) (local.get $n))){clear}
     (struct.set $list.{m} $len (local.get $l) (local.get $n))
     {pop_val})"""
-        inner = e
-        while isinstance(inner, ListT):
-            inner = inner.elem
-        if isinstance(inner, Prim) or inner in (STR, OptionalT(STR)):
+        if has_repr(e):
             item = self.repr_code(e, f"(call $list.{m}.get (local.get $l) (local.get $i))")
             code += f"""
   (func $list.{m}.to_str (param $l (ref $list.{m})) (result (ref $str))
@@ -673,7 +813,14 @@ class Emitter:
             return (f"(if (result (ref $str)) (ref.is_null (local.tee {tmp} {code})) "
                     f"(then {self.lit('None')}) (else (ref.as_non_null (local.get {tmp}))))")
         if isinstance(t, ListT):
+            self.heap(t)
             return f"(call $list.{mangle(t.elem)}.to_str {code})"
+        if isinstance(t, (TupleT, DictT, DictViewT)):
+            return f"(call {self.collection_op(t, 'to_str')} {code})"
+        if isinstance(t, OptionalT):
+            return self.optional_repr_code(t, code)
+        if isinstance(t, ClassT):
+            return self.class_str(t, code)
         raise AssertionError(f"to_str of {t}")
 
     def repr_code(self, t: Type, code: str) -> str:
@@ -682,11 +829,56 @@ class Emitter:
             return f"(call $rt.str_repr {code})"
         if t == OptionalT(STR):
             return f"(call $rt.opt_str_repr {code})"
+        if isinstance(t, OptionalT):
+            return self.optional_repr_code(t, code)
         return self.to_str_code(t, code)
+
+    def string_builder_helpers(self) -> str:
+        """Specialize mixed string/integer concatenations without allocating their parts.
+
+        Call arguments evaluate each expression (including custom __str__) once,
+        left to right. Only primitive integer formatting is delayed: it has no
+        user-visible side effects. The helper allocates the final bytes + header.
+        """
+        helpers = []
+        for shape in sorted(self.string_builders):
+            params = " ".join(f"(param $p{i} {'i64' if kind == 'i' else '(ref $str)'})"
+                              for i, kind in enumerate(shape))
+            lines = [f"  (func $str.build.{shape} {params} (result (ref $str))",
+                     "    (local $len i32) (local $cp i32) (local $pos i32) (local $out (ref $u8s))"]
+            for i, kind in enumerate(shape):
+                lines.append(f"    (local $n{i} i32)" + (f" (local $b{i} (ref $u8s))" if kind == 's' else ""))
+            for i, kind in enumerate(shape):
+                if kind == 'i':
+                    length = f"(call $rt.i64_str_len (local.get $p{i}))"
+                    cp = f"(local.get $n{i})"
+                else:
+                    lines.append(f"    (local.set $b{i} (struct.get $str $bytes (local.get $p{i})))")
+                    length = f"(array.len (local.get $b{i}))"
+                    cp = f"(struct.get $str $cp (local.get $p{i}))"
+                lines += [f"    (local.set $n{i} {length})",
+                          f"    (local.set $len (i32.add (local.get $len) (local.get $n{i})))",
+                          f"    (local.set $cp (call $rt.cp_sum (local.get $cp) {cp}))"]
+            lines.append("    (local.set $out (array.new_default $u8s (local.get $len)))")
+            for i, kind in enumerate(shape):
+                if kind == 'i':
+                    lines.append(f"    (local.set $pos (call $rt.i64_write (local.get $out) (local.get $pos) "
+                                 f"(local.get $p{i}) (local.get $n{i})))")
+                else:
+                    lines += [f"    (array.copy $u8s $u8s (local.get $out) (local.get $pos) "
+                              f"(local.get $b{i}) (i32.const 0) (local.get $n{i}))",
+                              f"    (local.set $pos (i32.add (local.get $pos) (local.get $n{i})))"]
+            lines.append("    (call $rt.mkstr (local.get $out) (local.get $cp)))")
+            helpers.append("\n".join(lines))
+        return "\n".join(helpers)
 
     # ---- functions -------------------------------------------------------------
 
     def emit_func(self, f: ir.Func) -> str:
+        if f.closure_type is not None:
+            f.sig_type = self.heap(f.closure_type)[1:] + ".sig"
+        if f.machine:
+            return self.emit_machine(f)
         self.fn = FnState(f)
         body: list[str] = []
         if f.self_cast is not None:
@@ -724,6 +916,8 @@ class Emitter:
     def stmt(self, s: ir.Stmt) -> list[str]:
         fn = self.fn
         assert fn is not None
+        if isinstance(s, (ir.CellSet, ir.CellClear)):
+            return self.closure_stmt(s)
         if isinstance(s, ir.SetLocal):
             return [f"(local.set ${s.name} {self.ex(s.value)})"]
         if isinstance(s, ir.SetField):
@@ -949,6 +1143,10 @@ class Emitter:
     # ---- expressions -----------------------------------------------------------
 
     def ex(self, e: ir.Expr) -> str:
+        if isinstance(e, (ir.FunctionRef, ir.Closure, ir.CallValue, ir.CellNew, ir.CellGet, ir.EnvGet)):
+            return self.closure_expr(e)
+        if isinstance(e, ir.MachineOp):
+            return self.machine_op(e)
         fn = self.fn
         assert fn is not None
         if isinstance(e, ir.Const):
@@ -965,6 +1163,16 @@ class Emitter:
                 if e.name not in fn.nonnull:
                     return f"(ref.as_non_null {code})"
             return code
+        if isinstance(e, ir.ObjectEq):
+            return self.object_eq(e.left.ty, e.right.ty, self.ex(e.left), self.ex(e.right))
+        if isinstance(e, ir.ClassRef):
+            return f"(global.get ${e.cls.name}.vt.inst)"
+        if isinstance(e, ir.TypeOf):
+            return f"(struct.get ${e.operand.ty.info.name} $__vt__ {self.ex(e.operand)})"
+        if isinstance(e, ir.ClassName):
+            return f"(struct.get ${e.operand.ty.info.name}.vt $__name__ {self.ex(e.operand)})"
+        if isinstance(e, ir.TracebackToken):
+            return "(struct.new $traceback<>)"
         if isinstance(e, ir.Unary):
             return self.unary(e)
         if isinstance(e, ir.Binary):
@@ -994,6 +1202,20 @@ class Emitter:
             return (f"(if (result {self.valtype(e.ty)}) {self.ex(e.cond)} "
                     f"(then {self.ex(e.then)}) (else {self.ex(e.else_)}))")
         if isinstance(e, ir.Call):
+            if e.func.startswith("snek.lib."):
+                from .wasi_bindings import OPERATIONS
+                self.wasi_features.add(OPERATIONS[e.func.removeprefix("snek.lib.")])
+                if isinstance(e.ty, ListT):
+                    self.heap(e.ty)
+            if e.func.startswith("snek.sys."):
+                self.stdlib_io.add(e.func.removeprefix("snek.sys."))
+                self.heap(ListT(I32))
+            if e.func in ("snek.read_bytes", "snek.write_bytes"):
+                if self.component:
+                    from .errors import CompileError
+                    raise CompileError("read_bytes/write_bytes currently require the core WASI target, not --component")
+                self.byte_io = True
+                self.heap(ListT(I32))
             return self.call(f"${e.func}", e.args)
         if isinstance(e, ir.New):
             return self.call(f"${e.cls.name}.__new__", e.args)
@@ -1010,6 +1232,27 @@ class Emitter:
             items = "".join(" " + self.ex(i) for i in e.items)
             return (f"(struct.new $list.{m} (i32.const {len(e.items)}) "
                     f"(array.new_fixed $arr.{m} {len(e.items)}{items}))")
+        if isinstance(e, ir.TupleLit):
+            return f"(struct.new {self.heap(e.ty)} {' '.join(self.ex(i) for i in e.items)})"
+        if isinstance(e, ir.TupleGet):
+            return f"(struct.get {self.heap(e.obj.ty)} {e.index} {self.ex(e.obj)})"
+        if isinstance(e, (ir.TupleOp, ir.DictOp)):
+            t = strip_optional(e.obj.ty)
+            return self.call(self.collection_op(t, e.op), [e.obj, *e.args])
+        if isinstance(e, ir.DictLit):
+            D = self.heap(e.ty)
+            tmp = fn.temp(f"(ref null {D})")
+            new, put = self.collection_op(e.ty, "new"), self.collection_op(e.ty, "set")
+            # Python evaluates all key/value expressions before populating a literal.
+            pairs = []
+            code = []
+            for k, v in e.items:
+                kt, vt = fn.temp(self.storage(k.ty)), fn.temp(self.storage(v.ty))
+                code += [f"(local.set {kt} {self.ex(k)})", f"(local.set {vt} {self.ex(v)})"]
+                pairs.append((self.local_value(k.ty, kt), self.local_value(v.ty, vt)))
+            code.append(f"(local.set {tmp} (call {new}))")
+            code += [f"(call {put} (ref.as_non_null (local.get {tmp})) {k} {v})" for k, v in pairs]
+            return f"(block (result (ref {D})) {' '.join(code)} (ref.as_non_null (local.get {tmp})))"
         if isinstance(e, ir.ListGet):
             self.heap(e.lst.ty)
             return f"(call $list.{mangle(e.ty)}.get {self.ex(e.lst)} {self.ex(e.index)})"
@@ -1022,6 +1265,12 @@ class Emitter:
             t = strip_optional(e.lst.ty)
             assert isinstance(t, ListT)
             return self.call(self.list_op(t, e.op), [e.lst, *e.args])
+        if isinstance(e, ir.KeyedListOp):
+            name = f"$list.{mangle(e.lst.ty.elem)}.{e.op}.key<{mangle(e.key.ty)}>"
+            self.heap(e.lst.ty)
+            self.heap(e.key.ty)
+            self.keyed_builtins[name] = (e.lst.ty.elem, e.key.ty, e.op, e.ty)
+            return self.call(name, [e.lst, e.key, *e.args])
         if isinstance(e, ir.ListAppend):
             m = mangle(e.lst.ty.elem)  # type: ignore[attr-defined]
             self.heap(e.lst.ty)
@@ -1039,6 +1288,20 @@ class Emitter:
                     stack += [x.right, x.left]
                 else:
                     parts.append(x)
+            if any(isinstance(p, ir.ToStr) and p.operand.ty in (I32, I64) for p in parts):
+                # Fuse only plain decimal integer conversions. Other formatting
+                # (bool, float, specs, __str__) still runs at its original position.
+                shape, args = "", []
+                for p in parts:
+                    if isinstance(p, ir.ToStr) and p.operand.ty in (I32, I64):
+                        shape += "i"
+                        code = self.ex(p.operand)
+                        args.append(f"(i64.extend_i32_s {code})" if p.operand.ty == I32 else code)
+                    else:
+                        shape += "s"
+                        args.append(self.ex(p))
+                self.string_builders.add(shape)
+                return f"(call $str.build.{shape} {' '.join(args)})"
             if len(parts) == 2:
                 return f"(call $rt.str_concat {self.ex(parts[0])} {self.ex(parts[1])})"
             codes = "".join(" " + self.ex(p) for p in parts)
@@ -1067,7 +1330,9 @@ class Emitter:
         elif fv in (float("inf"), float("-inf")):
             lit = "inf" if fv > 0 else "-inf"
         else:
-            lit = repr(fv)
+            # Preserve the IR's exact f64 value. A shortest decimal spelling at
+            # an f32 midpoint can fall on the other side of the rounding tie.
+            lit = fv.hex()
         return f"({t.name}.const {lit})"  # type: ignore[attr-defined]
 
     def call(self, target: str, args: list[ir.Expr]) -> str:
@@ -1116,19 +1381,18 @@ class Emitter:
         assert isinstance(t, Prim)
         l, r = self.ex(e.left), self.ex(e.right)
         n = t.name
+        if e.op in ("min", "max"):
+            a, b = self.fn.temp(n), self.fn.temp(n)  # type: ignore[union-attr]
+            cmp = ("lt" if e.op == "min" else "gt") + ("_s" if t.is_int else "")
+            # Return the first operand on ties or an unordered (NaN) comparison.
+            return (f"(block (result {n}) (local.set {a} {l}) (local.set {b} {r}) "
+                    f"(select (local.get {b}) (local.get {a}) ({n}.{cmp} (local.get {b}) (local.get {a}))))")
         if e.op in SIMPLE_BIN:
             return f"({n}.{SIMPLE_BIN[e.op]} {l} {r})"
         if t.is_int:
             if e.op in ("floordiv", "mod"):
                 return f"(call $rt.{n}.{e.op} {l} {r})"
-            if e.op in ("min", "max"):
-                a, b = self.fn.temp(n), self.fn.temp(n)  # type: ignore[union-attr]
-                cmp = "lt_s" if e.op == "min" else "gt_s"
-                return (f"(select (local.tee {a} {l}) (local.tee {b} {r}) "
-                        f"({n}.{cmp} (local.get {a}) (local.get {b})))")
         else:
-            if e.op in ("min", "max"):
-                return f"({n}.{e.op} {l} {r})"
             if e.op == "div_int":
                 return f"(call $rt.f64.div_int {l} {r})"
             if e.op in ("div", "floordiv", "mod"):
@@ -1156,5 +1420,14 @@ class Emitter:
         return f"({t.name}.{table[e.op]} {l} {r})"
 
 
-def emit_module(module: ir.Module) -> str:
-    return Emitter(module).emit()
+def emit_module(module: ir.Module, component: bool = False, *, graph_factory=None, machine_backend=None) -> str:
+    # Explicit opt-in while the rest of the emitter remains Python. A missing
+    # or failing selected suspension pass is an error, never a Python fallback.
+    import os
+    if graph_factory is None and os.environ.get("SNEK_MACHINE_LOWERER"):
+        from .machine_bridge import WasmGraphFactory
+        graph_factory = WasmGraphFactory(Path(os.environ["SNEK_MACHINE_LOWERER"]))
+    if machine_backend is None and os.environ.get("SNEK_MACHINE_EMITTER"):
+        from .machine_bridge import WasmMachineBackend
+        machine_backend = WasmMachineBackend(Path(os.environ["SNEK_MACHINE_EMITTER"]))
+    return Emitter(module, component=component, graph_factory=graph_factory, machine_backend=machine_backend).emit()

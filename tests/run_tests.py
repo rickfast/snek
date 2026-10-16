@@ -6,7 +6,8 @@
                      message`) must match too.
                      Each example runs both unoptimized and through wasm-opt -O3.
   tests/errors/*.py  must fail to compile; the first line `# error: <text>`
-                     must appear in the error message.
+                     must appear in the error message. The independent checker
+                     uses explicit wording variants in selfhost_diagnostics.json.
 
   python tests/run_tests.py [-k substring]
 """
@@ -14,6 +15,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -24,6 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from snekc import CompileError, driver, runner  # noqa: E402
+from snekc import selfhost
 
 
 def run_cpython(src: Path) -> runner.RunResult:
@@ -65,6 +68,11 @@ def check_error(src: Path) -> list[str]:
     first = source.splitlines()[0]
     assert first.startswith("# error: "), f"{src} must start with '# error: ...'"
     want = first.removeprefix("# error: ").strip()
+    if selfhost.selected():
+        # The independent checker has its own stable diagnostic wording.
+        # Keep specific-message assertions, not merely nonzero exit checks.
+        diagnostics = json.loads((ROOT / "tests/selfhost_diagnostics.json").read_text())
+        want = diagnostics.get(src.name, want)
     try:
         driver.compile_to_wat(source, str(src))
     except CompileError as e:

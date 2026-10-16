@@ -16,7 +16,9 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["snekc", "snek"]
+packages = ["snekc", "snek", "bootstrap"]
+include-package-data = false
 
 [tool.setuptools.package-data]
-snekc = ["prelude.wat", "node_wasi.mjs"]
+snekc = ["prelude.wat", "node_wasi.mjs", "component_runtime.wat", "component_input.wat", "abi_memory.wat", "wit/*.wit", "wit/deps/*.wit"]
+bootstrap = ["data/*.txt"]

@@ -1,4 +1,4 @@
-# error: only reference types (str, list, classes) can be None
+# error: only reference types (str, containers, classes) can be None
 from snek import i32
 
 

@@ -2,6 +2,12 @@ __pycache__/
 *.wasm
 *.wat
 !snekc/prelude.wat
+!snekc/component_runtime.wat
+!snekc/component_input.wat
+!snekc/abi_memory.wat
 .venv/
 bench/node_modules/
 bench/work/
+bootstrap/build/
+native/target/
+dist/

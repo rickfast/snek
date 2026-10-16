@@ -1,0 +1,35 @@
+// Minimal subset of wasi:cli@0.3.0 used by snek.
+// Source: WebAssembly/WASI; Apache-2.0 WITH LLVM-exception.
+package wasi:cli@0.3.0;
+
+interface types {
+    enum error-code { io, illegal-byte-sequence, pipe }
+}
+
+interface stdout {
+    use types.{error-code};
+    write-via-stream: func(data: stream<u8>) -> future<result<_, error-code>>;
+}
+
+interface stderr {
+    use types.{error-code};
+    write-via-stream: func(data: stream<u8>) -> future<result<_, error-code>>;
+}
+
+interface stdin {
+    use types.{error-code};
+    read-via-stream: func() -> tuple<stream<u8>, future<result<_, error-code>>>;
+}
+
+interface exit {
+    exit-with-code: func(status-code: u8);
+}
+
+interface run {
+    run: async func() -> result;
+}
+
+interface environment {
+    get-arguments: func() -> list<string>;
+    get-environment: func() -> list<tuple<string, string>>;
+}

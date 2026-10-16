@@ -17,12 +17,21 @@ checker only lets user code pass a str for it.
 BUILTINS_SOURCE = '''
 class BaseException:
     __message: Final[str | None]
+    __keyrepr: Final[str | None] = None
 
     def __init__(self, __msg: str | None = None) -> None:
         self.__message = __msg
 
 
 class Exception(BaseException):
+    pass
+
+
+class GeneratorExit(BaseException):
+    pass
+
+
+class StopIteration(Exception):
     pass
 
 
@@ -58,6 +67,14 @@ class RuntimeError(Exception):
     pass
 
 
+class OSError(Exception):
+    pass
+
+
+class BrokenPipeError(OSError):
+    pass
+
+
 class NotImplementedError(RuntimeError):
     pass
 
@@ -67,6 +84,14 @@ class ValueError(Exception):
 
 
 class TypeError(Exception):
+    pass
+
+
+class NameError(Exception):
+    pass
+
+
+class UnboundLocalError(NameError):
     pass
 
 

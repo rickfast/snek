@@ -1,7 +1,7 @@
 """Type representations.
 
 Numbers are machine types (i32, i64, f32, f64) and are never boxed. Every
-other value (str, list[T], class instances) is a reference to a WasmGC
+other value (strings, collections, class instances) is a reference to a WasmGC
 struct, and only reference types can be optional (`T | None`).
 """
 
@@ -64,6 +64,16 @@ STR = StrT()
 
 
 @dataclass(frozen=True)
+class StreamT(Type):
+    """A typed view of a CLI stream; views share a closeable resource state."""
+    kind: str  # TextInput | TextOutput | BinaryInput | BinaryOutput
+    is_ref = True
+
+    def __str__(self) -> str:
+        return f"io.{self.kind}"
+
+
+@dataclass(frozen=True)
 class BufT(Type):
     """A growable UTF-8 byte buffer; only the built-in str methods (builtins.py) can name it."""
 
@@ -86,12 +96,140 @@ class ListT(Type):
 
 
 @dataclass(frozen=True)
+class CallableT(Type):
+    params: tuple[Type, ...]
+    ret: Type
+    is_ref = True
+
+    def __str__(self) -> str:
+        return f"Callable[[{', '.join(map(str, self.params))}], {self.ret}]"
+
+
+@dataclass(frozen=True)
+class CellT(Type):
+    """Compiler-only shared lexical binding; the payload remains unboxed."""
+    elem: Type
+    is_ref = True
+
+
+@dataclass(frozen=True)
+class EnvT(Type):
+    """Compiler-only closure environment; None denotes the erased base type."""
+    captures: tuple[Type, ...] | None = None
+    is_ref = True
+
+
+@dataclass(frozen=True)
+class IteratorT(Type):
+    elem: Type
+    is_ref = True
+
+    def __str__(self) -> str:
+        return f"Iterator[{self.elem}]"
+
+
+@dataclass(frozen=True)
+class CoroutineT(Type):
+    elem: Type
+    is_ref = True
+
+    def __str__(self) -> str:
+        return f"Coroutine[None, None, {self.elem}]"
+
+
+@dataclass(frozen=True)
+class TupleT(Type):
+    elems: tuple[Type, ...]
+    is_ref = True
+
+    def __str__(self) -> str:
+        return "tuple[" + (", ".join(map(str, self.elems)) or "()") + "]"
+
+
+@dataclass(frozen=True)
+class DictT(Type):
+    key: Type
+    value: Type
+    is_ref = True
+
+    def __str__(self) -> str:
+        return f"dict[{self.key}, {self.value}]"
+
+
+@dataclass(frozen=True)
+class DictViewT(Type):
+    mapping: DictT
+    kind: str  # keys | values | items
+    is_ref = True
+
+    @property
+    def elem(self) -> Type:
+        if self.kind == "keys":
+            return self.mapping.key
+        if self.kind == "values":
+            return self.mapping.value
+        return TupleT((self.mapping.key, self.mapping.value))
+
+    def __str__(self) -> str:
+        return f"{self.mapping}.{self.kind}()"
+
+
+def is_hashable(t: Type) -> bool:
+    """Keys have value equality and a stable hash; mutable containers cannot be keys.
+
+    Floats are excluded for now: unboxed NaNs cannot preserve Python's identity
+    shortcut. Object keys await __hash__ support.
+    """
+    if isinstance(t, OptionalT):
+        return is_hashable(t.inner)
+    if isinstance(t, TupleT):
+        return all(is_hashable(e) for e in t.elems)
+    return t in (STR, BOOL, I32, I64)
+
+
+def has_repr(t: Type) -> bool:
+    if isinstance(t, OptionalT):
+        return has_repr(t.inner)
+    if isinstance(t, ListT):
+        return has_repr(t.elem)
+    if isinstance(t, TupleT):
+        return all(has_repr(e) for e in t.elems)
+    if isinstance(t, DictT):
+        return has_repr(t.key) and has_repr(t.value)
+    if isinstance(t, DictViewT):
+        return has_repr(t.elem)
+    return isinstance(t, Prim) or t == STR
+
+
+@dataclass(frozen=True)
 class ClassT(Type):
     info: ClassInfo
     is_ref = True
 
     def __str__(self) -> str:
         return self.info.name
+
+
+@dataclass(frozen=True)
+class TypeT(Type):
+    """A class value, represented by its immutable vtable."""
+    info: ClassInfo
+    is_ref = True
+
+    def __str__(self) -> str:
+        return f"type[{self.info.name}]"
+
+
+@dataclass(frozen=True)
+class TracebackT(Type):
+    """Opaque exception-path token; frames are not exposed."""
+    is_ref = True
+
+    def __str__(self) -> str:
+        return "TracebackType"
+
+
+TRACEBACK = TracebackT()
 
 
 @dataclass(frozen=True)
@@ -141,7 +279,7 @@ class MethodInfo:
     sig: FuncSig
     decl: ClassInfo  # class that introduced the vtable slot
     slot: int
-    node: ast.FunctionDef
+    node: ast.FunctionDef | ast.AsyncFunctionDef
     owner: ClassInfo  # class whose body holds this implementation
 
 
@@ -209,7 +347,7 @@ def strip_optional(t: Type) -> Type:
 def is_assignable(src: Type, dst: Type) -> bool:
     if src == dst:
         return True
-    if isinstance(src, ClassT) and isinstance(dst, ClassT):
+    if isinstance(src, (ClassT, TypeT)) and type(src) is type(dst):
         return src.info.is_subclass_of(dst.info)
     if isinstance(dst, OptionalT):
         if src == NONE:
@@ -242,9 +380,9 @@ def join_types(a: Type, b: Type) -> Type | None:
     joined: Type | None = None
     if sa == sb:
         joined = sa
-    elif isinstance(sa, ClassT) and isinstance(sb, ClassT):
+    elif isinstance(sa, (ClassT, TypeT)) and type(sa) is type(sb):
         c = common_class(sa.info, sb.info)
-        joined = ClassT(c) if c else None
+        joined = type(sa)(c) if c else None
     if joined is None:
         return None
     return OptionalT(joined) if optional else joined

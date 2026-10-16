@@ -1,0 +1,26 @@
+[package]
+name = "snek-cli"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "snek"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+tempfile = "3"
+serde_json = "1"
+wasmtime = { version = "=49.0.2", default-features = false, features = ["anyhow", "cranelift", "runtime", "std", "gc", "gc-drc", "parallel-compilation"] }
+wasmtime-wasi = { version = "=49.0.2", default-features = false, features = ["p1"] }
+
+[build-dependencies]
+serde_json = "1"
+sha2 = "0.10"
+wasmtime = { version = "=49.0.2", default-features = false, features = ["anyhow", "cranelift", "runtime", "std", "gc", "gc-drc", "parallel-compilation"] }
+
+[profile.release]
+strip = true
+lto = "thin"

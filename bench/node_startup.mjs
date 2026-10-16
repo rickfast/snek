@@ -16,7 +16,7 @@ if (kind === 'snek-v8') {
   const t1 = performance.now();
   const wasi = new WASI({ version: 'preview1', args: ['empty'], env: {}, returnOnExit: true });
   const inst = await WebAssembly.instantiate(mod, wasi.getImportObject());
-  wasi.start(inst);
+  if (wasi.start(inst) !== 0) throw new Error('empty program failed');
   const t2 = performance.now();
   compile = (t1 - t0) / 1000; start = (t2 - t1) / 1000;
 } else if (kind === 'pyodide') {

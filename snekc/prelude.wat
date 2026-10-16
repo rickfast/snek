@@ -834,27 +834,40 @@
       (then (str.lit "True"))
       (else (str.lit "False"))))
 
-  ;; Count the digits first so the bytes are allocated once, at their final size.
-  (func $rt.i64_to_str (param $v i64) (result (ref $str))
-    (local $out (ref $u8s)) (local $n i32) (local $u i64) (local $t i64) (local $neg i32)
+  ;; Decimal size and buffer writer are shared by str(int) and fused f-strings.
+  ;; Both handle INT64_MIN by reading its wrapping negation as unsigned.
+  (func $rt.i64_str_len (param $v i64) (result i32)
+    (local $n i32) (local $t i64) (local $neg i32)
     (local.set $neg (i64.lt_s (local.get $v) (i64.const 0)))
-    ;; 0 - INT64_MIN wraps to itself, which is 2^63 read as unsigned: correct.
-    (local.set $u (select (i64.sub (i64.const 0) (local.get $v)) (local.get $v) (local.get $neg)))
-    (local.set $t (local.get $u))
+    (local.set $t (select (i64.sub (i64.const 0) (local.get $v)) (local.get $v) (local.get $neg)))
     (local.set $n (local.get $neg))
     (loop $count
       (local.set $n (i32.add (local.get $n) (i32.const 1)))
       (local.set $t (i64.div_u (local.get $t) (i64.const 10)))
       (br_if $count (i64.ne (local.get $t) (i64.const 0))))
-    (local.set $out (array.new_default $u8s (local.get $n)))
+    (local.get $n))
+
+  ;; Write exactly n bytes at start; return the next free byte offset.
+  (func $rt.i64_write (param $out (ref $u8s)) (param $start i32) (param $v i64) (param $n i32) (result i32)
+    (local $pos i32) (local $u i64) (local $neg i32)
+    (local.set $neg (i64.lt_s (local.get $v) (i64.const 0)))
+    (local.set $u (select (i64.sub (i64.const 0) (local.get $v)) (local.get $v) (local.get $neg)))
+    (local.set $pos (i32.add (local.get $start) (local.get $n)))
     (loop $l
-      (local.set $n (i32.sub (local.get $n) (i32.const 1)))
-      (array.set $u8s (local.get $out) (local.get $n)
+      (local.set $pos (i32.sub (local.get $pos) (i32.const 1)))
+      (array.set $u8s (local.get $out) (local.get $pos)
         (i32.add (i32.const 48) (i32.wrap_i64 (i64.rem_u (local.get $u) (i64.const 10)))))
       (local.set $u (i64.div_u (local.get $u) (i64.const 10)))
       (br_if $l (i64.ne (local.get $u) (i64.const 0))))
-    (if (local.get $neg) (then (array.set $u8s (local.get $out) (i32.const 0) (i32.const 45))))
-    (call $rt.mkstr (local.get $out) (array.len (local.get $out))))
+    (if (local.get $neg) (then (array.set $u8s (local.get $out) (local.get $start) (i32.const 45))))
+    (i32.add (local.get $start) (local.get $n)))
+
+  (func $rt.i64_to_str (param $v i64) (result (ref $str))
+    (local $out (ref $u8s)) (local $n i32)
+    (local.set $n (call $rt.i64_str_len (local.get $v)))
+    (local.set $out (array.new_default $u8s (local.get $n)))
+    (drop (call $rt.i64_write (local.get $out) (i32.const 0) (local.get $v) (local.get $n)))
+    (call $rt.mkstr (local.get $out) (local.get $n)))
 
   (func $rt.pow10 (param $n i32) (result f64)
     (local $r f64)
@@ -888,6 +901,10 @@
   (func $rt.put (param $o (ref $u8s)) (param $pos i32) (param $b i32) (result i32)
     (array.set $u8s (local.get $o) (local.get $pos) (local.get $b))
     (i32.add (local.get $pos) (i32.const 1)))
+
+  ;; IEEE-754 bits for exact decimal formatting and signed-zero handling.
+  (func $rt.f64_bits (param $v f64) (result i64)
+    (i64.reinterpret_f64 (local.get $v)))
 
   ;; Approximates CPython's float repr: the shortest of 15/16/17 significant
   ;; digits that round-trips, laid out with repr's fixed/scientific switch
@@ -1243,8 +1260,11 @@
   ;; without an argument) and the class name is the first field of every vtable.
 
   ;; str(e): the message; '' without one; KeyError shows repr(key) like CPython
-  (func $rt.exc_str (param $e (ref $BaseException)) (result (ref $str))
+  (func $rt.exc_str_default (param $e (ref $BaseException)) (result (ref $str))
     (local $m (ref null $str))
+    (local.set $m (struct.get $BaseException $__keyrepr (local.get $e)))
+    (if (ref.is_null (local.get $m))
+      (then (nop)) (else (return (ref.as_non_null (local.get $m)))))
     (local.set $m (struct.get $BaseException $__message (local.get $e)))
     (if (ref.is_null (local.get $m)) (then (return (str.lit ""))))
     (if (ref.test (ref $KeyError) (local.get $e))
@@ -1254,13 +1274,17 @@
   ;; repr(e): Name('message'), or Name() without one
   (func $rt.exc_repr (param $e (ref $BaseException)) (result (ref $str))
     (local $m (ref null $str))
+    (local $key (ref null $str))
     (local.set $m (struct.get $BaseException $__message (local.get $e)))
+    (local.set $key (struct.get $BaseException $__keyrepr (local.get $e)))
     (call $rt.str_concat_n (array.new_fixed $strs 4
       (struct.get $BaseException.vt $__name__ (struct.get $BaseException $__vt__ (local.get $e)))
       (str.lit "(")
-      (if (result (ref $str)) (ref.is_null (local.get $m))
-        (then (str.lit ""))
-        (else (call $rt.str_repr (ref.as_non_null (local.get $m)))))
+      (if (result (ref $str)) (ref.is_null (local.get $key))
+        (then (if (result (ref $str)) (ref.is_null (local.get $m))
+          (then (str.lit ""))
+          (else (call $rt.str_repr (ref.as_non_null (local.get $m))))))
+        (else (ref.as_non_null (local.get $key))))
       (str.lit ")"))))
 
   ;; An exception escaped the program: print `Name: message` (CPython's last
@@ -1268,7 +1292,13 @@
   (func $rt.uncaught (param $e (ref $BaseException))
     (local $name (ref $str)) (local $msg (ref $str))
     (local.set $name (struct.get $BaseException.vt $__name__ (struct.get $BaseException $__vt__ (local.get $e))))
-    (local.set $msg (call $rt.exc_str (local.get $e)))
+    (local.set $msg
+      (block $message (result (ref $str))
+        (drop (block $failed (result (ref $BaseException))
+          (try_table (catch $snek.exc $failed)
+            (br $message (call $rt.exc_str (local.get $e))))
+          (unreachable)))
+        (str.lit "<exception str() failed>")))
     (call $rt.panic
       (if (result (ref $str)) (call $rt.str_len (local.get $msg))
         (then (call $rt.str_concat (call $rt.str_concat (local.get $name) (str.lit ": ")) (local.get $msg)))

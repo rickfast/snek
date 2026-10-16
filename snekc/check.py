@@ -29,6 +29,10 @@ from functools import reduce
 from . import ir, unicode
 from .builtins import BUILTINS_SOURCE, STR_METHODS_TEMPLATE
 from .errors import CompileError
+from .formatting import FORMAT_SOURCE, parse_spec
+from .closures import ClosureChecker, callable_type, scope_walk, body_nodes
+from .ordered_builtins import OrderedBuiltinChecker
+from .stdlib import MODULE_EXPORTS, StdlibChecker, import_bindings
 from .types import (
     BOOL,
     BUF,
@@ -39,18 +43,29 @@ from .types import (
     NONE,
     NUMERIC,
     STR,
+    StreamT,
+    TRACEBACK,
+    TypeT,
     WIDEN,
     ClassInfo,
     ClassT,
+    DictT,
+    DictViewT,
     FieldInfo,
     FuncSig,
     ListT,
+    IteratorT,
+    CoroutineT,
+    CallableT,
+    TupleT,
     MethodInfo,
     OptionalT,
     Prim,
     Type,
     common_class,
     is_assignable,
+    is_hashable,
+    has_repr,
     join_numeric,
     join_types,
     strip_optional,
@@ -59,13 +74,15 @@ from .types import (
 INT_RANGE = {"i32": (-(2**31), 2**31 - 1), "i64": (-(2**63), 2**63 - 1)}
 
 ALLOWED_IMPORTS = {
-    "snek": {"i32", "i64", "f32", "f64", "Final", "final"},
-    "typing": {"Final", "Optional", "final"},
+    "snek": {"i32", "i64", "f32", "f64", "Final", "final", "run", "checkpoint", "read_bytes", "write_bytes"},
+    "typing": {"Final", "Optional", "final", "Iterator", "Generator", "Coroutine", "Callable"},
+    "collections.abc": {"Iterator", "Generator", "Coroutine", "Callable"},
+    "types": {"TracebackType"},
     "__future__": {"annotations"},
 }
 
-BUILTINS = {"print", "len", "str", "range", "isinstance", "abs", "min", "max", "bool", "type",
-            "i32", "i64", "f32", "f64", "int", "float", "list", "object", "super", "ord", "chr", "repr"}
+BUILTINS = {"print", "len", "str", "range", "isinstance", "abs", "min", "max", "sum", "sorted", "bool", "type",
+            "i32", "i64", "f32", "f64", "int", "float", "list", "dict", "tuple", "object", "super", "ord", "chr", "repr", "iter", "next"}
 
 # Runtime functions (prelude.wat) that the built-in str methods in builtins.py may call:
 # name -> (parameter types, result type, Wasm function). Positions are byte offsets.
@@ -94,6 +111,7 @@ INTRINSICS: dict[str, tuple[list[Type], Type, str]] = {
     "__putsub": ([BUF, STR, I32, I32], NONE, "rt.buf_sub"),
     "__putcase": ([BUF, I32, I32], NONE, "rt.buf_case"),  # case mapping of a code point (constant kind)
     "__done": ([BUF], STR, "rt.buf_done"),
+    "__f64_bits": ([F64], I64, "rt.f64_bits"),
 }
 FLAG_MASK_ARG = {"__has": 1, "__all_flags": 1, "__any_flags": 1}
 INT_MAX = 2**31 - 1
@@ -111,6 +129,7 @@ CMP_OPS = {ast.Eq: "eq", ast.NotEq: "ne", ast.Lt: "lt", ast.LtE: "le", ast.Gt: "
 EXCEPTION_ATTRS = {"args", "with_traceback", "add_note"}  # BaseException attributes in CPython
 
 PEP765 = ("would swallow any in-flight exception, so snek rejects it (PEP 765; CPython 3.14 warns about it)")
+SPECIAL_METHODS = {"__eq__", "__str__", "__len__", "__enter__", "__exit__"}
 
 
 # ---- AST helpers ------------------------------------------------------------
@@ -137,10 +156,12 @@ def refers_to_self(node: ast.AST) -> bool:
 def names_assigned(stmts: list[ast.stmt]) -> set[str]:
     out: set[str] = set()
     for s in stmts:
-        for n in ast.walk(s):
+        for n in scope_walk([s]):
             if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
                 out.add(n.id)
             elif isinstance(n, ast.ExceptHandler) and n.name:
+                out.add(n.name)
+            elif isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 out.add(n.name)
     return out
 
@@ -179,7 +200,7 @@ def has_direct_break(stmts: list[ast.stmt]) -> bool:
     def visit(node: ast.AST) -> bool:
         if isinstance(node, ast.Break):
             return True
-        if isinstance(node, (ast.While, ast.For, ast.FunctionDef, ast.ClassDef)):
+        if isinstance(node, (ast.While, ast.For, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             return False
         return any(visit(c) for c in ast.iter_child_nodes(node))
 
@@ -189,7 +210,7 @@ def has_direct_break(stmts: list[ast.stmt]) -> bool:
 def except_names(nodes: list[ast.AST]) -> set[str]:
     """Names bound by `except ... as name` anywhere in nodes. CPython deletes the name when
     the handler ends, so afterwards it is unbound even if it was assigned before."""
-    return {n.name for node in nodes for n in ast.walk(node) if isinstance(n, ast.ExceptHandler) and n.name}
+    return {n.name for n in scope_walk(nodes) if isinstance(n, ast.ExceptHandler) and n.name}
 
 
 def is_main_guard(s: ast.stmt) -> bool:
@@ -229,7 +250,7 @@ def int_tainted(e: ir.Expr) -> bool:
 
 
 def is_pure(e: ir.Expr) -> bool:
-    return isinstance(e, (ir.Const, ir.StrLit, ir.NoneLit, ir.LocalGet))
+    return isinstance(e, (ir.Const, ir.StrLit, ir.NoneLit, ir.LocalGet)) and not isinstance(e, ir.CapturedGet)
 
 
 def const_int(e: ir.Expr) -> int | None:
@@ -284,6 +305,14 @@ class FuncCtx:
         self.ctor_state: CtorState | None = None
         self.inline_return_ok = False  # may a `return` here leave the inlined base __init__?
         self.ninline = 0
+        self.yields: Type | None = None
+        self.async_ = False
+        self.scope = None
+        self.parent = None
+        self.cells: set[str] = set()
+        self.free: set[str] = set()
+        self.nested_sigs = {}
+        self.pending_closures = []
 
     def add_param(self, name: str, ty: Type) -> None:
         self.params.append((name, ty))
@@ -303,7 +332,10 @@ class FuncCtx:
 
     def get(self, name: str) -> ir.LocalGet:
         declared = self.types[name]
-        return ir.LocalGet(self.flow.narrowed.get(name, declared), name, declared)
+        # A sibling closure can mutate a cell through any call, including an
+        # implicit protocol call. Narrow a local snapshot, not shared storage.
+        ty = declared if name in self.cells else self.flow.narrowed.get(name, declared)
+        return (ir.CapturedGet if name in self.cells else ir.LocalGet)(ty, name, declared)
 
 
 @dataclass
@@ -316,27 +348,32 @@ class CtorState:
 # ---- the checker ---------------------------------------------------------------
 
 
-class Checker:
-    def __init__(self, tree: ast.Module):
+class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
+    def __init__(self, tree: ast.Module, *, frontend: str = "cpython"):
+        from .frontend import parse_source
+
+        self.frontend = frontend
         self.tree = tree
-        self.builtin_tree = ast.parse(BUILTINS_SOURCE, filename="<snek builtins>")
+        self.builtin_tree = parse_source(BUILTINS_SOURCE, "<snek builtins>", frontend=frontend)
         self.classes: dict[str, ClassInfo] = {}
         self.class_order: list[ClassInfo] = []
-        self.funcs: dict[str, tuple[FuncSig, ast.FunctionDef]] = {}
+        self.funcs: dict[str, tuple[FuncSig, ast.FunctionDef | ast.AsyncFunctionDef]] = {}
         self.main_stmts: list[ast.stmt] = []
         self.imported: set[str] = set()
+        self.library_imports: dict[str, tuple[str, ...]] = {}
         self.out: list[ir.Func] = []
         self.ctor_sigs: dict[ClassInfo, FuncSig] = {}
         self.ctx: FuncCtx = FuncCtx("<module>", NONE)
         # Built-in functions (the str methods): checked and emitted only when used.
-        methods_src = string.Template(STR_METHODS_TEMPLATE).substitute(unicode.FLAG_NAMES)
+        methods_src = string.Template(STR_METHODS_TEMPLATE).substitute(unicode.FLAG_NAMES) + FORMAT_SOURCE
         self.bnodes: dict[str, ast.FunctionDef] = {
-            n.name: n for n in ast.parse(methods_src, filename="<snek str methods>").body
+            n.name: n for n in parse_source(methods_src, "<snek str methods>", frontend=frontend).body
             if isinstance(n, ast.FunctionDef)}
         self.bsigs: dict[str, FuncSig] = {}
         self.bqueue: list[str] = []
         self.builtin_mode = False  # checking builtins.py code: intrinsics and __Buf are visible
         self.unicode = unicode.UnicodeUse()
+        self.nclosures = 0
 
     @property
     def exc_base(self) -> ClassInfo:
@@ -377,36 +414,54 @@ class Checker:
         for s in self.builtin_tree.body:
             assert isinstance(s, ast.ClassDef)
             self.classes[s.name] = ClassInfo(s.name, s, builtin=True)
-        pending: list[ast.FunctionDef] = []
+        pending: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
         for s in self.tree.body:
+            library = import_bindings(s)
+            if library:
+                for name, path in library.items():
+                    if name in self.funcs or name in self.classes or name in self.imported:
+                        raise CompileError(f"'{name}' is already defined", s)
+                    if name in BUILTINS or name in self.bnodes or name in ("str", "u8s", "rt", "lit"):
+                        raise CompileError(f"'{name}' is a reserved name", s)
+                    if name in self.library_imports and self.library_imports[name] != path:
+                        raise CompileError(f"'{name}' is already imported", s)
+                    self.library_imports[name] = path
+                if isinstance(s, ast.ImportFrom) and s.module == "snek":
+                    s = copy.copy(s)
+                    s.names = [a for a in s.names if a.name not in MODULE_EXPORTS]
+                    if not s.names:
+                        continue
+                else:
+                    continue
             if isinstance(s, ast.ImportFrom):
                 allowed = ALLOWED_IMPORTS.get(s.module or "")
                 if allowed is None:
                     raise CompileError(f"import from '{s.module}' is not supported "
-                                       f"(only snek, typing and __future__)", s)
+                                       f"(only snek, typing, types and __future__)", s)
                 for a in s.names:
-                    if a.name not in allowed or a.asname:
+                    if a.name not in allowed or a.asname or s.level:
                         raise CompileError(f"cannot import '{a.name}' from {s.module}", s)
+                    if a.name in self.library_imports:
+                        raise CompileError(f"'{a.name}' is already imported", s)
+                    if a.name in ("run", "checkpoint", "read_bytes", "write_bytes") and (a.name in self.funcs or a.name in self.classes):
+                        raise CompileError(f"'{a.name}' is already defined", s)
                     self.imported.add(a.name)
             elif isinstance(s, ast.Import):
                 raise CompileError("plain `import` is not supported; use `from snek import i32, ...`", s)
             elif isinstance(s, ast.ClassDef):
                 self.check_new_name(s.name, s)
                 self.classes[s.name] = ClassInfo(s.name, s)
-            elif isinstance(s, ast.FunctionDef):
+            elif isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 self.check_new_name(s.name, s)
                 pending.append(s)
                 self.funcs[s.name] = None  # type: ignore[assignment]  (filled below)
-            elif isinstance(s, ast.AsyncFunctionDef):
-                raise CompileError("async functions are not supported yet (planned: state machines "
-                                   "on the WASI 0.3 async ABI)", s)
             elif is_main_guard(s):
                 if s.orelse:
                     raise CompileError("else branch on the __main__ guard is not supported", s)
                 self.main_stmts.extend(s.body)
             elif is_docstring(s):
                 continue
-            elif isinstance(s, (ast.Expr, ast.If, ast.While, ast.For, ast.Try, ast.Raise, ast.Assert)):
+            elif isinstance(s, (ast.Expr, ast.If, ast.While, ast.For, ast.Try, ast.With, ast.Raise, ast.Assert)):
                 self.main_stmts.append(s)
             elif isinstance(s, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
                 raise CompileError("module-level variables are not supported yet; "
@@ -426,7 +481,8 @@ class Checker:
             raise CompileError(f"'{name}' is a built-in exception class and cannot be redefined", node)
         if name in self.classes or name in self.funcs:
             raise CompileError(f"'{name}' is already defined", node)
-        if name in BUILTINS or name in ("str", "u8s", "rt", "lit", "snek") or name in self.bnodes:
+        if (name in BUILTINS or name in ("str", "u8s", "rt", "lit", "snek") or name in self.bnodes or name in self.library_imports
+                or (name in ("run", "checkpoint", "read_bytes", "write_bytes") and name in self.imported)):
             raise CompileError(f"'{name}' is a reserved name", node)
         if not name.isascii():
             raise CompileError("identifiers must be ASCII", node)
@@ -480,7 +536,7 @@ class Checker:
                 continue
             if isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
                 self.declare_field(cls, item)
-            elif isinstance(item, ast.FunctionDef):
+            elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 if item.decorator_list:
                     raise CompileError("method decorators (@staticmethod, @property, ...) are not "
                                        "supported yet", item.decorator_list[0])
@@ -491,12 +547,13 @@ class Checker:
                 if name == "__init__":
                     cls.init_node = item
                     continue
-                if name.startswith("__") and name.endswith("__"):
+                if name.startswith("__") and name.endswith("__") and name not in SPECIAL_METHODS:
                     raise CompileError(f"special method {name} is not supported yet", item)
                 if name in cls.fields:
                     raise CompileError(f"'{name}' is already a field of {cls.name}", item)
                 self.check_exception_attr(cls, name, item)
                 sig = self.signature(item, is_method=True)
+                self.check_special_signature(cls, item, sig)
                 inherited = cls.methods.get(name)
                 if inherited:
                     if not sig.same_as(inherited.sig):
@@ -512,6 +569,33 @@ class Checker:
                                    "fields): `name: T = value`", item)
             else:
                 raise CompileError(f"unsupported statement in class body: {type(item).__name__}", item)
+
+    def check_special_signature(self, cls: ClassInfo, node: ast.FunctionDef, sig: FuncSig) -> None:
+        name = node.name
+        if name not in SPECIAL_METHODS:
+            return
+        params = [t for _, t in sig.params]
+        valid = not any(d is not None for d in sig.defaults)
+        if name == "__eq__":
+            other = strip_optional(params[0]) if len(params) == 1 else None
+            valid &= (isinstance(other, ClassT) and cls.is_subclass_of(other.info) and sig.ret == BOOL)
+            want = "one other parameter typed as this class (or a base, optionally | None), and -> bool"
+        elif name == "__str__":
+            valid &= not params and sig.ret == STR
+            want = "no parameters beyond self, and -> str"
+        elif name == "__len__":
+            valid &= not params and sig.ret in (I32, I64)
+            want = "no parameters beyond self, and -> i32 or -> i64"
+        elif name == "__enter__":
+            valid &= not params
+            want = "no parameters beyond self"
+        else:
+            valid &= params == [OptionalT(TypeT(self.exc_base)), OptionalT(ClassT(self.exc_base)),
+                                OptionalT(TRACEBACK)] and sig.ret in (BOOL, NONE)
+            want = "(self, exc_type: type[BaseException] | None, exc: BaseException | None, " \
+                   "tb: TracebackType | None) -> bool or -> None (from types import TracebackType)"
+        if not valid:
+            raise CompileError(f"{name} requires {want}; default arguments are not supported", node)
 
     def check_exception_attr(self, cls: ClassInfo, name: str, node: ast.AST) -> None:
         if name in EXCEPTION_ATTRS and cls.is_subclass_of(self.classes["BaseException"]):
@@ -540,7 +624,7 @@ class Checker:
             raise CompileError("field defaults must be literals", item.value)
         cls.fields[name] = FieldInfo(name, ty, final, item.value, cls, len(cls.fields) + 1)
 
-    def signature(self, node: ast.FunctionDef, is_method: bool) -> FuncSig:
+    def signature(self, node: ast.FunctionDef | ast.AsyncFunctionDef, is_method: bool) -> FuncSig:
         a = node.args
         if a.vararg or a.kwarg or a.kwonlyargs or (a.posonlyargs and not self.builtin_mode):
             raise CompileError("*args, **kwargs, keyword-only and positional-only parameters are not supported yet",
@@ -577,14 +661,33 @@ class Checker:
                 raise CompileError(f"'{node.name}' needs a return annotation (`-> T` or `-> None`)", node)
         else:
             ret = self.resolve_type(node.returns)
+        yields = any(isinstance(n, (ast.Yield, ast.YieldFrom)) for n in scope_walk(body_nodes(node)))
+        if isinstance(node, ast.AsyncFunctionDef):
+            if yields:
+                raise CompileError("async generators are not supported yet", node)
+            if node.name.startswith("__"):
+                raise CompileError("async special methods are not supported yet", node)
+            ret = CoroutineT(ret)
+        elif yields:
+            if node.name.startswith("__"):
+                raise CompileError("generator special methods are not supported", node)
+            if not isinstance(ret, IteratorT):
+                raise CompileError("a generator needs an Iterator[T] or Generator[T, None, None] return annotation", node)
         return FuncSig(params, ret, defaults, len(a.posonlyargs))
 
     def resolve_type(self, node: ast.expr) -> Type:
+        library = self.stdlib_type(node)
+        if library is not None:
+            return library
         if isinstance(node, ast.Constant):
             if node.value is None:
                 return NONE
             if isinstance(node.value, str):  # forward reference: "Node"
-                inner = ast.parse(node.value, mode="eval").body
+                from .frontend import parse_source
+                try:
+                    inner = parse_source(node.value, mode="eval", frontend=self.frontend).body
+                except CompileError as error:
+                    raise CompileError(f"invalid quoted type annotation: {error.msg}", node) from None
                 ast.copy_location(inner, node)
                 for n in ast.walk(inner):
                     ast.copy_location(n, node)
@@ -601,17 +704,48 @@ class Checker:
                 return BOOL
             if n == "str":
                 return STR
+            if n == "TracebackType" and n in self.imported:
+                return TRACEBACK
             if n == "int":
                 raise CompileError("use a fixed-width integer type (i32 or i64) instead of int", node)
             if n == "float":
                 raise CompileError("use f64 (or f32) instead of float", node)
             if n == "list":
                 raise CompileError("list needs an element type: list[T]", node)
+            if n in ("dict", "tuple"):
+                raise CompileError(f"{n} needs type arguments: dict[K, V] or tuple[T, ...] (fixed length)", node)
             if n in self.classes:
                 return ClassT(self.classes[n])
             raise CompileError(f"unknown type '{n}'", node)
         if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
             n = node.value.id
+            if n == "Callable":
+                if n not in self.imported:
+                    raise CompileError("'Callable' must be imported from typing or collections.abc", node)
+                args = node.slice.elts if isinstance(node.slice, ast.Tuple) else []
+                if len(args) != 2 or not isinstance(args[0], ast.List):
+                    raise CompileError("use Callable[[T, ...], R] with explicit parameter types", node)
+                params = tuple(self.resolve_type(a) for a in args[0].elts)
+                if NONE in params:
+                    raise CompileError("a Callable parameter cannot have type None", node)
+                return CallableT(params, self.resolve_type(args[1]))
+            if n in ("Iterator", "Generator", "Coroutine"):
+                if n not in self.imported:
+                    raise CompileError(f"'{n}' must be imported from typing or collections.abc", node)
+                args = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+                ts = [self.resolve_type(a) for a in args]
+                if n == "Iterator" and len(ts) == 1 and ts[0] != NONE:
+                    return IteratorT(ts[0])
+                if n == "Generator" and len(ts) == 3 and ts[0] != NONE and ts[1:] == [NONE, NONE]:
+                    return IteratorT(ts[0])
+                if n == "Coroutine" and len(ts) == 3 and ts[:2] == [NONE, NONE]:
+                    return CoroutineT(ts[2])
+                raise CompileError("use Iterator[T], Generator[T, None, None], or Coroutine[None, None, T]", node)
+            if n == "type":
+                inner = self.resolve_type(node.slice)
+                if not isinstance(inner, ClassT):
+                    raise CompileError("type[T] needs a class type", node)
+                return TypeT(inner.info)
             if n == "list":
                 elem = self.resolve_type(node.slice)
                 if elem == NONE:
@@ -619,9 +753,25 @@ class Checker:
                 return ListT(elem)
             if n == "Optional":
                 return self.make_optional(self.resolve_type(node.slice), node)
+            if n == "dict":
+                if not isinstance(node.slice, ast.Tuple) or len(node.slice.elts) != 2:
+                    raise CompileError("dict needs two types: dict[K, V]", node)
+                key, value = [self.resolve_type(e) for e in node.slice.elts]
+                self.check_key_type(key, node)
+                if value == NONE:
+                    raise CompileError("dict values need a concrete type; use T | None for optional references", node)
+                return DictT(key, value)
+            if n == "tuple":
+                elts = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+                if any(isinstance(e, ast.Constant) and e.value is Ellipsis for e in elts):
+                    raise CompileError("tuples have fixed length; tuple[T, ...] is not supported", node)
+                elems = tuple(self.resolve_type(e) for e in elts)
+                if NONE in elems:
+                    raise CompileError("tuple elements need a concrete type; use T | None for optional references", node)
+                return TupleT(elems)
             if n == "Final":
                 raise CompileError("Final is only allowed on class fields", node)
-            if n in ("dict", "set", "tuple"):
+            if n == "set":
                 raise CompileError(f"{n} is not supported yet", node)
         if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
             left, right = self.resolve_type(node.left), self.resolve_type(node.right)
@@ -636,9 +786,14 @@ class Checker:
         if isinstance(t, OptionalT):
             return t
         if not t.is_ref:
-            raise CompileError(f"'{t} | None' is not allowed: only reference types (str, list, classes) can "
+            raise CompileError(f"'{t} | None' is not allowed: only reference types (str, containers, classes) can "
                                f"be None, because numbers are never boxed", node)
         return OptionalT(t)
+
+    def check_key_type(self, t: Type, node: ast.AST) -> None:
+        if not is_hashable(t):
+            raise CompileError(f"unsupported dictionary key type {t}; use str, bool, i32, i64, or tuples "
+                               "of supported keys (optionally None for reference keys)", node)
 
     def ctor_sig(self, cls: ClassInfo) -> FuncSig:
         if cls not in self.ctor_sigs:
@@ -648,15 +803,29 @@ class Checker:
 
     # ==== pass 2: bodies ============================================================
 
-    def check_function(self, name: str, sig: FuncSig, node: ast.FunctionDef) -> ir.Func:
+    def check_function(self, name: str, sig: FuncSig, node: ast.FunctionDef | ast.AsyncFunctionDef) -> ir.Func:
         self.ctx = FuncCtx(name, sig.ret)
+        machine = self.suspension_context(node, sig.ret)
         for p, t in sig.params:
             self.ctx.add_param(p, t)
-        body = self.check_body(node.body, sig.ret, node)
-        return ir.Func(name, self.ctx.params, sig.ret, self.ctx.locals, body)
+        self.prepare_scope(node)
+        body = self.check_body(node.body, self.ctx.ret, node)
+        return self.finish_closures(ir.Func(name, self.ctx.params, sig.ret, self.ctx.locals, body, machine=machine))
+
+    def suspension_context(self, node: ast.AST, ret: Type) -> bool:
+        self.ctx.async_ = isinstance(node, ast.AsyncFunctionDef)
+        if self.ctx.async_:
+            self.ctx.ret = ret.elem
+            return True
+        if any(isinstance(n, (ast.Yield, ast.YieldFrom)) for n in scope_walk(body_nodes(node))):
+            self.ctx.ret = NONE
+            self.ctx.yields = ret.elem
+            return True
+        return False
 
     def check_method(self, cls: ClassInfo, m: MethodInfo) -> ir.Func:
         self.ctx = FuncCtx(f"{cls.name}.{m.name}", m.sig.ret, cls, owner=cls)
+        machine = self.suspension_context(m.node, m.sig.ret)
         nonnull: set[str] = set()
         self_cast = None
         if m.decl is cls:
@@ -670,14 +839,17 @@ class Checker:
             self_cast = cls
         for p, t in m.sig.params:
             self.ctx.add_param(p, t)
-        body = self.check_body(m.node.body, m.sig.ret, m.node)
-        return ir.Func(f"{cls.name}.{m.name}", self.ctx.params, m.sig.ret, self.ctx.locals, body,
-                       sig_type=f"{m.decl.name}.{m.name}.sig", self_cast=self_cast, nonnull_locals=nonnull)
+        self.prepare_scope(m.node)
+        body = self.check_body(m.node.body, self.ctx.ret, m.node)
+        return self.finish_closures(ir.Func(f"{cls.name}.{m.name}", self.ctx.params, m.sig.ret, self.ctx.locals, body,
+                       sig_type=f"{m.decl.name}.{m.name}.sig", self_cast=self_cast, nonnull_locals=nonnull,
+                       machine=machine))
 
     def check_main(self) -> ir.Func:
         self.ctx = FuncCtx("__main__", NONE)
+        self.prepare_scope(ast.Module(body=self.main_stmts, type_ignores=[]))
         body, _ = self.check_block(self.main_stmts)
-        return ir.Func("snek.main", [], NONE, self.ctx.locals, body)
+        return self.finish_closures(ir.Func("snek.main", [], CoroutineT(NONE), self.ctx.locals, body, machine=True))
 
     def check_body(self, stmts: list[ast.stmt], ret: Type, node: ast.AST) -> list[ir.Stmt]:
         body, terminated = self.check_block(stmts)
@@ -865,8 +1037,15 @@ class Checker:
             if is_docstring(s):
                 return [], False
             v = s.value
-            if isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id == "print":
-                return [self.check_print(v)], False
+            if isinstance(v, ast.Yield):
+                if ctx.yields is None or v.value is None:
+                    raise CompileError("yield needs a value in a typed generator", v)
+                return [ir.Yield(self.coerce(self.check_expr(v.value, ctx.yields), ctx.yields, v))], False
+            if isinstance(v, ast.YieldFrom):
+                raise CompileError("yield from is not supported yet; use a for loop with yield", v)
+            if (isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id == "print"
+                    and "print" not in ctx.types and not (ctx.scope and "print" in ctx.scope.bound)):
+                return self.check_print(v), False
             return [ir.ExprStmt(self.check_expr(v))], False
         if isinstance(s, ast.Assign):
             if len(s.targets) != 1:
@@ -890,6 +1069,17 @@ class Checker:
             return self.check_assign(s.target, s.value, ty, s), False
         if isinstance(s, ast.AugAssign):
             return self.check_augassign(s), False
+        if isinstance(s, ast.Delete):
+            out = []
+            for target in s.targets:
+                if not isinstance(target, ast.Subscript) or isinstance(target.slice, ast.Slice):
+                    raise CompileError("del is supported for dictionary entries: del d[key]", target)
+                obj = self.check_expr(target.value)
+                if not isinstance(obj.ty, DictT):
+                    raise CompileError("del is supported for dictionary entries: del d[key]", target)
+                key = self.coerce(self.check_expr(target.slice, obj.ty.key), obj.ty.key, target.slice)
+                out.append(ir.ExprStmt(ir.DictOp(NONE, "delete", obj, [key])))
+            return out, False
         if isinstance(s, ast.Return):
             return self.check_return(s), True
         if isinstance(s, ast.If):
@@ -915,15 +1105,29 @@ class Checker:
             return self.check_try(s)
         if isinstance(s, ast.TryStar):
             raise CompileError("except* (exception groups) is not supported", s)
-        if isinstance(s, (ast.With, ast.AsyncWith)):
-            raise CompileError("with statements are not supported yet (they need __enter__/__exit__)", s)
-        if isinstance(s, (ast.FunctionDef, ast.ClassDef, ast.Lambda)):
-            raise CompileError("nested functions and classes are not supported yet", s)
-        if isinstance(s, (ast.Global, ast.Nonlocal)):
-            raise CompileError("global/nonlocal are not supported", s)
+        if isinstance(s, ast.With):
+            return self.check_with(s)
+        if isinstance(s, ast.AsyncWith):
+            raise CompileError("async with is not supported yet", s)
+        if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if ctx.is_init:
+                raise CompileError("closures in __init__ are not supported yet; use an ordinary method", s)
+            sig = ctx.nested_sigs[id(s)]
+            value = self.defer_closure(s, sig)
+            ctx.flow.assigned.add(s.name)
+            ctx.flow.narrowed.pop(s.name, None)
+            return [ir.SetLocal(s.name, value)], False
+        if isinstance(s, ast.Nonlocal):
+            if ctx.scope is None:
+                raise CompileError("nonlocal requires an enclosing function binding", s)
+            return [], False  # validated by lexical scope analysis
+        if isinstance(s, ast.ClassDef):
+            raise CompileError("nested classes are not supported yet", s)
+        if isinstance(s, ast.Global):
+            raise CompileError("global is not supported", s)
         raise CompileError(f"unsupported statement: {type(s).__name__}", s)
 
-    def check_print(self, call: ast.Call) -> ir.Stmt:
+    def check_print(self, call: ast.Call) -> list[ir.Stmt]:
         opts = {"sep": " ", "end": "\n"}
         for kw in call.keywords:
             if kw.arg not in opts:
@@ -933,7 +1137,21 @@ class Checker:
             opts[kw.arg] = kw.value.value
         if any(isinstance(a, ast.Starred) for a in call.args):
             raise CompileError("print(*args) is not supported", call)
-        return ir.Print([self.to_str(self.check_expr(a), a) for a in call.args], opts["sep"], opts["end"])
+        # Evaluate arguments before printing, but perform implicit __str__ calls
+        # while writing. Explicit str(x) is an ordinary argument evaluation.
+        prelude, rendered = [], []
+        for arg in call.args:
+            value = self.check_expr(arg)
+            self.no_int_taint(value, arg)
+            if value.ty == NONE:
+                if not isinstance(value, ir.NoneLit):
+                    prelude.append(ir.ExprStmt(value))
+                rendered.append(ir.StrLit(STR, "None"))
+            else:
+                temp = self.ctx.temp(value.ty)
+                prelude.append(ir.SetLocal(temp, value))
+                rendered.append(self.to_str(self.ctx.get(temp), arg))
+        return prelude + [ir.Print(rendered, opts["sep"], opts["end"])]
 
     def check_assign(self, target: ast.expr, value: ast.expr, ann: Type | None, node: ast.AST) -> list[ir.Stmt]:
         ctx = self.ctx
@@ -978,12 +1196,21 @@ class Checker:
             lst = self.check_expr(target.value)
             if lst.ty == STR:
                 raise CompileError("str does not support item assignment (strings are immutable)", target)
+            if isinstance(lst.ty, TupleT):
+                raise CompileError("tuple does not support item assignment (tuples are immutable)", target)
+            if isinstance(lst.ty, DictT):
+                idx = self.coerce(self.check_expr(target.slice, lst.ty.key), lst.ty.key, target.slice)
+                v = self.coerce(self.check_expr(value, lst.ty.value), lst.ty.value, value)
+                # Always capture the RHS: target evaluation can mutate a container it reads.
+                tmp = ctx.temp(v.ty)
+                return [ir.SetLocal(tmp, v), ir.ExprStmt(ir.DictOp(NONE, "set", lst, [idx, ctx.get(tmp)]))]
             elem = self.list_elem(lst, target.value)
             idx = self.check_index(target.slice)
             pre, v = self.value_first(self.coerce(self.check_expr(value, elem), elem, value), elem, [lst, idx])
             return pre + [ir.SetIndex(lst, idx, v)]
         if isinstance(target, (ast.Tuple, ast.List)):
-            raise CompileError("tuple unpacking is not supported yet", target)
+            v = self.check_expr(value, self.unpack_hint(target))
+            return self.unpack(target, v)
         raise CompileError("unsupported assignment target", target)
 
     def value_first(self, v: ir.Expr, ty: Type, targets: list[ir.Expr]) -> tuple[list[ir.Stmt], ir.Expr]:
@@ -991,6 +1218,59 @@ class Checker:
             return [], v
         tmp = self.ctx.temp(ty)
         return [ir.SetLocal(tmp, v)], self.ctx.get(tmp)
+
+    def unpack_hint(self, target: ast.expr) -> Type | None:
+        if isinstance(target, ast.Name):
+            return self.ctx.types.get(target.id)
+        if isinstance(target, (ast.Tuple, ast.List)):
+            types = [self.unpack_hint(t) for t in target.elts]
+            if all(t is not None for t in types):
+                return TupleT(tuple(types))
+        return None
+
+    def unpack(self, target: ast.expr, value: ir.Expr) -> list[ir.Stmt]:
+        """Bind a checked value, keeping the RHS of unpacking alive across target writes."""
+        ctx = self.ctx
+        if isinstance(target, (ast.Tuple, ast.List)):
+            if not isinstance(value.ty, TupleT):
+                raise CompileError(f"unpacking requires a fixed-length tuple, got {value.ty}", target)
+            if any(isinstance(t, ast.Starred) for t in target.elts):
+                raise CompileError("starred tuple unpacking is not supported yet", target)
+            if len(target.elts) != len(value.ty.elems):
+                raise CompileError(f"cannot unpack {len(value.ty.elems)} tuple elements into "
+                                   f"{len(target.elts)} targets", target)
+            tmp = ctx.temp(value.ty)
+            out = [ir.SetLocal(tmp, value)]
+            for i, (t, ty) in enumerate(zip(target.elts, value.ty.elems)):
+                out += self.unpack(t, ir.TupleGet(ty, ctx.get(tmp), i))
+            return out
+        if isinstance(target, ast.Name):
+            if target.id == "self" and ctx.cls is not None:
+                raise CompileError("cannot assign to self", target)
+            if not target.id.isascii():
+                raise CompileError("identifiers must be ASCII", target)
+            declared = ctx.types.get(target.id)
+            if declared is None:
+                ctx.declare(target.id, value.ty)
+            else:
+                value = self.coerce(value, declared, target)
+            ctx.flow.assigned.add(target.id)
+            ctx.flow.narrowed.pop(target.id, None)
+            return [ir.SetLocal(target.id, value)]
+        if isinstance(target, ast.Attribute):
+            obj = self.check_expr(target.value)
+            cls, f = self.field_of(obj, target)
+            if f.final:
+                raise CompileError(f"'{f.name}' is Final", target)
+            return [ir.SetField(obj, cls, f, self.coerce(value, f.ty, target))]
+        if isinstance(target, ast.Subscript) and not isinstance(target.slice, ast.Slice):
+            obj = self.check_expr(target.value)
+            if isinstance(obj.ty, DictT):
+                key = self.coerce(self.check_expr(target.slice, obj.ty.key), obj.ty.key, target.slice)
+                return [ir.ExprStmt(ir.DictOp(NONE, "set", obj, [key, self.coerce(value, obj.ty.value, target)]))]
+            elem = self.list_elem(obj, target)
+            return [ir.SetIndex(obj, self.check_index(target.slice), self.coerce(value, elem, target))]
+        raise CompileError("unsupported unpacking target", target)
 
     def check_augassign(self, s: ast.AugAssign) -> list[ir.Stmt]:
         ctx = self.ctx
@@ -1025,6 +1305,20 @@ class Checker:
             lst = self.check_expr(t.value)
             if lst.ty == STR:
                 raise CompileError("str does not support item assignment (strings are immutable)", t)
+            if isinstance(lst.ty, TupleT):
+                raise CompileError("tuple does not support item assignment (tuples are immutable)", t)
+            if isinstance(lst.ty, DictT):
+                elem = lst.ty.value
+                idx = self.coerce(self.check_expr(t.slice, lst.ty.key), lst.ty.key, t.slice)
+                ltmp, itmp, vtmp = ctx.temp(lst.ty), ctx.temp(lst.ty.key), ctx.temp(elem)
+                cur = ir.DictOp(elem, "get", ctx.get(ltmp), [ctx.get(itmp)])
+                pre = [ir.SetLocal(ltmp, lst), ir.SetLocal(itmp, idx), ir.SetLocal(vtmp, cur)]
+                if isinstance(elem, ListT):
+                    pre.append(ir.ExprStmt(self.list_inplace(s, ctx.get(vtmp))))
+                    new = ctx.get(vtmp)
+                else:
+                    new = self.coerce(self.arith(s.op, ctx.get(vtmp), self.check_operand(s.value, elem), s), elem, s)
+                return pre + [ir.ExprStmt(ir.DictOp(NONE, "set", ctx.get(ltmp), [ctx.get(itmp), new]))]
             elem = self.list_elem(lst, t.value)
             ltmp, itmp = ctx.temp(lst.ty), ctx.temp(I32)
             idx = self.check_index(t.slice)
@@ -1217,6 +1511,67 @@ class Checker:
         ctx.flow = before.copy() if terminated else merged
         return [ir.Try(body_ir, handlers, else_ir, fin_ir, exc_local)], terminated
 
+    def check_with(self, s: ast.With) -> tuple[list[ir.Stmt], bool]:
+        """Lower nested managers to try/except/finally, including nonlocal exits."""
+        ctx = self.ctx
+        item = s.items[0]
+        manager = self.check_expr(item.context_expr)
+        if isinstance(manager.ty, StreamT):
+            mgr = ctx.temp(manager.ty)
+            recv = ctx.get(mgr)
+            head = [ir.SetLocal(mgr, manager), ir.ExprStmt(ir.Call(NONE, "snek.sys.ensure_open", [recv]))]
+            bind = self.unpack(item.optional_vars, recv) if item.optional_vars is not None else []
+            nested = ast.copy_location(ast.With(items=s.items[1:], body=s.body), s) if len(s.items) > 1 else None
+            body, terminated = self.check_with(nested) if nested is not None else self.check_block(s.body)
+            exc = ctx.temp(OptionalT(ClassT(self.exc_base)))
+            cleanup = [ir.ExprStmt(ir.Call(NONE, "snek.sys.stream_close", [recv]))]
+            return head + [ir.Try(bind + body, [], [], cleanup, exc)], terminated
+        if not isinstance(manager.ty, ClassT):
+            raise CompileError(f"with needs a non-optional class instance, got {manager.ty}", item.context_expr)
+        cls = manager.ty.info
+        enter, exit_ = cls.methods.get("__enter__"), cls.methods.get("__exit__")
+        if enter is None or exit_ is None:
+            raise CompileError(f"{cls.name} needs both __enter__ and __exit__ for with", s)
+        mgr, handled = ctx.temp(manager.ty), ctx.temp(BOOL)
+        exc = ctx.temp(OptionalT(ClassT(self.exc_base)))
+        recv = ctx.get(mgr)
+        entered = ir.CallMethod(enter.sig.ret, recv, cls, enter, [])
+        head = [ir.SetLocal(mgr, manager), ir.SetLocal(handled, ir.Const(BOOL, False))]
+        if item.optional_vars is not None:
+            if enter.sig.ret == NONE:
+                raise CompileError("with ... as needs a non-None __enter__ result", item.optional_vars)
+            value = ctx.temp(enter.sig.ret)
+            head.append(ir.SetLocal(value, entered))  # failure in __enter__ must not call this __exit__
+            before = ctx.flow.copy()
+            bind = self.unpack(item.optional_vars, ctx.get(value))
+            if isinstance(item.optional_vars, ast.Name):
+                before = ctx.flow.copy()  # a plain local binding cannot raise
+        else:
+            head.append(ir.ExprStmt(entered))
+            bind = []
+            before = ctx.flow.copy()
+        nested = ast.copy_location(ast.With(items=s.items[1:], body=s.body), s) if len(s.items) > 1 else None
+        body, terminated = self.check_with(nested) if nested is not None else self.check_block(s.body)
+        if exit_.sig.ret == BOOL:
+            # Suppression can continue after any prefix, including target assignment.
+            for name in names_assigned([s]):
+                before.narrowed.pop(name, None)
+            before.assigned -= except_names([s])
+            ctx.flow = before if terminated else Flow.merge(before, ctx.flow)
+            terminated = False
+        caught = ir.LocalGet(ClassT(self.exc_base), exc, ctx.types[exc])
+        exit_error = ir.CallMethod(exit_.sig.ret, recv, cls, exit_, [
+            ir.TypeOf(TypeT(self.exc_base), caught), caught, ir.TracebackToken(TRACEBACK)])
+        on_error = [ir.SetLocal(handled, ir.Const(BOOL, True))]
+        if exit_.sig.ret == BOOL:
+            on_error.append(ir.If(ir.Unary(BOOL, "not", exit_error), [ir.Raise(None, exc)], []))
+        else:
+            on_error += [ir.ExprStmt(exit_error), ir.Raise(None, exc)]
+        exit_normal = ir.CallMethod(exit_.sig.ret, recv, cls, exit_,
+                                   [ir.NoneLit(t) for _, t in exit_.sig.params])
+        cleanup = [ir.If(ir.Unary(BOOL, "not", ctx.get(handled)), [ir.ExprStmt(exit_normal)], [])]
+        return head + [ir.Try(bind + body, [ir.Handler(None, None, None, on_error)], [], cleanup, exc)], terminated
+
     # ---- if / loops ---------------------------------------------------------------
 
     def check_if(self, s: ast.If) -> tuple[list[ir.Stmt], bool]:
@@ -1275,30 +1630,74 @@ class Checker:
     def check_for(self, s: ast.For) -> list[ir.Stmt]:
         if s.orelse:
             raise CompileError("for/else is not supported", s)
-        if not isinstance(s.target, ast.Name):
-            raise CompileError("for-loop target must be a simple name (no unpacking yet)", s.target)
         ctx = self.ctx
-        var = s.target.id
+        var = s.target.id if isinstance(s.target, ast.Name) else None
         it = s.iter
         loop_flow = self.enter_loop(s.body + [s])
         if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == "range":
+            if var is None:
+                raise CompileError("range() loop target must be a simple name", s.target)
             stmts = self.lower_range_for(var, it, s, loop_flow)
         else:
             seq = self.check_expr(it)
+            if isinstance(seq.ty, IteratorT):
+                tmp = ctx.temp(seq.ty)
+                ctx.flow = loop_flow.copy()
+                ctx.flow.assigned.add(tmp)
+                head = self.unpack(s.target, ir.MachineOp(seq.ty.elem, "value", ctx.get(tmp)))
+                body = self.check_loop_body(s.body, head)
+                ctx.flow = loop_flow.copy()
+                get = ir.LocalGet(seq.ty, tmp, seq.ty)
+                return [ir.SetLocal(tmp, seq), ir.Loop(ir.MachineOp(BOOL, "advance", get), body, [])]
             if seq.ty == STR:
+                if var is None:
+                    raise CompileError("str loop target must be a simple name", s.target)
                 return self.lower_str_for(var, seq, s, loop_flow)
-            elem = self.list_elem(seq, it)
-            self.bind_loop_var(var, elem, s.target)
+            if isinstance(seq.ty, (DictT, DictViewT)):
+                return self.lower_dict_for(seq, s, loop_flow)
+            if isinstance(seq.ty, TupleT):
+                elem = self.homogeneous_tuple(seq.ty, it)
+            else:
+                elem = self.list_elem(seq, it)
             ltmp, itmp = ctx.temp(seq.ty), ctx.temp(I32)
-            head = [ir.SetLocal(var, ir.ListGet(elem, ctx.get(ltmp), ctx.get(itmp)))]
             ctx.flow = loop_flow.copy()  # the loop variable is only assigned inside the body
-            ctx.flow.assigned |= {var, ltmp, itmp}
+            ctx.flow.assigned |= {ltmp, itmp}
+            get = (ir.TupleOp(elem, "get", ctx.get(ltmp), [ctx.get(itmp)]) if isinstance(seq.ty, TupleT)
+                   else ir.ListGet(elem, ctx.get(ltmp), ctx.get(itmp)))
+            head = self.unpack(s.target, get)
             body = self.check_loop_body(s.body, head)
-            cond = ir.Compare(BOOL, "lt", I32, ctx.get(itmp), ir.ListLen(I32, ctx.get(ltmp)))
+            length = ir.Const(I32, len(seq.ty.elems)) if isinstance(seq.ty, TupleT) else ir.ListLen(I32, ctx.get(ltmp))
+            cond = ir.Compare(BOOL, "lt", I32, ctx.get(itmp), length)
             step = [ir.SetLocal(itmp, ir.Binary(I32, "add", ctx.get(itmp), ir.Const(I32, 1)))]
             stmts = [ir.SetLocal(ltmp, seq), ir.SetLocal(itmp, ir.Const(I32, 0)), ir.Loop(cond, body, step)]
         ctx.flow = loop_flow.copy()
         return stmts
+
+    def lower_dict_for(self, seq: ir.Expr, s: ast.For, loop_flow: Flow) -> list[ir.Stmt]:
+        ctx = self.ctx
+        kind = "keys"
+        if isinstance(seq.ty, DictViewT):
+            kind = seq.ty.kind
+            seq = ir.DictOp(seq.ty.mapping, "mapping", seq, [])
+        t = seq.ty
+        assert isinstance(t, DictT)
+        d, i, n, remaining = ctx.temp(t), ctx.temp(I32), ctx.temp(I32), ctx.temp(I32)
+        ctx.flow = loop_flow.copy()
+        ctx.flow.assigned |= {d, i, n, remaining}
+        elem = DictViewT(t, kind).elem
+        head = self.unpack(s.target, ir.DictOp(elem, kind + "_at", ctx.get(d), [ctx.get(i)]))
+        head.append(ir.SetLocal(remaining, ir.Binary(I32, "sub", ctx.get(remaining), ir.Const(I32, 1))))
+        body = self.check_loop_body(s.body, head)
+        next_ = ir.DictOp(I32, "next", ctx.get(d), [ctx.get(i), ctx.get(n), ctx.get(remaining)])
+        cond = ir.Seq(BOOL, [ir.SetLocal(i, next_)], ir.Compare(BOOL, "ge", I32, ctx.get(i), ir.Const(I32, 0)))
+        step = [ir.SetLocal(i, ir.Binary(I32, "add", ctx.get(i), ir.Const(I32, 1)))]
+        exc = ctx.temp(ClassT(self.exc_base))
+        loop = ir.Try([ir.Loop(cond, body, step)], [], [],
+                      [ir.ExprStmt(ir.DictOp(NONE, "iter_end", ctx.get(d), []))], exc)
+        out = [ir.SetLocal(d, seq), ir.SetLocal(i, ir.Const(I32, 0)),
+               ir.SetLocal(n, ir.DictOp(I32, "iter_start", ctx.get(d), [])), ir.SetLocal(remaining, ctx.get(n)), loop]
+        ctx.flow = loop_flow.copy()
+        return out
 
     def lower_str_for(self, var: str, seq: ir.Expr, s: ast.For, loop_flow: Flow) -> list[ir.Stmt]:
         """for ch in s: walk the UTF-8 bytes, yielding one-character strings."""
@@ -1397,7 +1796,7 @@ class Checker:
             hint = ""
             if isinstance(e.ty, OptionalT):
                 hint = "; write `x is not None`"
-            elif isinstance(e.ty, ListT) or e.ty == STR:
+            elif isinstance(e.ty, (ListT, TupleT, DictT, DictViewT)) or e.ty == STR:
                 hint = "; write `len(x) > 0`"
             elif isinstance(e.ty, Prim):
                 hint = "; write `x != 0`"
@@ -1410,12 +1809,15 @@ class Checker:
             return self.check_expr(node, other)
         if isinstance(node, ast.List) and not node.elts and isinstance(other, ListT):
             return self.check_expr(node, other)  # xs + []
+        if isinstance(node, ast.Dict) and not node.keys and isinstance(other, DictT):
+            return self.check_expr(node, other)
         return self.check_expr(node)
 
     def check_operands(self, left: ast.expr, right: ast.expr, expected: Type | None) -> tuple[ir.Expr, ir.Expr]:
         # Only an int context flows into literal operands: in a float context, 2 + 3 is still the int 5.
         num_expected = expected if isinstance(expected, Prim) and expected.is_int else None
-        empty_left = isinstance(left, ast.List) and not left.elts
+        empty_left = ((isinstance(left, ast.List) and not left.elts)
+                      or (isinstance(left, ast.Dict) and not left.keys))
         if (is_num_literal(left) and not is_num_literal(right)) or empty_left:
             r = self.check_expr(right, num_expected)
             return self.check_operand(left, r.ty), r
@@ -1423,6 +1825,15 @@ class Checker:
         return l, self.check_operand(right, l.ty)
 
     def check_expr(self, node: ast.expr, expected: Type | None = None) -> ir.Expr:
+        if isinstance(node, ast.Await):
+            if not self.ctx.async_:
+                raise CompileError("await is only allowed inside async def", node)
+            value = self.check_expr(node.value)
+            if not isinstance(value.ty, CoroutineT):
+                raise CompileError(f"await needs a coroutine, got {value.ty}", node)
+            return ir.Await(value.ty.elem, value)
+        if isinstance(node, (ast.Yield, ast.YieldFrom)):
+            raise CompileError("yield expressions/send values are not supported; use yield as a statement", node)
         if isinstance(node, ast.Constant):
             return self.check_constant(node, expected)
         if isinstance(node, ast.Name):
@@ -1456,6 +1867,13 @@ class Checker:
             return self.check_attribute(node)
         if isinstance(node, ast.Subscript):
             seq = self.check_expr(node.value)
+            if isinstance(seq.ty, TupleT):
+                return self.check_tuple_subscript(seq, node)
+            if isinstance(seq.ty, DictT):
+                if isinstance(node.slice, ast.Slice):
+                    raise CompileError("dictionaries do not support slicing", node)
+                key = self.coerce(self.check_expr(node.slice, seq.ty.key), seq.ty.key, node.slice)
+                return ir.DictOp(seq.ty.value, "get", seq, [key])
             if isinstance(node.slice, ast.Slice):
                 bounds = self.check_slice(node.slice)
                 if seq.ty == STR:
@@ -1468,21 +1886,28 @@ class Checker:
             return ir.ListGet(elem, seq, self.check_index(node.slice))
         if isinstance(node, ast.List):
             return self.check_list(node, expected)
+        if isinstance(node, ast.Tuple):
+            return self.check_tuple(node, expected)
+        if isinstance(node, ast.Dict):
+            return self.check_dict(node, expected)
         if isinstance(node, ast.JoinedStr):
             return self.check_fstring(node)
         if isinstance(node, ast.IfExp):
             return self.check_ifexp(node, expected)
         if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
             raise CompileError("comprehensions are not supported yet", node)
-        if isinstance(node, (ast.Dict, ast.Set, ast.Tuple)):
+        if isinstance(node, ast.Set):
             raise CompileError(f"{type(node).__name__.lower()} literals are not supported yet", node)
         if isinstance(node, ast.Lambda):
-            raise CompileError("lambdas are not supported yet", node)
+            return self.check_lambda(node, expected)
         if isinstance(node, ast.NamedExpr):
             raise CompileError("the walrus operator is not supported", node)
         raise CompileError(f"unsupported expression: {type(node).__name__}", node)
 
     def check_attribute(self, node: ast.Attribute) -> ir.Expr:
+        library = self.check_stdlib_value(node)
+        if library is not None:
+            return library
         v = node.value
         if (node.attr == "__name__" and isinstance(v, ast.Call) and isinstance(v.func, ast.Name)
                 and v.func.id == "type" and "type" not in self.ctx.types):
@@ -1495,13 +1920,19 @@ class Checker:
                 return ir.TypeName(STR, obj, t.info)
             static = {I32: "int", I64: "int", F32: "float", F64: "float", BOOL: "bool", STR: "str"}
             if t in static:
-                return ir.StrLit(STR, static[t])  # the names CPython reports under the snek shim
-            if isinstance(t, ListT):
-                return ir.StrLit(STR, "list")
+                value = ir.StrLit(STR, static[t])  # the names CPython reports under the snek shim
+                return value if is_pure(obj) else ir.Seq(STR, [ir.ExprStmt(obj)], value)
+            if isinstance(t, (ListT, TupleT, DictT)):
+                name = "list" if isinstance(t, ListT) else "tuple" if isinstance(t, TupleT) else "dict"
+                return ir.Seq(STR, [ir.ExprStmt(obj)], ir.StrLit(STR, name))
             raise CompileError(f"type(x).__name__ of {t} is not supported (narrow it first)", node)
-        if isinstance(v, ast.Call) and isinstance(v.func, ast.Name) and v.func.id == "type":
-            raise CompileError("type() is only supported as type(x).__name__; use isinstance() for checks", node)
         obj = self.check_expr(v)
+        if isinstance(obj.ty, StreamT):
+            return self.check_stream_attribute(obj, node)
+        if isinstance(obj.ty, TypeT) and node.attr == "__name__":
+            return ir.ClassName(STR, obj)
+        if strip_optional(obj.ty) == TRACEBACK:
+            raise CompileError("tracebacks are opaque; only None checks are supported", node)
         if isinstance(obj.ty, ClassT) and node.attr in obj.ty.info.methods and node.attr not in obj.ty.info.fields:
             raise CompileError("bound methods are not first-class values yet; call the method directly", node)
         cls, f = self.field_of(obj, node)
@@ -1551,8 +1982,15 @@ class Checker:
             return ctx.get(n)
         if n == "self" and ctx.is_init and not ctx.constructed:
             raise CompileError("`self` is used before the object exists", node)
-        if n in self.funcs or n in self.classes:
-            raise CompileError(f"'{n}' is not a first-class value (no function/class values yet)", node)
+        if ctx.scope and n in ctx.scope.bound:
+            raise CompileError(f"local variable '{n}' may be used before it is assigned", node)
+        library = self.check_stdlib_value(node)
+        if library is not None:
+            return library
+        if n in self.classes:
+            return ir.ClassRef(TypeT(self.classes[n]), self.classes[n])
+        if n in self.funcs:
+            return ir.FunctionRef(callable_type(self.funcs[n][0]), n)
         raise CompileError(f"undefined name '{n}'", node)
 
     def arith(self, op: ast.operator, l: ir.Expr, r: ir.Expr, node: ast.AST) -> ir.Expr:
@@ -1563,6 +2001,24 @@ class Checker:
         name, sym = info
         if name == "add" and l.ty == STR and r.ty == STR:
             return ir.StrConcat(STR, l, r)
+        if name == "add" and isinstance(l.ty, TupleT) and isinstance(r.ty, TupleT):
+            lt, rt = self.ctx.temp(l.ty), self.ctx.temp(r.ty)
+            ty = TupleT(l.ty.elems + r.ty.elems)
+            items = [ir.TupleGet(t, self.ctx.get(tmp), i)
+                     for v, tmp in ((l, lt), (r, rt)) for i, t in enumerate(v.ty.elems)]
+            return ir.Seq(ty, [ir.SetLocal(lt, l), ir.SetLocal(rt, r)], ir.TupleLit(ty, items))
+        if name == "mul" and (isinstance(l.ty, TupleT) or isinstance(r.ty, TupleT)):
+            seq, n = (l, r) if isinstance(l.ty, TupleT) else (r, l)
+            count = const_int(n)
+            if count is None:
+                raise CompileError("tuple repetition needs an integer literal (the result has fixed length)", node)
+            count = max(count, 0) if seq.ty.elems else 0
+            if len(seq.ty.elems) * count > 10000:
+                raise CompileError("tuple repetition would create more than 10000 fields", node)
+            tmp = self.ctx.temp(seq.ty)
+            ty = TupleT(seq.ty.elems * count)
+            items = [ir.TupleGet(t, self.ctx.get(tmp), i) for _ in range(count) for i, t in enumerate(seq.ty.elems)]
+            return ir.Seq(ty, [ir.SetLocal(tmp, seq)], ir.TupleLit(ty, items))
         is_seq = lambda t: t == STR or isinstance(t, ListT)  # noqa: E731
         if name == "mul" and (is_seq(l.ty) or is_seq(r.ty)):
             seq_first = is_seq(l.ty)
@@ -1632,6 +2088,8 @@ class Checker:
                                            f"`{v.ty} | None` if it can be", a)
                     return ir.IsNull(BOOL, v, negate)
             l, r = self.check_expr(left_n), self.check_expr(right_n)
+            if TRACEBACK in (strip_optional(l.ty), strip_optional(r.ty)):
+                raise CompileError("tracebacks are opaque; only None checks are supported", node)
             if not (l.ty.is_ref and r.ty.is_ref):
                 raise CompileError("`is` compares object identity; use == for numbers and bools", node)
             return ir.Compare(BOOL, "isnot" if negate else "is", l.ty, l, r)
@@ -1639,12 +2097,48 @@ class Checker:
             e = self.check_in(left_n, right_n, node)
             return ir.Unary(BOOL, "not", e) if isinstance(op, ast.NotIn) else e
         name = CMP_OPS[type(op)]
-        l, r = self.check_operands(left_n, right_n, None)
+        if isinstance(right_n, ast.Tuple) and not isinstance(left_n, ast.Tuple):
+            l = self.check_expr(left_n)
+            t = strip_optional(l.ty)
+            hint = t if isinstance(t, TupleT) and len(t.elems) == len(right_n.elts) else None
+            r = self.check_expr(right_n, hint)
+        else:
+            l, r = self.check_operands(left_n, right_n, None)
+        lt, rt = strip_optional(l.ty), strip_optional(r.ty)
+        if isinstance(lt, ClassT) or isinstance(rt, ClassT):
+            if name not in ("eq", "ne"):
+                raise CompileError("ordering comparisons on objects are not supported", node)
+            if l.ty == NONE:
+                l = self.coerce(l, OptionalT(rt), left_n)
+            if r.ty == NONE:
+                r = self.coerce(r, OptionalT(lt), right_n)
+            if not (isinstance(strip_optional(l.ty), ClassT) and isinstance(strip_optional(r.ty), ClassT)):
+                raise CompileError(f"cannot compare {l.ty} with {r.ty}; __eq__ operands must be class instances", node)
+            self.validate_equality(l.ty, r.ty, node)
+            eq = ir.ObjectEq(BOOL, l, r)
+            return ir.Unary(BOOL, "not", eq) if name == "ne" else eq
+        if isinstance(lt, TypeT) and isinstance(rt, TypeT) and name in ("eq", "ne"):
+            return ir.Compare(BOOL, "is" if name == "eq" else "isnot", l.ty, l, r)
+        if isinstance(lt, CallableT) and isinstance(rt, CallableT) and name in ("eq", "ne"):
+            return ir.Compare(BOOL, "is" if name == "eq" else "isnot", l.ty, l, r)
+        if isinstance(lt, StreamT) and isinstance(rt, StreamT) and name in ("eq", "ne"):
+            return ir.Compare(BOOL, "is" if name == "eq" else "isnot", l.ty, l, r)
+        if isinstance(strip_optional(l.ty), (TupleT, DictT)) or isinstance(strip_optional(r.ty), (TupleT, DictT)):
+            if name not in ("eq", "ne"):
+                raise CompileError("ordering comparisons on tuples and dictionaries are not supported yet", node)
+            t = strip_optional(l.ty)
+            if t != strip_optional(r.ty):
+                raise CompileError(f"cannot compare {l.ty} with {r.ty}", node)
+            self.validate_equality(t, t, node)
+            cls = ir.TupleOp if isinstance(t, TupleT) else ir.DictOp
+            eq = cls(BOOL, "eq", l, [r])
+            return ir.Unary(BOOL, "not", eq) if name == "ne" else eq
         if isinstance(strip_optional(l.ty), ListT) or isinstance(strip_optional(r.ty), ListT):
             if name not in ("eq", "ne"):
                 raise CompileError("ordering comparisons (<, >, ...) on lists are not supported yet", node)
             if strip_optional(l.ty) != strip_optional(r.ty):
                 raise CompileError(f"cannot compare {l.ty} with {r.ty}", node)
+            self.validate_equality(l.ty, r.ty, node)
             eq = ir.ListOp(BOOL, "eq", l, [r])
             return ir.Unary(BOOL, "not", eq) if name == "ne" else eq
         if isinstance(l.ty, Prim) and l.ty.is_numeric and isinstance(r.ty, Prim) and r.ty.is_numeric:
@@ -1657,9 +2151,27 @@ class Checker:
             return ir.Compare(BOOL, name, BOOL, l, r)
         if l.ty == STR and r.ty == STR:
             return ir.Compare(BOOL, name, STR, l, r)
-        if isinstance(strip_optional(l.ty), ClassT) and isinstance(strip_optional(r.ty), ClassT):
-            raise CompileError("== on objects is not supported yet (no __eq__); use `is` for identity", node)
         raise CompileError(f"cannot compare {l.ty} with {r.ty}", node)
+
+    def validate_equality(self, left: Type, right: Type, node: ast.AST) -> None:
+        """Every possible dynamic __eq__ must accept the statically known operand."""
+        l, r = strip_optional(left), strip_optional(right)
+        if l == TRACEBACK or r == TRACEBACK:
+            raise CompileError("tracebacks are opaque; only None checks are supported", node)
+        if isinstance(l, ClassT) and isinstance(r, ClassT):
+            for recv, other in ((l, right), (r, left)):
+                for cls in [recv.info, *recv.info.all_subclasses()]:
+                    method = cls.methods.get("__eq__")
+                    if method and not is_assignable(other, method.sig.params[0][1]):
+                        raise CompileError(f"{cls.name}.__eq__ cannot accept {other}; widen its other parameter "
+                                           "to a common base (and | None for optional operands)", node)
+        elif isinstance(l, ListT):
+            self.validate_equality(l.elem, l.elem, node)
+        elif isinstance(l, TupleT):
+            for elem in l.elems:
+                self.validate_equality(elem, elem, node)
+        elif isinstance(l, DictT):
+            self.validate_equality(l.value, l.value, node)
 
     def check_in(self, left_n: ast.expr, right_n: ast.expr, node: ast.AST) -> ir.Expr:
         r = self.check_expr(right_n)
@@ -1673,20 +2185,63 @@ class Checker:
             return self.seq(pre, ir.Call(BOOL, "rt.str_contains", [r, l]))
         if isinstance(r.ty, ListT):
             elem = r.ty.elem
+            self.validate_equality(elem, elem, node)
             l = self.coerce(self.check_expr(left_n, elem), elem, left_n, arith=True)  # compared with ==
             pre, l, r = self.left_first(l, r)
             return self.seq(pre, ir.ListOp(BOOL, "contains", r, [l]))
-        raise CompileError(f"`in` needs a str or a list on the right, got {r.ty}", node)
+        if isinstance(r.ty, (DictT, DictViewT, TupleT)):
+            if isinstance(r.ty, TupleT):
+                elem = self.homogeneous_tuple(r.ty, right_n)
+            else:
+                elem = r.ty.key if isinstance(r.ty, DictT) else r.ty.elem
+            self.validate_equality(elem, elem, node)
+            l = self.coerce(self.check_expr(left_n, elem), elem, left_n)
+            pre, l, r = self.left_first(l, r)
+            cls = ir.TupleOp if isinstance(r.ty, TupleT) else ir.DictOp
+            return self.seq(pre, cls(BOOL, "contains", r, [l]))
+        raise CompileError(f"`in` needs a str or a list or a dictionary or tuple on the right, got {r.ty}", node)
 
     def seq(self, prelude: list[ir.Stmt], e: ir.Expr) -> ir.Expr:
         return ir.Seq(e.ty, prelude, e) if prelude else e
 
     def check_call(self, node: ast.Call, expected: Type | None) -> ir.Expr:
+        library = self.check_stdlib_call(node)
+        if library is not None:
+            return library
         f, args = node.func, node.args
         if isinstance(f, ast.Name):
             n = f.id
-            if n in self.ctx.types:
-                raise CompileError(f"'{n}' is a variable, not a function", f)
+            if n in self.ctx.types or (self.ctx.scope and n in self.ctx.scope.bound):
+                return self.check_callable_call(node, self.load_name(f))
+            if n in ("read_bytes", "write_bytes") and n in self.imported:
+                if node.keywords:
+                    raise CompileError(f"{n}() does not take keyword arguments", node)
+                self.arity(node, 0 if n == "read_bytes" else 1)
+                ty = ListT(I32)
+                values = [] if n == "read_bytes" else [self.coerce(self.check_expr(args[0], ty), ty, args[0])]
+                return ir.Call(ty if n == "read_bytes" else NONE, f"snek.{n}", values)
+            if n in ("run", "checkpoint") and n in self.imported:
+                if node.keywords:
+                    raise CompileError(f"{n}() does not take keyword arguments", node)
+                self.arity(node, 1 if n == "run" else 0)
+                if n == "checkpoint":
+                    return ir.Call(CoroutineT(NONE), "snek.checkpoint", [])
+                if self.ctx.name != "__main__":
+                    raise CompileError("run() is only supported at module scope; use await inside async def", node)
+                value = self.check_expr(args[0])
+                if not isinstance(value.ty, CoroutineT):
+                    raise CompileError("run() needs a coroutine", node)
+                return ir.Await(value.ty.elem, value)
+            if n in ("iter", "next"):
+                if node.keywords or len(args) not in ((1,) if n == "iter" else (1, 2)):
+                    raise CompileError(f"{n}() takes {'one' if n == 'iter' else 'one or two'} positional arguments", node)
+                value = self.check_expr(args[0])
+                if not isinstance(value.ty, IteratorT):
+                    raise CompileError(f"{n}() currently needs a typed generator", node)
+                if n == "iter":
+                    return value
+                default = [self.coerce(self.check_expr(args[1], value.ty.elem), value.ty.elem, args[1])] if len(args) == 2 else []
+                return ir.MachineOp(value.ty.elem, "next_default" if default else "next", value, default)
             if self.builtin_mode and n in INTRINSICS:
                 return self.check_intrinsic(n, node)
             if self.builtin_mode and n in self.bnodes:
@@ -1694,7 +2249,7 @@ class Checker:
                 prelude, bound = self.bind_args(sig, node, n)
                 return self.seq(prelude, ir.Call(sig.ret, n, bound))
             if n in BUILTINS:
-                if node.keywords:
+                if node.keywords and n not in ("sum", "sorted", "min", "max"):
                     raise CompileError(f"{n}() does not take keyword arguments here", node.keywords[0])
                 if any(isinstance(a, ast.Starred) for a in args):
                     raise CompileError("*args in calls is not supported", node)
@@ -1715,7 +2270,30 @@ class Checker:
             t = recv.ty
             if isinstance(t, OptionalT):
                 raise CompileError(f"this may be None (type {t}); check `is not None` first", f.value)
+            if isinstance(t, StreamT):
+                return self.check_stream_call(recv, node, f.attr)
+            if isinstance(t, IteratorT):
+                if node.keywords:
+                    raise CompileError("generator methods take positional arguments only", node)
+                if f.attr == "close":
+                    self.arity(node, 0)
+                    return ir.MachineOp(NONE, "close", recv)
+                if f.attr == "send":
+                    self.arity(node, 1)
+                    if not isinstance(args[0], ast.Constant) or args[0].value is not None:
+                        raise CompileError("only generator.send(None) is supported", node)
+                    return ir.MachineOp(t.elem, "next", recv)
+                if f.attr == "throw":
+                    self.arity(node, 1)
+                    exc = self.check_expr(args[0])
+                    if not self.is_exception(exc.ty):
+                        raise CompileError("generator.throw() needs an exception instance", node)
+                    return ir.MachineOp(t.elem, "throw", recv, [exc])
+                raise CompileError(f"unsupported generator method '{f.attr}'", node)
             if isinstance(t, ClassT):
+                if f.attr in t.info.fields:
+                    field = t.info.fields[f.attr]
+                    return self.check_callable_call(node, ir.GetField(field.ty, recv, t.info, field))
                 m = t.info.methods.get(f.attr)
                 if m is None:
                     what = "a field, not a method" if f.attr in t.info.fields else "not a method"
@@ -1729,9 +2307,17 @@ class Checker:
             if t == STR:
                 return self.check_str_method(recv, node, f)
             if isinstance(t, ListT):
+                if f.attr in ("index", "count", "remove"):
+                    self.validate_equality(t.elem, t.elem, node)
                 return self.check_list_method(recv, t, node, f)
+            if isinstance(t, DictT):
+                return self.check_dict_method(recv, t, node, f)
+            if isinstance(t, TupleT):
+                if f.attr in ("index", "count"):
+                    self.validate_equality(t, t, node)
+                return self.check_tuple_method(recv, t, node, f)
             raise CompileError(f"{t} has no methods", f)
-        raise CompileError("unsupported call target", node)
+        return self.check_callable_call(node, self.check_expr(f))
 
     def check_intrinsic(self, n: str, node: ast.Call) -> ir.Expr:
         params, ret, fn = INTRINSICS[n]
@@ -1806,9 +2392,60 @@ class Checker:
         raise CompileError(f"list.{a}() is not supported yet", f)
 
     def has_repr(self, t: Type) -> bool:
-        while isinstance(t, ListT):
-            t = t.elem
-        return isinstance(t, Prim) or t in (STR, OptionalT(STR))
+        return has_repr(t)
+
+    def check_dict_method(self, recv: ir.Expr, t: DictT, node: ast.Call, f: ast.Attribute) -> ir.Expr:
+        a, args = f.attr, node.args
+        if node.keywords or any(isinstance(arg, ast.Starred) for arg in args):
+            raise CompileError(f"dict.{a}() requires positional arguments without unpacking", node)
+        if a in ("keys", "values", "items", "clear", "copy", "popitem"):
+            self.arity(node, 0)
+            ret = (DictViewT(t, a) if a in ("keys", "values", "items") else
+                   t if a == "copy" else TupleT((t.key, t.value)) if a == "popitem" else NONE)
+            return ir.DictOp(ret, a, recv, [])
+        if a == "update":
+            self.arity(node, 1)
+            other = self.coerce(self.check_expr(args[0], t), t, args[0])
+            return ir.DictOp(NONE, a, recv, [other])
+        if a in ("get", "pop", "setdefault"):
+            if not 1 <= len(args) <= 2:
+                raise CompileError(f"dict.{a}() takes 1 or 2 arguments", node)
+            key = self.coerce(self.check_expr(args[0], t.key), t.key, args[0])
+            if len(args) == 2:
+                default = self.check_expr(args[1], t.value)
+                ret = t.value
+                if (a != "setdefault" and ret.is_ref
+                        and (default.ty == NONE or default.ty == OptionalT(ret))):
+                    ret = self.make_optional(ret, args[1])
+                default = self.coerce(default, ret, args[1])
+                op = a + ("_optional" if ret != t.value else "_default")
+                return ir.DictOp(ret, op, recv, [key, default])
+            if a == "pop":
+                return ir.DictOp(t.value, "pop", recv, [key])
+            if a == "setdefault":
+                if not isinstance(t.value, OptionalT):
+                    raise CompileError("setdefault() needs an explicit default unless values are optional references", node)
+                return ir.DictOp(t.value, "setdefault_default", recv, [key, ir.NoneLit(t.value)])
+            if not t.value.is_ref:
+                raise CompileError("get() needs an explicit default for numeric/bool values (numbers cannot be None)", node)
+            ret = self.make_optional(t.value, node)
+            return ir.DictOp(ret, "get_optional", recv, [key, ir.NoneLit(ret)])
+        raise CompileError(f"dict.{a}() is not supported yet", f)
+
+    def check_tuple_method(self, recv: ir.Expr, t: TupleT, node: ast.Call, f: ast.Attribute) -> ir.Expr:
+        if node.keywords or f.attr not in ("count", "index"):
+            raise CompileError(f"tuple.{f.attr}() is not supported with these arguments", node)
+        if f.attr == "count":
+            self.arity(node, 1)
+        elif not 1 <= len(node.args) <= 3:
+            raise CompileError("tuple.index() takes 1 to 3 arguments", node)
+        elem = self.homogeneous_tuple(t, f)
+        value = self.coerce(self.check_expr(node.args[0], elem), elem, node.args[0], arith=True)
+        args = [value]
+        if f.attr == "index":
+            args += [self.check_index(node.args[1]) if len(node.args) > 1 else ir.Const(I32, 0),
+                     self.check_index(node.args[2]) if len(node.args) > 2 else ir.Const(I32, len(t.elems))]
+        return ir.TupleOp(I32, f.attr, recv, args)
 
     def check_super_call(self, node: ast.Call, f: ast.Attribute) -> ir.Expr:
         ctx = self.ctx
@@ -1824,12 +2461,17 @@ class Checker:
             raise CompileError("super() is only allowed inside methods", sup)
         if owner.base is None:
             raise CompileError(f"{owner.name} has no base class, so super().{f.attr}() has nothing to call", f)
-        m = owner.base.methods.get(f.attr)
-        if m is None:
-            raise CompileError(f"{owner.base.name} has no method '{f.attr}'", f)
         if "self" not in ctx.types or "self" not in ctx.flow.assigned:
             raise CompileError("super() calls need `self`, which does not exist yet at this point of "
                                "__init__", node)
+        m = owner.base.methods.get(f.attr)
+        if m is None:
+            if f.attr == "__str__" and owner.base.is_subclass_of(self.exc_base):
+                self.arity(node, 0)
+                if node.keywords:
+                    raise CompileError("__str__() takes no keyword arguments", node)
+                return ir.Call(STR, "rt.exc_str_default", [ctx.get("self")])
+            raise CompileError(f"{owner.base.name} has no method '{f.attr}'", f)
         prelude, bound = self.bind_args(m.sig, node, f"super().{f.attr}")
         # The base implementation is known statically: a direct call, no vtable.
         impl = owner.base.methods[f.attr].owner
@@ -1837,6 +2479,46 @@ class Checker:
 
     def check_builtin_call(self, n: str, node: ast.Call, expected: Type | None) -> ir.Expr:
         args = node.args
+        if n in ("min", "max") and len(args) == 2 and any(k.arg == "key" for k in node.keywords):
+            return self.check_ordered_builtin(n, node, expected)
+        if n in ("sum", "sorted") or (n in ("min", "max") and len(args) == 1):
+            return self.check_list_builtin(n, node, expected)
+        if n in ("dict", "tuple", "list"):
+            expected = strip_optional(expected) if expected is not None else None
+            if not args:
+                if n == "dict":
+                    return self.check_dict(ast.copy_location(ast.Dict(keys=[], values=[]), node), expected)
+                if n == "tuple":
+                    return ir.TupleLit(TupleT(()), [])
+                return self.check_list(ast.copy_location(ast.List(elts=[], ctx=ast.Load()), node), expected)
+            self.arity(node, 1)
+            v = self.check_expr(args[0], expected)
+            if n == "dict" and isinstance(v.ty, DictT):
+                return ir.DictOp(v.ty, "copy", v, [])
+            if n == "tuple" and isinstance(v.ty, TupleT):
+                return v
+            if n == "list":
+                if isinstance(v.ty, IteratorT):
+                    t = ListT(v.ty.elem)
+                    it, out = self.ctx.temp(v.ty), self.ctx.temp(t)
+                    get = self.ctx.get(it)
+                    loop = ir.Loop(ir.MachineOp(BOOL, "advance", get),
+                                   [ir.ExprStmt(ir.ListAppend(NONE, self.ctx.get(out),
+                                                             ir.MachineOp(v.ty.elem, "value", get)))], [])
+                    return ir.Seq(t, [ir.SetLocal(it, v), ir.SetLocal(out, ir.ListLit(t, [])), loop],
+                                  self.ctx.get(out))
+                if isinstance(v.ty, ListT):
+                    return ir.ListOp(v.ty, "copy", v, [])
+                if isinstance(v.ty, (DictT, DictViewT)):
+                    elem = v.ty.key if isinstance(v.ty, DictT) else v.ty.elem
+                    return ir.DictOp(ListT(elem), "list", v, [])
+                if isinstance(v.ty, TupleT):
+                    elem = expected.elem if isinstance(expected, ListT) else self.homogeneous_tuple(v.ty, node)
+                    tmp = self.ctx.temp(v.ty)
+                    items = [self.coerce(ir.TupleGet(t, self.ctx.get(tmp), i), elem, args[0])
+                             for i, t in enumerate(v.ty.elems)]
+                    return ir.Seq(ListT(elem), [ir.SetLocal(tmp, v)], ir.ListLit(ListT(elem), items))
+            raise CompileError(f"{n}() conversion from {v.ty} is not supported yet", node)
         if n == "print":
             raise CompileError("print() can only be used as a statement", node)
         if n == "len":
@@ -1846,6 +2528,12 @@ class Checker:
                 return ir.ListLen(I32, v)
             if v.ty == STR:
                 return ir.StrLen(I32, v)
+            if isinstance(v.ty, TupleT):
+                return ir.Seq(I32, [ir.ExprStmt(v)], ir.Const(I32, len(v.ty.elems)))
+            if isinstance(v.ty, (DictT, DictViewT)):
+                return ir.DictOp(I32, "len", v, [])
+            if isinstance(v.ty, ClassT):
+                return self.object_len(v, node)
             raise CompileError(f"len() of {v.ty}", node)
         if n == "str":
             self.arity(node, 1)
@@ -1896,6 +2584,17 @@ class Checker:
                 return ir.Compare(BOOL, "ne", I32, ir.StrLen(I32, v), ir.Const(I32, 0))
             if isinstance(v.ty, ListT):
                 return ir.Compare(BOOL, "ne", I32, ir.ListLen(I32, v), ir.Const(I32, 0))
+            if isinstance(v.ty, TupleT):
+                return ir.Seq(BOOL, [ir.ExprStmt(v)], ir.Const(BOOL, bool(v.ty.elems)))
+            if isinstance(v.ty, (DictT, DictViewT)):
+                return ir.Compare(BOOL, "ne", I32, ir.DictOp(I32, "len", v, []), ir.Const(I32, 0))
+            if isinstance(v.ty, ClassT):
+                if "__len__" in v.ty.info.methods:
+                    length = self.object_len(v, node)
+                    return ir.Compare(BOOL, "ne", length.ty, length, ir.Const(length.ty, 0))
+                if any("__len__" in c.methods for c in v.ty.info.all_subclasses()):
+                    raise CompileError("bool() needs __len__ declared on the static base type", node)
+                return ir.Seq(BOOL, [ir.ExprStmt(v)], ir.Const(BOOL, True))
             raise CompileError(f"bool() of {v.ty} is not supported (no implicit truthiness)", node)
         if n == "isinstance":
             self.arity(node, 2)
@@ -1926,6 +2625,8 @@ class Checker:
                 raise CompileError(f"abs() of {v.ty}", node)
             return ir.Unary(v.ty, "abs", v)
         if n in ("min", "max"):
+            if node.keywords:
+                raise CompileError(f"{n}() with two arguments does not accept keywords here", node)
             self.arity(node, 2)
             l, r = self.check_operands(args[0], args[1], expected)
             target = join_numeric(l.ty, r.ty)
@@ -1939,10 +2640,58 @@ class Checker:
         if n in ("int", "float"):
             raise CompileError(f"use the fixed-width conversions (i32(), i64(), f64()) instead of {n}()", node)
         if n == "type":
-            raise CompileError("type() is only supported as type(x).__name__; use isinstance() for checks", node)
+            self.arity(node, 1)
+            v = self.check_expr(args[0])
+            if isinstance(v.ty, ClassT):
+                return ir.TypeOf(TypeT(v.ty.info), v)
+            raise CompileError("type() as a value needs a non-optional class instance", node)
         if n == "super":
             raise CompileError("super() must be followed by a method call: super().method(...)", node)
         raise CompileError(f"'{n}' cannot be called", node)
+
+    def check_list_builtin(self, name: str, node: ast.Call, expected: Type | None) -> ir.Expr:
+        if name != "sum":
+            return self.check_ordered_builtin(name, node, expected)
+        args = node.args
+        keywords: dict[str, ast.expr] = {}
+        for kw in node.keywords:
+            if kw.arg != "start":
+                raise CompileError(f"{name}() got an unexpected keyword argument '{kw.arg}'", kw)
+            if kw.arg in keywords:
+                raise CompileError(f"{name}() got multiple values for '{kw.arg}'", kw)
+            keywords[kw.arg] = kw.value
+        if not 1 <= len(args) <= 2:
+            raise CompileError("sum() takes 1 or 2 positional arguments here", node)
+        start_node = args[1] if len(args) == 2 else keywords.get("start")
+        if len(args) == 2 and "start" in keywords:
+            raise CompileError("sum() got multiple values for 'start'", node)
+        start = self.check_expr(start_node) if start_node is not None else None
+        hint = None
+        if isinstance(args[0], ast.List) and not args[0].elts:
+            elem = start.ty if start is not None else expected if expected is not None else I32
+            hint = ListT(elem)
+        xs = self.check_expr(args[0], hint)
+        elem = self.list_elem(xs, args[0])
+        if not isinstance(elem, Prim):
+            raise CompileError(f"sum() needs a list of numbers or bools, got {xs.ty}", args[0])
+        nonempty = isinstance(xs, ir.ListLit) and bool(xs.items)
+        if start is not None and (not isinstance(start.ty, Prim) or not start.ty.is_numeric):
+            raise CompileError("sum() start must be a numeric type (use i32() for bool)", start_node)
+        if start is not None and not (elem.is_float and nonempty):
+            self.no_int_taint(start, start_node, "sum() start")
+        if elem.is_float:
+            if (start is None or not start.ty.is_float) and not nonempty:
+                raise CompileError("sum() of a possibly empty float list needs a float start, e.g. sum(xs, 0.0); "
+                                   "CPython otherwise returns an int when the list is empty", node)
+            ret = F64  # CPython's compensated sum accumulates floats in double precision.
+            start = start or ir.Const(F64, 0.0)
+        else:
+            start = start or ir.Const(I32, 0)
+            ret = join_numeric(I32 if elem == BOOL else elem, start.ty)
+            if ret is None:
+                raise CompileError(f"sum() cannot mix {elem} elements and {start.ty} start; convert explicitly", node)
+        start = self.coerce(start, ret, start_node or node, "sum() start", arith=True)
+        return ir.ListOp(ret, "sum_" + ret.name, xs, [start])
 
     def arity(self, node: ast.Call, n: int) -> None:
         if len(node.args) != n:
@@ -2085,27 +2834,136 @@ class Checker:
             items = [self.check_expr(e, elem) if is_num_literal(e) else it for it, e in zip(items, node.elts)]
         return ir.ListLit(ListT(elem), [self.coerce(it, elem, e) for it, e in zip(items, node.elts)])
 
+    def check_tuple(self, node: ast.Tuple, expected: Type | None) -> ir.Expr:
+        expected = strip_optional(expected) if expected is not None else None
+        if isinstance(expected, TupleT) and len(node.elts) != len(expected.elems):
+            raise CompileError(f"expected {len(expected.elems)} tuple elements, got {len(node.elts)}", node)
+        items = []
+        for i, e in enumerate(node.elts):
+            if isinstance(e, ast.Starred):
+                raise CompileError("starred tuple literals are not supported yet", e)
+            hint = expected.elems[i] if isinstance(expected, TupleT) else None
+            v = self.check_expr(e, hint)
+            if hint is not None:
+                v = self.coerce(v, hint, e)
+            else:
+                self.no_int_taint(v, e)
+            if v.ty == NONE:
+                raise CompileError("cannot infer a tuple element from None; annotate it with an optional reference type", e)
+            items.append(v)
+        ty = expected if isinstance(expected, TupleT) else TupleT(tuple(v.ty for v in items))
+        return ir.TupleLit(ty, items)
+
+    def homogeneous_tuple(self, t: TupleT, node: ast.AST) -> Type:
+        if not t.elems or any(e != t.elems[0] for e in t.elems):
+            raise CompileError("this operation requires a non-empty tuple with one element type; "
+                               "use literal indices or unpack a heterogeneous tuple", node)
+        return t.elems[0]
+
+    def check_tuple_subscript(self, seq: ir.Expr, node: ast.Subscript) -> ir.Expr:
+        t = seq.ty
+        assert isinstance(t, TupleT)
+        if isinstance(node.slice, ast.Slice):
+            bounds = []
+            for b in (node.slice.lower, node.slice.upper, node.slice.step):
+                if b is None or (isinstance(b, ast.Constant) and b.value is None):
+                    bounds.append(None)
+                elif is_num_literal(b) and type(literal_value(b)) is int:
+                    bounds.append(literal_value(b))
+                else:
+                    raise CompileError("tuple slice bounds must be integer literals (the result has fixed length)", b)
+            if bounds[2] == 0:
+                raise CompileError("tuple slice step cannot be zero", node.slice)
+            indices = list(range(len(t.elems)))[slice(*bounds)]
+            tmp = self.ctx.temp(t)
+            result = TupleT(tuple(t.elems[i] for i in indices))
+            return ir.Seq(result, [ir.SetLocal(tmp, seq)],
+                          ir.TupleLit(result, [ir.TupleGet(t.elems[i], self.ctx.get(tmp), i) for i in indices]))
+        idx = self.check_index(node.slice)
+        i = const_int(idx)
+        if i is not None:
+            i = i + len(t.elems) if i < 0 else i
+            if not 0 <= i < len(t.elems):
+                # There is no field type for an invalid index in a heterogeneous tuple.
+                raise CompileError("tuple index out of range", node)
+            return ir.TupleGet(t.elems[i], seq, i)
+        elem = self.homogeneous_tuple(t, node.slice)
+        return ir.TupleOp(elem, "get", seq, [idx])
+
+    def check_dict(self, node: ast.Dict, expected: Type | None) -> ir.Expr:
+        expected = strip_optional(expected) if expected is not None else None
+        if any(k is None for k in node.keys):
+            raise CompileError("dictionary unpacking (**d) is not supported yet", node)
+        if not node.keys:
+            if not isinstance(expected, DictT):
+                raise CompileError("cannot infer the types of {}; annotate it: `d: dict[str, i32] = {}`", node)
+            return ir.DictLit(expected, [])
+        # Infer each side separately using the same bidirectional rules as lists.
+        keys = self.check_list(ast.copy_location(ast.List(elts=node.keys, ctx=ast.Load()), node),
+                               ListT(expected.key) if isinstance(expected, DictT) else None)
+        values = self.check_list(ast.copy_location(ast.List(elts=node.values, ctx=ast.Load()), node),
+                                 ListT(expected.value) if isinstance(expected, DictT) else None)
+        t = DictT(keys.ty.elem, values.ty.elem)
+        self.check_key_type(t.key, node)
+        return ir.DictLit(t, list(zip(keys.items, values.items)))
+
     def check_fstring(self, node: ast.JoinedStr) -> ir.Expr:
         parts: list[ir.Expr] = []
         for v in node.values:
             if isinstance(v, ast.Constant):
                 parts.append(ir.StrLit(STR, self.utf8_text(v.value, v)))
             elif isinstance(v, ast.FormattedValue):
-                if v.format_spec is not None:
-                    raise CompileError("f-string format specs are not supported yet", v)
                 e = self.check_expr(v.value)
                 if v.conversion == ord("r"):
-                    parts.append(self.repr_of(e, v.value))
-                elif v.conversion in (-1, ord("s")):
-                    parts.append(self.to_str(e, v.value))
-                else:
+                    e = self.repr_of(e, v.value)
+                elif v.conversion == ord("s"):
+                    e = self.to_str(e, v.value)
+                elif v.conversion != -1:
                     raise CompileError("the f-string !a (ascii) conversion is not supported", v)
+                spec = ""
+                if v.format_spec is not None:
+                    # Some CPython versions collapse a literal spec containing
+                    # a named Unicode escape to Constant instead of JoinedStr.
+                    values = [v.format_spec] if isinstance(v.format_spec, ast.Constant) else v.format_spec.values
+                    if any(not isinstance(p, ast.Constant) or not isinstance(p.value, str) for p in values):
+                        raise CompileError("f-string format specs must be literal; dynamic width/precision is not supported yet", v)
+                    spec = "".join(p.value for p in values)
+                parts.append(self.format_value(e, spec, v))
         if not parts:
             return ir.StrLit(STR, "")
         out = parts[0]
         for p in parts[1:]:
             out = ir.StrConcat(STR, out, p)
         return out
+
+    def format_value(self, e: ir.Expr, text: str, node: ast.AST) -> ir.Expr:
+        if not text:
+            return self.to_str(e, node)
+        self.no_int_taint(e, node)
+        if e.ty != STR and not isinstance(e.ty, Prim):
+            raise CompileError(f"non-empty format specs on {e.ty} need !s or !r", node)
+        spec = parse_spec(self.utf8_text(text, node), e.ty, node)
+        tail = [ir.Const(I32, spec.width), ir.Const(I32, ord(spec.align)), ir.StrLit(STR, spec.fill)]
+        if e.ty == STR:
+            name = "__fmt_text"
+            args = [e, ir.Const(I32, spec.precision), *tail]
+        elif spec.kind == "c":
+            name = "__fmt_char"
+            args = [e if e.ty == I64 else ir.Convert(I64, e), *tail]
+        else:
+            float_format = e.ty in (F32, F64) or spec.kind in ("e", "E", "f", "F", "g", "G", "%")
+            target = F64 if float_format else I64
+            value = e if e.ty == target else ir.Convert(target, e)
+            common = [ir.Const(I32, ord(spec.kind) if spec.kind else 0)]
+            if float_format:
+                name = "__fmt_float"
+                common += [ir.Const(I32, spec.precision), ir.Const(BOOL, spec.alternate), ir.Const(BOOL, spec.normalize_zero)]
+            else:
+                name = "__fmt_int"
+                common += [ir.Const(BOOL, spec.alternate)]
+            args = [value, *common, ir.Const(I32, ord(spec.sign)), *tail, ir.StrLit(STR, spec.group)]
+        self.builtin_func(name)
+        return ir.Call(STR, name, args)
 
     def check_ifexp(self, node: ast.IfExp, expected: Type | None) -> ir.Expr:
         cond = self.check_cond(node.test)
@@ -2131,6 +2989,18 @@ class Checker:
         return ir.IfExpr(ty, cond, self.coerce(a, ty, node.body, arith=mixed),
                          self.coerce(b, ty, node.orelse, arith=mixed), mixed)
 
+    def object_len(self, value: ir.Expr, node: ast.AST) -> ir.Expr:
+        cls = value.ty.info
+        method = cls.methods.get("__len__")
+        if method is None:
+            raise CompileError(f"{cls.name} has no __len__ method", node)
+        length = self.ctx.temp(method.sig.ret)
+        get = self.ctx.get(length)
+        invalid = ir.Compare(BOOL, "lt", method.sig.ret, get, ir.Const(method.sig.ret, 0))
+        return ir.Seq(method.sig.ret, [
+            ir.SetLocal(length, ir.CallMethod(method.sig.ret, value, cls, method, [])),
+            ir.If(invalid, [ir.Raise(self.new_exception("ValueError", ir.StrLit(STR, "__len__() should return >= 0")))], [])], get)
+
     def to_str(self, e: ir.Expr, node: ast.AST) -> ir.Expr:
         self.no_int_taint(e, node)
         t = e.ty
@@ -2144,16 +3014,12 @@ class Checker:
             return ir.Seq(STR, [ir.ExprStmt(e)], ir.StrLit(STR, "None"))  # keep the call's side effects
         if t == OptionalT(STR):
             return ir.ToStr(STR, e)
-        if self.is_exception(t):
-            return ir.Call(STR, "rt.exc_str", [e])  # CPython's str(exception)
-        if isinstance(t, ListT):
-            inner = t.elem
-            while isinstance(inner, ListT):
-                inner = inner.elem
-            if isinstance(inner, Prim) or inner in (STR, OptionalT(STR)):
+        if isinstance(strip_optional(t), ClassT):
+            inner = strip_optional(t)
+            if "__str__" in inner.info.methods or self.is_exception(inner):
                 return ir.ToStr(STR, e)
-            raise CompileError(f"converting {t} to str is not supported yet (lists of numbers, bools and "
-                               f"strings are)", node)
+        if has_repr(t):
+            return ir.ToStr(STR, e)
         raise CompileError(f"converting {t} to str is not supported yet (no __str__/__repr__)", node)
 
     def repr_of(self, e: ir.Expr, node: ast.AST) -> ir.Expr:
@@ -2165,7 +3031,9 @@ class Checker:
             return ir.Call(STR, "rt.opt_str_repr", [e])
         if self.is_exception(t):
             return ir.Call(STR, "rt.exc_repr", [e])
-        if isinstance(t, OptionalT):
+        if isinstance(strip_optional(t), ClassT):
+            raise CompileError(f"repr() of {t} needs __repr__, which is not supported yet; use str() or !s", node)
+        if isinstance(t, OptionalT) and not has_repr(t):
             raise CompileError(f"repr() of {t} is not supported yet; check `is not None` first", node)
         return self.to_str(e, node)  # numbers, bools, None and lists: str() is repr()
 
@@ -2216,5 +3084,5 @@ class Checker:
         raise CompileError(f"{what}: expected {target}, got {s}", node)
 
 
-def check_module(tree: ast.Module) -> ir.Module:
-    return Checker(tree).run()
+def check_module(tree: ast.Module, *, frontend: str = "cpython") -> ir.Module:
+    return Checker(tree, frontend=frontend).run()

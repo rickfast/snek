@@ -2,7 +2,7 @@
 // Prints one JSON line: {results: {name: {ok, out, times}}, load, compile}
 import { readFile } from 'node:fs/promises';
 import { WASI } from 'node:wasi';
-import { openSync, readFileSync, closeSync, mkdtempSync } from 'node:fs';
+import { openSync, readFileSync, closeSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -14,31 +14,40 @@ let load = null, compile = null;
 
 function splitTime(out) {
   const m = out.match(/^@@TIME (\S+)$/m);
-  return [out.replace(/^@@TIME .*\n?/gm, ''), m ? parseFloat(m[1]) : null];
+  const t = m ? Number(m[1]) : null;
+  return [out.replace(/^@@TIME .*\n?/gm, ''), t !== null && Number.isFinite(t) && t >= 0 ? t : null];
 }
 
 if (spec.kind === 'snek-v8') {
   for (const job of spec.jobs) {
+    const bytes = await readFile(job.wasm);
     const t0 = performance.now();
-    const mod = await WebAssembly.compile(await readFile(job.wasm));
+    const mod = await WebAssembly.compile(bytes);
     const c = (performance.now() - t0) / 1000;
     if (job.name === 'fib') compile = c;
-    const times = []; let out = '', ok = true;
+    const times = []; let out = '', ok = true, err = '';
     for (let i = 0; i < spec.reps; i++) {
       const dir = mkdtempSync(join(tmpdir(), 'snek-'));
       const path = join(dir, 'out');
       const fd = openSync(path, 'w');
-      const wasi = new WASI({ version: 'preview1', args: [job.name], env: {}, stdout: fd, returnOnExit: true });
-      const t1 = performance.now();
-      const inst = await WebAssembly.instantiate(mod, wasi.getImportObject());
-      const code = wasi.start(inst);
-      const t2 = performance.now();
-      closeSync(fd);
-      out = readFileSync(path, 'utf8');
-      ok = ok && code === 0;
-      times.push((t2 - t1) / 1000);
+      try {
+        const wasi = new WASI({ version: 'preview1', args: [job.name], env: {}, stdout: fd, returnOnExit: true });
+        const t1 = performance.now();
+        const inst = await WebAssembly.instantiate(mod, wasi.getImportObject());
+        const code = wasi.start(inst);
+        const t2 = performance.now();
+        out = readFileSync(path, 'utf8');
+        ok = code === 0 && out === job.expected;
+        if (!ok) break;
+        times.push((t2 - t1) / 1000);
+      } catch (e) {
+        ok = false; err = String(e); break;
+      } finally {
+        closeSync(fd);
+        rmSync(dir, { recursive: true, force: true });
+      }
     }
-    results[job.name] = { ok, out, times };
+    results[job.name] = { ok, out, times, err };
   }
 } else {
   let run;
@@ -62,7 +71,7 @@ if (spec.kind === 'snek-v8') {
       try {
         const [body, t] = splitTime(run(job.source));
         out = body;
-        if (t === null) { ok = false; break; }
+        if (t === null || out !== job.expected) { ok = false; break; }
         times.push(t);
         if (job.name !== 'empty' && t > 30) break;
       } catch (e) { ok = false; err = String(e).slice(-800); break; }

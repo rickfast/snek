@@ -1,0 +1,127 @@
+name: Native packages
+
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.cargo/**', 'native/**', 'packaging/**', 'bootstrap/**', 'snek/**', 'snekc/**', 'examples/**', 'tests/**', 'bench/**', '.github/workflows/packages.yml']
+  pull_request:
+    paths: ['.cargo/**', 'native/**', 'packaging/**', 'bootstrap/**', 'snek/**', 'snekc/**', 'examples/**', 'tests/**', 'bench/**', '.github/workflows/packages.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-packages-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compiler:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      SNEK_RUNTIME: node
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13.14'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '25.9.0'
+      - name: Build verified compiler from source
+        run: |
+          test ! -e bootstrap/build
+          python bootstrap/bootstrap_compiler.py
+          python tests/check_selfhost_compiler.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: native-compiler-proof
+          path: bootstrap/build/compiler*
+          if-no-files-found: error
+
+  packages:
+    needs: compiler
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            target: aarch64-apple-darwin
+            executable: snek
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            executable: snek
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            executable: snek
+            wheel_platform: manylinux_2_35_x86_64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            executable: snek
+            wheel_platform: manylinux_2_39_aarch64
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            executable: snek.exe
+    defaults:
+      run:
+        shell: bash
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13.14'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '25.9.0'
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.0'
+      - name: Install build and packaging tools
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          python -m pip install uv==0.11.31
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-compiler-proof
+          path: bootstrap/build
+      - name: Build standalone executable
+        run: cargo +1.96.0 build --manifest-path native/Cargo.toml --release --locked
+      - name: Verify embedded compiler without runtime JIT
+        run: cargo +1.96.0 test --manifest-path native/Cargo.toml --release --locked
+      - name: Native CLI and full language corpus
+        run: python tests/check_native.py --corpus
+      - name: Benchmark harness regressions
+        run: |
+          python tests/check_native_bench.py
+          python tests/check_compiler_profile.py
+          python tests/check_lazy_runtime.py
+      - name: Build npm and Python distributions
+        run: python packaging/build_packages.py --binary native/target/release/${{ matrix.executable }} --target ${{ matrix.target }}
+      - name: Check Linux wheel compatibility
+        if: runner.os == 'Linux'
+        run: |
+          python -m pip install auditwheel patchelf
+          wheels=(dist/*.whl)
+          auditwheel repair --plat '${{ matrix.wheel_platform }}' --wheel-dir "$RUNNER_TEMP/repaired" "${wheels[0]}"
+          mkdir -p "$RUNNER_TEMP/unrepaired"
+          mv "${wheels[0]}" "$RUNNER_TEMP/unrepaired/"
+          cp "$RUNNER_TEMP/repaired/"*.whl dist/
+      - name: Test npx, bunx and uvx offline
+        run: python tests/check_packages.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: snek-lang-${{ matrix.target }}
+          path: |
+            dist/*
+            native/target/release/${{ matrix.executable }}
+          if-no-files-found: error
+          retention-days: 14

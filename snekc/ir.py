@@ -45,6 +45,11 @@ class LocalGet(Expr):
 
 
 @dataclass
+class CapturedGet(LocalGet):
+    """Pre-conversion cell read: unlike a local, cannot move across a call."""
+
+
+@dataclass
 class Unary(Expr):
     op: str  # neg | not | invert | abs
     operand: Expr
@@ -103,6 +108,42 @@ class IfExpr(Expr):
 class Call(Expr):
     func: str
     args: list[Expr]
+
+
+@dataclass
+class FunctionRef(Expr):
+    func: str
+
+
+@dataclass
+class Closure(Expr):
+    func: str
+    captures: list[Expr]
+
+
+@dataclass
+class CallValue(Expr):
+    callee: Expr
+    args: list[Expr]
+
+
+@dataclass
+class CellNew(Expr):
+    pass
+
+
+@dataclass
+class CellGet(Expr):
+    cell: Expr
+    name: str
+    free: bool
+
+
+@dataclass
+class EnvGet(Expr):
+    env: Expr
+    layout: Type
+    index: int
 
 
 @dataclass
@@ -171,6 +212,46 @@ class ListOp(Expr):
 
 
 @dataclass
+class KeyedListOp(Expr):
+    """Sort/reduce elements by a separately typed, once-per-element key."""
+
+    op: str
+    lst: Expr
+    key: Expr
+    args: list[Expr]  # reverse for sorted, optional default for min/max
+
+
+@dataclass
+class TupleLit(Expr):
+    items: list[Expr]
+
+
+@dataclass
+class TupleGet(Expr):
+    obj: Expr
+    index: int  # statically known struct field
+
+
+@dataclass
+class TupleOp(Expr):
+    op: str
+    obj: Expr
+    args: list[Expr]
+
+
+@dataclass
+class DictLit(Expr):
+    items: list[tuple[Expr, Expr]]
+
+
+@dataclass
+class DictOp(Expr):
+    op: str
+    obj: Expr
+    args: list[Expr]
+
+
+@dataclass
 class StrLen(Expr):
     s: Expr
 
@@ -195,11 +276,49 @@ class TypeName(Expr):
 
 
 @dataclass
+class ClassRef(Expr):
+    cls: ClassInfo
+
+
+@dataclass
+class TypeOf(Expr):
+    operand: Expr
+
+
+@dataclass
+class ClassName(Expr):
+    operand: Expr
+
+
+@dataclass
+class TracebackToken(Expr):
+    pass
+
+
+@dataclass
+class ObjectEq(Expr):
+    left: Expr
+    right: Expr
+
+
+@dataclass
 class Seq(Expr):
     """Run stmts, then evaluate value (used to keep CPython's argument evaluation order)."""
 
     stmts: list[Stmt]
     value: Expr
+
+
+@dataclass
+class Await(Expr):
+    operand: Expr
+
+
+@dataclass
+class MachineOp(Expr):
+    op: str  # next | next_default | advance | value | close | throw
+    obj: Expr
+    args: list[Expr] = field(default_factory=list)
 
 
 # ---- statements -------------------------------------------------------------
@@ -214,6 +333,17 @@ class Stmt:
 class SetLocal(Stmt):
     name: str
     value: Expr
+
+
+@dataclass
+class CellSet(Stmt):
+    cell: Expr
+    value: Expr
+
+
+@dataclass
+class CellClear(Stmt):
+    cell: Expr
 
 
 @dataclass
@@ -239,6 +369,17 @@ class ExprStmt(Stmt):
 @dataclass
 class Return(Stmt):
     value: Expr | None
+
+
+@dataclass
+class Yield(Stmt):
+    value: Expr | None  # None is an async scheduling checkpoint, not a Python yield
+
+
+@dataclass
+class AwaitStep(Stmt):
+    name: str | None
+    operand: Expr
 
 
 @dataclass
@@ -325,6 +466,8 @@ class Func:
     self_cast: ClassInfo | None = None  # downcast param `self.in` into local `self`
     nonnull_locals: set[str] = field(default_factory=set)
     export: str | None = None
+    machine: bool = False
+    closure_type: Type | None = None
 
 
 @dataclass

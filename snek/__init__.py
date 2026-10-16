@@ -6,11 +6,45 @@ machine types are plain aliases (so there is no wrapping overflow); editors and
 type checkers see them as int/float, while snekc enforces the real rules.
 """
 
+from asyncio import run
 from typing import Final, final
+
+from . import io, os, secrets, sys, time
+
+
+async def checkpoint() -> None:
+    """Cooperatively yield to the scheduler (WASI callback when componentized)."""
+    from asyncio import sleep
+    await sleep(0)
+
 
 i32 = int
 i64 = int
 f32 = float
 f64 = float
 
-__all__ = ["i32", "i64", "f32", "f64", "Final", "final"]
+
+def read_bytes() -> list[i32]:
+    """Read stdin to EOF without text decoding (core WASI target)."""
+    import sys
+    try:
+        sys.stdout.flush()
+        return list(sys.stdin.buffer.read())
+    except OSError as error:
+        raise RuntimeError("stdin read failed") from error
+
+
+def write_bytes(data: list[i32]) -> None:
+    """Write byte values to stdout, validating the entire list first."""
+    import sys
+    if any(value < 0 or value > 255 for value in data):
+        raise ValueError("byte values must be in range 0..255")
+    try:
+        sys.stdout.flush()
+        sys.stdout.buffer.write(bytes(data))
+        sys.stdout.buffer.flush()
+    except OSError as error:
+        raise RuntimeError("stdout write failed") from error
+
+
+__all__ = ["i32", "i64", "f32", "f64", "Final", "final", "run", "checkpoint", "read_bytes", "write_bytes", "sys", "os", "time", "secrets", "io"]
