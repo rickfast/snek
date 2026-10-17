@@ -5,6 +5,7 @@ from bootstrap.parser import Node, missing
 from bootstrap.declarations import DeclType, DeclParam, Declarations
 from bootstrap.bodies import BodyExpr, BodyStmt, BodyFunction, BodyChecker, inner_type
 from bootstrap.emit_support import EmitTypes, EmitLiterals, EmitUnicode, emit_mangle, emit_utf8
+from snekc.runtime_abi import abi_library_operations
 
 
 def emit_float(text: str) -> str:
@@ -270,7 +271,7 @@ class SourceEmitter:
         if kind == "IfExpr": return f"(if (result {self.types.valtype(ty)}) {self.ex(args[0])} (then {self.ex(args[1])}) (else {self.ex(args[2])}))"
         if kind == "Call":
             if text.startswith("snek.lib."):
-                operations = {"argv": "arguments", "getenv": "environment", "getenv-required": "environment", "time": "system-clock", "monotonic": "monotonic-clock", "sleep": "sleep", "token_bytes": "random", "token_hex": "random", "randbelow": "random"}
+                operations = abi_library_operations()
                 feature = operations[text[9:]]
                 if feature not in self.features: self.features.append(feature)
                 if ty.kind == "list": self.types.heap(ty)

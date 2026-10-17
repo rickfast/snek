@@ -1,6 +1,7 @@
 """GC adapters for CLI configuration, clocks, timers and secure randomness."""
 from . import ir, wasi_bindings
 from .types import CoroutineT, F64, I32, ListT, NONE, STR
+from .runtime_abi import abi_host_imports
 
 
 def machines(emitter):
@@ -16,18 +17,7 @@ def machines(emitter):
 
 
 def core_imports(features):
-    bindings = {}
-    for feature in ("arguments", "environment"):
-        if feature in features:
-            prefix = "args" if feature == "arguments" else "environ"
-            bindings[prefix + "_sizes_get"] = "(param i32 i32) (result i32)"
-            bindings[prefix + "_get"] = "(param i32 i32) (result i32)"
-    if set(features) & {"system-clock", "monotonic-clock"}:
-        bindings["clock_time_get"] = "(param i32 i64 i32) (result i32)"
-    if "sleep" in features:
-        bindings["poll_oneoff"] = "(param i32 i32 i32 i32) (result i32)"
-    if "random" in features:
-        bindings["random_get"] = "(param i32 i32) (result i32)"
+    bindings = abi_host_imports(list(features))
     return '\n'.join(f'(import "wasi_snapshot_preview1" "{name}" (func $host.{name} {sig}))'
                      for name, sig in bindings.items())
 

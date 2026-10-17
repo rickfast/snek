@@ -1,27 +1,17 @@
 """Demand-driven bindings for the small WASI packages used by the library."""
 from pathlib import Path
+from .runtime_abi import (abi_library_operations, abi_component_library_imports,
+                          abi_component_arena_imports, abi_needs_arena)
 
 
-OPERATIONS = {
-    "argv": "arguments", "getenv": "environment", "getenv-required": "environment",
-    "time": "system-clock", "monotonic": "monotonic-clock", "sleep": "sleep",
-    "token_bytes": "random", "token_hex": "random", "randbelow": "random",
-}
-IMPORTS = {
-    "arguments": {"lib-arguments": "(param i32)"},
-    "environment": {"lib-environment": "(param i32)"},
-    "system-clock": {"lib-system-now": "(param i32)"},
-    "monotonic-clock": {"lib-monotonic-now": "(result i64)"},
-    "sleep": {"lib-wait-for": "(param i64) (result i32)",
-              "lib-subtask-cancel": "(param i32) (result i32)", "lib-subtask-drop": "(param i32)"},
-    "random": {"lib-random": "(param i64 i32)"},
-}
-ARENA_IMPORTS = {"lib-reset-arena": "", "lib-alloc": "(param i32 i32) (result i32)"}
+OPERATIONS = abi_library_operations()
+IMPORTS = abi_component_library_imports()
+ARENA_IMPORTS = abi_component_arena_imports()
 MEMORY = Path(__file__).with_name("abi_memory.wat")
 
 
 def needs_arena(features):
-    return bool(set(features) & {"arguments", "environment", "random"})
+    return abi_needs_arena(list(features))
 
 
 def imports(features):

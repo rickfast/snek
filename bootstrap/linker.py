@@ -13,7 +13,9 @@ from pathlib import Path
 import tokenize
 
 ROOT = Path(__file__).resolve().parent
+MODULE_PATHS = {"runtime_abi": ROOT.parent / "snekc/runtime_abi.py"}
 MANIFEST = {
+    "runtime_abi": ("__future__",),
     "unicode_names": ("__future__", "snek"),
     "parser": ("__future__", "snek", "bootstrap.unicode_names"),
     "encode": ("__future__", "snek"),
@@ -22,9 +24,9 @@ MANIFEST = {
     "scopes": ("__future__", "bootstrap.parser", "bootstrap.declarations"),
     "bodies": ("__future__", "snek", "bootstrap.parser", "bootstrap.formats", "bootstrap.scopes", "bootstrap.declarations"),
     "emit_support": ("__future__", "snek", "bootstrap.declarations"),
-    "emit_program": ("__future__", "snek", "bootstrap.parser", "bootstrap.declarations", "bootstrap.bodies", "bootstrap.emit_support"),
+    "emit_program": ("__future__", "snek", "bootstrap.parser", "bootstrap.declarations", "bootstrap.bodies", "bootstrap.emit_support", "snekc.runtime_abi"),
     "emit_runtime": ("__future__", "snek", "bootstrap.declarations", "bootstrap.bodies", "bootstrap.emit_program"),
-    "emit_host": ("__future__", "snek", "bootstrap.declarations", "bootstrap.emit_program", "bootstrap.emit_data"),
+    "emit_host": ("__future__", "snek", "bootstrap.declarations", "bootstrap.emit_program", "bootstrap.emit_data", "snekc.runtime_abi"),
     "machine_lower": ("__future__", "snek", "bootstrap.parser"),
     "machine_emit": ("__future__", "snek", "bootstrap.parser"),
     "emit_suspension": ("__future__", "snek", "bootstrap.parser", "bootstrap.declarations", "bootstrap.bodies", "bootstrap.emit_program", "bootstrap.machine_lower", "bootstrap.machine_emit"),
@@ -145,7 +147,7 @@ def flatten(source: str, allowed_imports: tuple[str, ...], *, select: tuple[str,
 def module_source(name: str, **options) -> str:
     if name not in MANIFEST:
         raise ValueError("module absent from bundle manifest: " + name)
-    return flatten((ROOT / (name + ".py")).read_text(), MANIFEST[name], **options)
+    return flatten(MODULE_PATHS.get(name, ROOT / (name + ".py")).read_text(), MANIFEST[name], **options)
 
 
 def parser_source(*, entry: bool = True) -> str:

@@ -1,6 +1,6 @@
-"""Experimental body checker and owned typed tree IR, written in Snek.
+"""Production body checker and owned typed tree IR, written in Snek.
 
-No Python checker fallback; code emission remains a separate bootstrap gate.
+No Python checker fallback; code emission consumes the completed function IR.
 The fixed bootstrap bundle supplies these imports when compiling this to Wasm.
 """
 from __future__ import annotations
