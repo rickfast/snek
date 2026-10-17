@@ -40,7 +40,15 @@ def wat(source: str, *, component: bool = False) -> str:
 
 
 def encode(wat: str) -> bytes:
-    binary = invoke(wat.encode(), ["--encode"])
+    return core_binary(invoke(wat.encode(), ["--encode"]))
+
+
+def compile(source: str) -> bytes:
+    """Compile source directly, without a text/encode round trip."""
+    return core_binary(invoke(source.encode(), []))
+
+
+def core_binary(binary: bytes) -> bytes:
     if not binary.startswith(b"\0asm\1\0\0\0"):
         raise RuntimeError("Snek compiler did not return a core Wasm binary")
     return binary

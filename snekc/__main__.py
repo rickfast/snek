@@ -19,28 +19,27 @@ from .errors import CompileError
 from .frontend import FRONTENDS
 
 
+def source_arguments(command: argparse.ArgumentParser) -> None:
+    command.add_argument("src", type=Path)
+    command.add_argument("--frontend", choices=FRONTENDS, help="source parser (default: SNEK_FRONTEND or cpython)")
+    command.add_argument("--compiler", choices=("python", "snek"), help="compiler implementation (default: SNEK_COMPILER or python)")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="snekc", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name in ("check", "wat"):
-        command = sub.add_parser(name)
-        command.add_argument("src", type=Path)
-        command.add_argument("--frontend", choices=FRONTENDS, help="source parser (default: SNEK_FRONTEND or cpython)")
-        command.add_argument("--compiler", choices=("python", "snek"), help="compiler implementation (default: SNEK_COMPILER or python)")
+        source_arguments(sub.add_parser(name))
     b = sub.add_parser("build")
-    b.add_argument("src", type=Path)
+    source_arguments(b)
     b.add_argument("-o", "--out", type=Path)
     b.add_argument("--no-opt", action="store_true", help="use native encoding only (no Binaryen needed)")
     b.add_argument("--keep-wat", action="store_true", help="keep the .wat next to the .wasm")
     b.add_argument("--component", action="store_true", help="emit a WASI 0.3 command component and WIT")
-    b.add_argument("--frontend", choices=FRONTENDS, help="source parser (default: SNEK_FRONTEND or cpython)")
-    b.add_argument("--compiler", choices=("python", "snek"), help="use the independent Snek compiler or Python reference")
     r = sub.add_parser("run")
-    r.add_argument("src", type=Path)
+    source_arguments(r)
     r.add_argument("--no-opt", action="store_true", help="use native encoding only (no Binaryen needed)")
     r.add_argument("--component", action="store_true", help="run a WASI 0.3 component with Wasmtime 49+")
-    r.add_argument("--frontend", choices=FRONTENDS, help="source parser (default: SNEK_FRONTEND or cpython)")
-    r.add_argument("--compiler", choices=("python", "snek"), help="use the independent Snek compiler or Python reference")
     r.add_argument("--env", action="append", default=[], metavar="NAME[=VALUE]",
                    help="grant a guest environment variable (NAME alone inherits that variable)")
     ns, extra = ap.parse_known_args(argv)
@@ -57,8 +56,10 @@ def main(argv: list[str] | None = None) -> int:
         elif name in os.environ:
             grants[name] = os.environ[name]
 
-    source = ns.src.read_text()
+    source = None
     try:
+        if ns.cmd in ("check", "wat"):
+            source = ns.src.read_text()
         if ns.cmd == "check":
             driver.compile_to_wat(source, str(ns.src), frontend=ns.frontend, compiler=ns.compiler)
             print(f"{ns.src}: ok")
@@ -81,9 +82,14 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.buffer.write(res.stderr)
         return res.code
     except CompileError as e:
+        if source is None:
+            try:
+                source = ns.src.read_text()
+            except (OSError, UnicodeError):
+                pass  # A disappearing source must not hide the compile error.
         print(e.format(str(ns.src), source), file=sys.stderr)
         return 1
-    except (driver.ToolError, RuntimeError, ValueError) as e:
+    except (driver.ToolError, RuntimeError, ValueError, OSError) as e:
         print(f"snekc: {e}", file=sys.stderr)
         return 2
 

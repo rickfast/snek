@@ -52,6 +52,18 @@ class SelfhostCompilerTests(unittest.TestCase):
                 result = runner.run_binary(p)
                 self.assertEqual((result.code, result.stdout, result.stderr), (0, b"55\n", b""))
 
+    def test_build_uses_one_direct_compiler_invocation(self):
+        with no_host_compiler(), tempfile.TemporaryDirectory() as d:
+            source = Path(d, "program.py")
+            source.write_text(SMOKE_SOURCE)
+            with patch.object(selfhost, "invoke", wraps=selfhost.invoke) as invoke:
+                result = driver.build(source, optimize=False, compiler="snek")
+            invoke.assert_called_once_with(SMOKE_SOURCE.encode(), [])
+            self.assertIsNone(result.wat)
+            self.assertEqual(result.wasm_path.read_bytes(), selfhost.encode(selfhost.wat(SMOKE_SOURCE)))
+            executed = runner.run_binary(result.wasm_path)
+            self.assertEqual((executed.code, executed.stdout, executed.stderr), (0, b"55\n", b""))
+
     def test_suspension_and_closures_without_host_passes(self):
         source = (ROOT / "examples/closures_suspended.py").read_text()
         with no_host_compiler(), tempfile.TemporaryDirectory() as d:

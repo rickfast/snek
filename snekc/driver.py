@@ -34,7 +34,9 @@ class ToolError(Exception):
 
 @dataclass
 class Result:
-    wat: str
+    # Direct self-hosted binary builds do not produce text. Request keep_wat
+    # (or call compile_to_wat) when the caller needs the emitted WAT as well.
+    wat: str | None
     wasm_path: Path | None = None
     wit_path: Path | None = None
 
@@ -65,6 +67,11 @@ def assemble(wat_path: Path, wasm_path: Path, optimize: bool = True, *, compiler
         binary = selfhost.encode(wat_path.read_text()) if selfhost.selected(compiler) else encode(wat_path.read_text())
     except EncodeError as e:
         raise ToolError(f"native Wasm encoding failed: {e}") from e
+    write_binary(binary, wasm_path, optimize)
+
+
+def write_binary(binary: bytes, wasm_path: Path, optimize: bool = True) -> None:
+    """Write already-encoded Wasm, optionally running the shared optimizer."""
     if not optimize:
         wasm_path.write_bytes(binary)
         return
@@ -100,7 +107,6 @@ def build(src: Path, out: Path | None = None, optimize: bool = True, keep_wat: b
     from . import component as cm
     source = src.read_text()
     options = {"compiler": compiler} if compiler is not None else {}
-    wat = compile_to_wat(source, str(src), component=component, frontend=frontend, **options)
     out = out or src.with_suffix(".wasm")
     destinations = [out]
     if keep_wat:
@@ -110,12 +116,20 @@ def build(src: Path, out: Path | None = None, optimize: bool = True, keep_wat: b
     resolved = [p.resolve() for p in destinations]
     if src.resolve() in resolved or len(set(resolved)) != len(resolved):
         raise ToolError("output paths must be distinct from the source and from each other")
+    direct = selfhost.selected(compiler) and not keep_wat and not component
+    if direct and frontend not in (None, "snek"):
+        raise ValueError("the Snek compiler owns its frontend; --frontend cpython requires --compiler python")
+    wat = None if direct else compile_to_wat(source, str(src), component=component, frontend=frontend, **options)
     # Never use a neighboring source .wat as scratch space, nor leave a partial
     # artifact at the destination after an assembly/validation failure.
     with tempfile.TemporaryDirectory(prefix="snek-build-") as d:
         wat_path, binary = Path(d, "core.wat"), Path(d, "core.wasm")
-        wat_path.write_text(wat)
-        assemble(wat_path, binary, optimize, compiler=compiler)
+        if direct:
+            write_binary(selfhost.compile(source), binary, optimize)
+        else:
+            assert wat is not None
+            wat_path.write_text(wat)
+            assemble(wat_path, binary, optimize, compiler=compiler)
         if component:
             core = wasm_tools("print", str(binary))
             stdin = '(import "snek:component" "stdin"' in core
@@ -131,6 +145,7 @@ def build(src: Path, out: Path | None = None, optimize: bool = True, keep_wat: b
             wasm_tools("component", "targets", str(wit), "-w", "command", str(binary))
         shutil.copyfile(binary, out)
     if keep_wat:
+        assert wat is not None
         out.with_suffix(".wat").write_text(wat)
     wit_path = None
     if component:
