@@ -18,13 +18,41 @@ import tomllib
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGETS = {
-    "aarch64-apple-darwin": ("darwin", "arm64", "macosx_11_0_arm64"),
-    "x86_64-apple-darwin": ("darwin", "x64", "macosx_11_0_x86_64"),
-    "x86_64-unknown-linux-gnu": ("linux", "x64", "manylinux_2_35_x86_64"),
-    "aarch64-unknown-linux-gnu": ("linux", "arm64", "manylinux_2_39_aarch64"),
-    "x86_64-pc-windows-msvc": ("win32", "x64", "win_amd64"),
-}
+
+def load_targets(path: Path = ROOT / "packaging/targets.json") -> list[dict[str, str]]:
+    records = json.loads(path.read_text())
+    required = {"target", "os", "npm_platform", "npm_arch", "wheel_tag"}
+    targets, packages = set(), set()
+    if not isinstance(records, list) or not records:
+        raise ValueError("packaging targets must be a nonempty list")
+    for record in records:
+        if (not isinstance(record, dict) or set(record) != required
+                or any(not isinstance(value, str) or not value for value in record.values())):
+            raise ValueError("invalid packaging target record")
+        package = (record["npm_platform"], record["npm_arch"])
+        if record["target"] in targets or package in packages:
+            raise ValueError("duplicate packaging target or npm platform package")
+        if package[0] not in ("darwin", "linux", "win32") or package[1] not in ("x64", "arm64"):
+            raise ValueError("unsupported packaging platform or architecture")
+        targets.add(record["target"])
+        packages.add(package)
+    return records
+
+
+TARGET_RECORDS = load_targets()
+TARGETS = {r["target"]: (r["npm_platform"], r["npm_arch"], r["wheel_tag"]) for r in TARGET_RECORDS}
+
+
+def ci_matrix() -> dict:
+    """The CI runners and package metadata use the same target inventory."""
+    rows = []
+    for record in TARGET_RECORDS:
+        row = {"os": record["os"], "target": record["target"],
+               "executable": "snek.exe" if record["npm_platform"] == "win32" else "snek"}
+        if record["npm_platform"] == "linux":
+            row["wheel_platform"] = record["wheel_tag"]
+        rows.append(row)
+    return {"include": rows}
 
 
 def npm_tarball(path, files):
@@ -113,10 +141,22 @@ def build(binary: Path, target: str, out: Path):
     print(wheel)
 
 
-if __name__ == "__main__":
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", type=Path, required=True)
-    parser.add_argument("--target", choices=TARGETS, required=True)
+    parser.add_argument("--matrix", action="store_true", help="print the CI target matrix without building")
+    parser.add_argument("--binary", type=Path)
+    parser.add_argument("--target", choices=TARGETS)
     parser.add_argument("--out", type=Path, default=ROOT / "dist")
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.matrix:
+        if args.binary or args.target:
+            parser.error("--matrix cannot be combined with --binary or --target")
+        print(json.dumps(ci_matrix(), separators=(",", ":")))
+        return
+    if args.binary is None or args.target is None:
+        parser.error("building packages requires --binary and --target")
     build(args.binary, args.target, args.out)
+
+
+if __name__ == "__main__":
+    main()

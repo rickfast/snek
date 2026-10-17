@@ -67,6 +67,10 @@ Do not install npm packages with optional dependencies disabled.
 
 Configured build targets:
 
+`packaging/targets.json` is the target inventory for both package metadata and
+the CI matrix. `python packaging/build_packages.py --matrix` prints that matrix;
+adding a target does not require a second list in the workflow.
+
 | Platform | Native target | Minimum packaged OS/libc |
 | --- | --- | --- |
 | macOS Apple Silicon | aarch64-apple-darwin | macOS 11 |
@@ -89,14 +93,19 @@ not need them. `Cargo.lock` pins Rust dependencies. The commands below use the
 Apple Silicon target; choose the matching target from the table on other hosts.
 
 ```sh
-SNEK_RUNTIME=node python bootstrap/bootstrap_compiler.py
-MACOSX_DEPLOYMENT_TARGET=11.0 cargo +1.96.0 build --manifest-path native/Cargo.toml --release --locked
-cargo +1.96.0 test --manifest-path native/Cargo.toml --release --locked
+SNEK_RUNTIME=node python packaging/build_native.py
 native/target/release/snek run examples/hello.py
 python tests/check_native.py --corpus
 python packaging/build_packages.py --binary native/target/release/snek --target aarch64-apple-darwin
 python tests/check_packages.py
 ```
+
+`build_native.py` always regenerates and verifies the compiler before Cargo
+builds and tests the executable. It reads the pinned Rust version from
+`native/rust-toolchain.toml` and defaults the macOS deployment target to 11.0.
+Use `--offline` to require cached Cargo dependencies. Direct Cargo invocations
+remain available for Rust-only iteration, but do not regenerate the compiler
+when Snek sources change.
 
 The package test needs npm/npx, Bun and uv. It verifies wheel RECORD hashes,
 executable permissions, and npm/wheel executable identity, installs the local

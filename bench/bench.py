@@ -29,7 +29,6 @@ from __future__ import annotations
 import argparse
 import ast
 import datetime
-import hashlib
 import json
 import math
 import os
@@ -43,6 +42,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from common import source_identity, stats
 
 try:
     import wasmtime
@@ -132,7 +132,7 @@ def split_time(out: str) -> tuple[str, float | None]:
 
 
 def median_ms(times: list[float]) -> float:
-    return statistics.median(times) * 1000
+    return stats(times)["median"] * 1000
 
 
 # ---- availability -------------------------------------------------------------------
@@ -614,16 +614,6 @@ def environment() -> dict:
                 if l.startswith("model name")), None) if Path("/proc/cpuinfo").exists() else platform.processor()
     if platform.system() == "Darwin":
         cpu = ver([NODE, "-p", "require('node:os').cpus()[0]?.model"]) or cpu
-    # Include uncommitted compiler/runtime and workload contents in the identity.
-    digest = hashlib.sha256()
-    paths = [SNEK / "pyproject.toml"]
-    for directory in (SNEK / "snekc", SNEK / "snek", HERE):
-        paths.extend(p for p in directory.rglob("*") if p.is_file()
-                     and p.suffix in (".py", ".wat", ".wit", ".mjs")
-                     and not set(p.relative_to(directory).parts) & {"work", "node_modules", "__pycache__"})
-    for p in sorted(paths):
-        digest.update(str(p.relative_to(SNEK)).encode())
-        digest.update(b"\0" + p.read_bytes() + b"\0")
     return {
         "date": datetime.date.today().isoformat(),
         "machine": f"{os.cpu_count()} cores, {cpu}",
@@ -639,7 +629,7 @@ def environment() -> dict:
                                text=True).stdout.strip(),
         "dirty": bool(subprocess.run(["git", "status", "--porcelain"], cwd=SNEK, capture_output=True,
                                      text=True).stdout.strip()),
-        "source_sha256": digest.hexdigest(),
+        "source_sha256": source_identity(SNEK),
         "pyodide": pkg("pyodide"),
         "python-wasi (VMware CPython build)": pkg("@antonz/python-wasi"),
         "rustpython-wasi": pkg("rustpython-wasi"),

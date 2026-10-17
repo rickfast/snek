@@ -4,6 +4,12 @@ How snek compares with other ways of running Python as WebAssembly, with native 
 
 ## Runtimes
 
+The harnesses share statistics and source hashing in `bench/common.py`.
+Source identity includes both compiler implementations, runtime resources,
+native/package sources, and workloads; it excludes result snapshots. Timing
+boundaries remain separate: warm-engine, fresh-process, and internal phase
+measurements must not be compared as if they measured the same operation.
+
 | Runtime | What it is | Engine |
 |---|---|---|
 | snek (V8) | This compiler's output: WasmGC + Wasm exception handling | Node 25.9.0 |
