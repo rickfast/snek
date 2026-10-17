@@ -338,58 +338,77 @@ class BodyFlow:
 
 
 class BodyFunction:
+    """Completed function IR consumed by emitters, without checking state."""
     name: str
     sig: DeclSignature
     locals: dict[str, DeclType]
-    types: dict[str, DeclType]
-    bound: list[str]
     body: list[BodyStmt]
-    flow: BodyFlow
-    loop_depth: i32
-    temps: i32
     owner: str
     method_decl: str
-    initializing: bool
-    handler_excs: list[str]
-    finally_loops: list[i32]
-    ctor_assigned: dict[str, str]
-    inline_exits: list[bool]
-    inline_return_ok: bool
     machine: bool
-    async_body: bool
-    result_type: DeclType
-    yield_type: DeclType
-    scope: BodyScope
-    nested_sigs: dict[str, DeclSignature]
-    pending: list[PendingClosure]
     closure_type: DeclType
 
     def __init__(self, name: str, sig: DeclSignature) -> None:
         self.name = name
         self.sig = sig
         self.locals = {}
+        self.body = []
+        self.owner = ""
+        self.method_decl = ""
+        self.machine = False
+        self.closure_type = DeclType("None")
+
+    def tree(self) -> Node:
+        locals: list[Node] = []
+        for name in self.locals:
+            locals.append(Node("Local").put("name", string(name)).put("type", self.locals[name].tree()))
+        return (Node("FunctionIR").put("name", string(self.name)).put("signature", self.sig.tree())
+                .put("locals", sequence(locals)).put("body", body_trees(self.body))
+                .put("machine", Node("scalar", "true" if self.machine else "false"))
+                .put("closure_type", self.closure_type.tree())
+                .put("owner", string(self.owner)).put("method_decl", string(self.method_decl)))
+
+
+class BodyContext:
+    """Temporary scope, flow and lowering state while checking one function."""
+    function: BodyFunction
+    types: dict[str, DeclType]
+    bound: list[str]
+    flow: BodyFlow
+    loop_depth: i32
+    temps: i32
+    initializing: bool
+    handler_excs: list[str]
+    finally_loops: list[i32]
+    ctor_assigned: dict[str, str]
+    inline_exits: list[bool]
+    inline_return_ok: bool
+    async_body: bool
+    result_type: DeclType
+    yield_type: DeclType
+    scope: BodyScope
+    nested_sigs: dict[str, DeclSignature]
+    pending: list[PendingClosure]
+
+    def __init__(self, name: str, sig: DeclSignature) -> None:
+        self.function = BodyFunction(name, sig)
         self.types = {}
         self.bound = []
-        self.body = []
         self.flow = BodyFlow()
         self.loop_depth = 0
         self.temps = 0
-        self.owner = ""
-        self.method_decl = ""
         self.initializing = False
         self.handler_excs = []
         self.finally_loops = []
         self.ctor_assigned = {}
         self.inline_exits = []
         self.inline_return_ok = False
-        self.machine = False
         self.async_body = False
         self.result_type = sig.ret
         self.yield_type = DeclType("None")
         self.scope = BodyScope(missing())
         self.nested_sigs = {}
         self.pending = []
-        self.closure_type = DeclType("None")
         for param in sig.params:
             self.types[param.name] = param.ty
             self.bound.append(param.name)
@@ -400,7 +419,7 @@ class BodyFunction:
             if not self.types[name].same(ty):
                 declaration_error("'" + name + "' was already declared as " + self.types[name].display(), node)
         else:
-            self.locals[name] = ty
+            self.function.locals[name] = ty
             self.types[name] = ty
 
     def get(self, name: str, node: Node) -> BodyExpr:
@@ -419,16 +438,6 @@ class BodyFunction:
         self.flow.assigned[name] = True
         return name
 
-    def tree(self) -> Node:
-        locals: list[Node] = []
-        for name in self.locals:
-            locals.append(Node("Local").put("name", string(name)).put("type", self.locals[name].tree()))
-        return (Node("FunctionIR").put("name", string(self.name)).put("signature", self.sig.tree())
-                .put("locals", sequence(locals)).put("body", body_trees(self.body))
-                .put("machine", Node("scalar", "true" if self.machine else "false"))
-                .put("closure_type", self.closure_type.tree())
-                .put("owner", string(self.owner)).put("method_decl", string(self.method_decl)))
-
 
 class BodyBlock:
     stmts: list[BodyStmt]
@@ -441,7 +450,7 @@ class BodyBlock:
 
 class BodyChecker:
     decl: Declarations
-    ctx: BodyFunction
+    ctx: BodyContext
     functions: list[BodyFunction]
     unicode_dynamic: bool
     unicode_extra: list[i32]
@@ -459,7 +468,7 @@ class BodyChecker:
 
     def __init__(self, decl: Declarations, runtime: Node, intrinsics: dict[str, list[str]]) -> None:
         self.decl = decl
-        self.ctx = BodyFunction("", DeclSignature())
+        self.ctx = BodyContext("", DeclSignature())
         self.functions = []
         self.unicode_dynamic = False
         self.unicode_extra = []
@@ -494,17 +503,20 @@ class BodyChecker:
             sig = self.decl.functions[name]
             node = self.decl.function_nodes[name]
             self.function(name, sig, node, "", "")
-        self.ctx = BodyFunction("snek.main", DeclSignature())
+        self.ctx = BodyContext("snek.main", DeclSignature())
         main = Node("Module").put("body", sequence(self.decl.main))
         self.prepare_scope(body_scope(main, []), self.ctx)
-        self.ctx.body = self.block(self.decl.main).stmts
+        self.ctx.function.body = self.block(self.decl.main).stmts
         self.finish_closures()
-        self.functions.append(self.ctx)
+        self.functions.append(self.ctx.function)
         self.builtin_mode = True
         while len(self.helper_queue) > 0:
             helper = self.helper_queue.pop()
             self.function(helper, self.helper_sigs[helper], self.helpers[helper], "", "")
         self.builtin_mode = False
+        # Completed IR owns no scope/flow/closure bookkeeping. Do not retain
+        # the final helper's checking context through the returned checker.
+        self.ctx = BodyContext("", DeclSignature())
 
     def annotation(self, node: Node) -> DeclType:
         if not self.builtin_mode:
@@ -588,17 +600,17 @@ class BodyChecker:
         body_type(sig.ret, node)
         for param in sig.params:
             body_type(param.ty, node)
-        self.ctx = BodyFunction(name, sig)
+        self.ctx = BodyContext(name, sig)
         if node.kind == "AsyncFunctionDef":
             self.ctx.async_body = True
-            self.ctx.machine = True
+            self.ctx.function.machine = True
             self.ctx.result_type = sig.ret.args[0]
         elif direct_yield(node.get("body")):
-            self.ctx.machine = True
+            self.ctx.function.machine = True
             self.ctx.result_type = DeclType("None")
             self.ctx.yield_type = sig.ret.args[0]
-        self.ctx.owner = owner
-        self.ctx.method_decl = method_decl
+        self.ctx.function.owner = owner
+        self.ctx.function.method_decl = method_decl
         if owner != "":
             self.ctx.types["self"] = DeclType("class", owner)
             self.ctx.flow.assigned["self"] = True
@@ -608,11 +620,11 @@ class BodyChecker:
         block = self.block(body.items)
         if self.ctx.result_type.kind != "None" and not block.terminated:
             declaration_error("'" + name + "' can reach the end without returning a " + self.ctx.result_type.display(), node)
-        self.ctx.body = block.stmts
+        self.ctx.function.body = block.stmts
         self.finish_closures()
-        self.functions.append(self.ctx)
+        self.functions.append(self.ctx.function)
 
-    def prepare_scope(self, scope: BodyScope, parent: BodyFunction) -> None:
+    def prepare_scope(self, scope: BodyScope, parent: BodyContext) -> None:
         self.ctx.scope = scope
         self.ctx.bound = scope.bound + scope.free
         for name in scope.free:
@@ -646,7 +658,7 @@ class BodyChecker:
         if self.ctx.initializing:
             declaration_error("closures in __init__ are not supported yet; use an ordinary method", node)
         scope = self.ctx.scope.child(node)
-        if self.ctx.name == "snek.main" and len(scope.free) > 0:
+        if self.ctx.function.name == "snek.main" and len(scope.free) > 0:
             declaration_error("module state cannot be captured; put the enclosing code in a function", node)
         name = "closure." + str(self.nclosures)
         self.nclosures += 1
@@ -676,47 +688,47 @@ class BodyChecker:
             self.finish_pending(pending, parent)
         self.lower_cells()
 
-    def finish_pending(self, pending: PendingClosure, parent: BodyFunction) -> None:
+    def finish_pending(self, pending: PendingClosure, parent: BodyContext) -> None:
         node = pending.node
         sig = pending.sig
-        self.ctx = BodyFunction(pending.value.text, sig)
-        self.ctx.closure_type = callable_type(sig)
+        self.ctx = BodyContext(pending.value.text, sig)
+        self.ctx.function.closure_type = callable_type(sig)
         self.prepare_scope(parent.scope.child(node), parent)
         if node.kind == "Lambda":
             expr = node.get("body")
             if (sig.ret.kind == "None" and expr.kind == "Call" and named(expr.get("func"), "print")
                     and "print" not in self.ctx.types and "print" not in self.ctx.bound):
-                self.ctx.body = self.print_statement(expr).stmts + [BodyStmt("Return", node)]
+                self.ctx.function.body = self.print_statement(expr).stmts + [BodyStmt("Return", node)]
             else:
                 value = self.expr(expr, sig.ret)
                 if sig.ret.kind == "unknown":
                     self.no_mixed(value, expr)
                     sig.ret = value.ty
                     self.ctx.result_type = value.ty
-                    self.ctx.closure_type = callable_type(sig)
-                    pending.value.ty = self.ctx.closure_type
+                    self.ctx.function.closure_type = callable_type(sig)
+                    pending.value.ty = self.ctx.function.closure_type
                 value = self.coerce(value, sig.ret, expr)
                 if sig.ret.kind == "None":
                     if value.kind != "NoneLit":
-                        self.ctx.body.append(BodyStmt("ExprStmt", expr).add(value))
-                    self.ctx.body.append(BodyStmt("Return", node))
+                        self.ctx.function.body.append(BodyStmt("ExprStmt", expr).add(value))
+                    self.ctx.function.body.append(BodyStmt("Return", node))
                 else:
-                    self.ctx.body = [BodyStmt("Return", node).add(value)]
+                    self.ctx.function.body = [BodyStmt("Return", node).add(value)]
         else:
             if node.kind == "AsyncFunctionDef":
                 self.ctx.async_body = True
-                self.ctx.machine = True
+                self.ctx.function.machine = True
                 self.ctx.result_type = sig.ret.args[0]
             elif direct_yield(node.get("body")):
-                self.ctx.machine = True
+                self.ctx.function.machine = True
                 self.ctx.result_type = DeclType("None")
                 self.ctx.yield_type = sig.ret.args[0]
             checked = self.block(node.get("body").items)
             if self.ctx.result_type.kind != "None" and not checked.terminated:
                 declaration_error("nested function can reach the end without returning a " + self.ctx.result_type.display(), node)
-            self.ctx.body = checked.stmts
+            self.ctx.function.body = checked.stmts
         self.finish_closures()
-        self.functions.append(self.ctx)
+        self.functions.append(self.ctx.function)
         for name in sorted(self.ctx.scope.free):
             pending.value.add(self.cell_ref(name, parent.types[name], node))
         self.ctx = parent
@@ -789,15 +801,15 @@ class BodyChecker:
         for name in free:
             layout.add(DeclType("Cell").add(self.ctx.types[name]))
         params: list[str] = []
-        for param in self.ctx.sig.params:
+        for param in self.ctx.function.sig.params:
             params.append(param.name)
-        if self.ctx.owner != "":
+        if self.ctx.function.owner != "":
             params.append("self")
         prefix: list[BodyStmt] = []
         for name in sorted(list(cells)):
             ty = cells[name]
             ref = self.cell_ref(name, ty, node)
-            self.ctx.locals[ref.text] = ref.ty
+            self.ctx.function.locals[ref.text] = ref.ty
             if name in free:
                 env = BodyExpr("LocalGet", DeclType("Env"), node, "closure.env")
                 env.declared = env.ty
@@ -809,13 +821,13 @@ class BodyChecker:
                 if name in params:
                     value = BodyExpr("LocalGet", ty, node, name)
                     value.declared = ty
-                    if name == "self" and self.ctx.owner != self.ctx.method_decl:
+                    if name == "self" and self.ctx.function.owner != self.ctx.function.method_decl:
                         value.text = "self.in"
-                        value.declared = DeclType("class", self.ctx.method_decl)
+                        value.declared = DeclType("class", self.ctx.function.method_decl)
                     prefix.append(BodyStmt("CellSet", node).add(ref).add(value))
-            if name not in params and name in self.ctx.locals:
-                del self.ctx.locals[name]
-        self.ctx.body = prefix + self.cell_statements(self.ctx.body, cells)
+            if name not in params and name in self.ctx.function.locals:
+                del self.ctx.function.locals[name]
+        self.ctx.function.body = prefix + self.cell_statements(self.ctx.function.body, cells)
 
     def subclass(self, child: str, parent: str) -> bool:
         while child != "":
@@ -1066,39 +1078,42 @@ class BodyChecker:
         if node.kind in ("List", "Tuple", "Dict"):
             return self.collection(node, inner_type(expected))
         if node.kind == "Attribute":
-            receiver = node.get("value")
-            if (node.get("attr").text == "__name__" and receiver.kind == "Call"
-                    and named(receiver.get("func"), "type") and "type" not in self.ctx.bound):
-                if len(receiver.get("args").items) != 1 or len(receiver.get("keywords").items) != 0:
-                    declaration_error("type() takes exactly one argument", receiver)
-                obj = self.expr(receiver.get("args").items[0], DeclType("unknown"))
-                self.no_mixed(obj, receiver)
-                if obj.ty.kind == "class":
-                    return BodyExpr("TypeName", DeclType("str"), node, obj.ty.name).add(obj)
-                names = {"i32": "int", "i64": "int", "f32": "float", "f64": "float", "bool": "bool",
-                         "str": "str", "list": "list", "tuple": "tuple", "dict": "dict"}
-                if obj.ty.kind not in names:
-                    declaration_error("type(x).__name__ of " + obj.ty.display() + " is not supported (narrow it first)", node)
-                return self.sequence_expr([BodyStmt("ExprStmt", node).add(obj)], BodyExpr("StrLit", DeclType("str"), node, names[obj.ty.kind]))
-            obj = self.expr(receiver, DeclType("unknown"))
-            if obj.ty.kind == "Stream":
-                attr = node.get("attr").text
-                if attr == "closed":
-                    return BodyExpr("Call", DeclType("bool"), node, "snek.sys.closed").add(obj)
-                if attr == "buffer" and obj.ty.name.startswith("Text"):
-                    return BodyExpr("Call", DeclType("Stream", obj.ty.name.replace("Text", "Binary")), node, "snek.sys.buffer").add(obj)
-                declaration_error(obj.ty.display() + " has no attribute '" + attr + "'", node)
-            if obj.ty.kind == "type" and node.get("attr").text == "__name__":
-                return BodyExpr("ClassName", DeclType("str"), node).add(obj)
-            if inner_type(obj.ty).kind == "TracebackType":
-                declaration_error("tracebacks are opaque; only None checks are supported", node)
-            field = self.field(obj, node.get("attr").text, node)
-            return BodyExpr("GetField", field.ty, node, field.name).add(obj)
+            return self.attribute(node)
         if node.kind == "Subscript":
             obj = self.expr(node.get("value"), DeclType("unknown"))
             return self.subscript(obj, node.get("slice"), node)
         body_unsupported("expression " + node.kind, node)
         return BodyExpr("NoneLit", DeclType("None"), node)
+
+    def attribute(self, node: Node) -> BodyExpr:
+        receiver = node.get("value")
+        if (node.get("attr").text == "__name__" and receiver.kind == "Call"
+                and named(receiver.get("func"), "type") and "type" not in self.ctx.bound):
+            if len(receiver.get("args").items) != 1 or len(receiver.get("keywords").items) != 0:
+                declaration_error("type() takes exactly one argument", receiver)
+            obj = self.expr(receiver.get("args").items[0], DeclType("unknown"))
+            self.no_mixed(obj, receiver)
+            if obj.ty.kind == "class":
+                return BodyExpr("TypeName", DeclType("str"), node, obj.ty.name).add(obj)
+            names = {"i32": "int", "i64": "int", "f32": "float", "f64": "float", "bool": "bool",
+                     "str": "str", "list": "list", "tuple": "tuple", "dict": "dict"}
+            if obj.ty.kind not in names:
+                declaration_error("type(x).__name__ of " + obj.ty.display() + " is not supported (narrow it first)", node)
+            return self.sequence_expr([BodyStmt("ExprStmt", node).add(obj)], BodyExpr("StrLit", DeclType("str"), node, names[obj.ty.kind]))
+        obj = self.expr(receiver, DeclType("unknown"))
+        if obj.ty.kind == "Stream":
+            attr = node.get("attr").text
+            if attr == "closed":
+                return BodyExpr("Call", DeclType("bool"), node, "snek.sys.closed").add(obj)
+            if attr == "buffer" and obj.ty.name.startswith("Text"):
+                return BodyExpr("Call", DeclType("Stream", obj.ty.name.replace("Text", "Binary")), node, "snek.sys.buffer").add(obj)
+            declaration_error(obj.ty.display() + " has no attribute '" + attr + "'", node)
+        if obj.ty.kind == "type" and node.get("attr").text == "__name__":
+            return BodyExpr("ClassName", DeclType("str"), node).add(obj)
+        if inner_type(obj.ty).kind == "TracebackType":
+            declaration_error("tracebacks are opaque; only None checks are supported", node)
+        field = self.field(obj, node.get("attr").text, node)
+        return BodyExpr("GetField", field.ty, node, field.name).add(obj)
 
     def operands(self, left: Node, right: Node, expected: DeclType) -> list[BodyExpr]:
         hint = expected if int_type(expected) else DeclType("unknown")
@@ -1377,15 +1392,7 @@ class BodyChecker:
             sig = self.helper_signature(name)
             return self.bind_call(name, sig, node, self.helper_posonly[name])
         if name in ("read_bytes", "write_bytes") and name in self.decl.imported:
-            if len(node.get("keywords").items) != 0:
-                declaration_error(name + "() takes positional arguments only", node)
-            self.arity(node, 0 if name == "read_bytes" else 1, 0 if name == "read_bytes" else 1)
-            byte_list = DeclType("list").add(DeclType("i32"))
-            result = BodyExpr("Call", byte_list if name == "read_bytes" else DeclType("None"), node, "snek." + name)
-            if name == "write_bytes":
-                argument = node.get("args").items[0]
-                result.add(self.coerce(self.expr(argument, byte_list), byte_list, argument))
-            return result
+            return self.byte_io_call(name, node)
         if name in self.decl.functions:
             return self.bind_call(name, self.decl.functions[name], node)
         if name in self.decl.classes:
@@ -1395,6 +1402,20 @@ class BodyChecker:
             call.ty = DeclType("class", name)
             result.ty = call.ty
             return result
+        return self.builtin_call(name, node, expected)
+
+    def byte_io_call(self, name: str, node: Node) -> BodyExpr:
+        if len(node.get("keywords").items) != 0:
+            declaration_error(name + "() takes positional arguments only", node)
+        self.arity(node, 0 if name == "read_bytes" else 1, 0 if name == "read_bytes" else 1)
+        byte_list = DeclType("list").add(DeclType("i32"))
+        result = BodyExpr("Call", byte_list if name == "read_bytes" else DeclType("None"), node, "snek." + name)
+        if name == "write_bytes":
+            argument = node.get("args").items[0]
+            result.add(self.coerce(self.expr(argument, byte_list), byte_list, argument))
+        return result
+
+    def builtin_call(self, name: str, node: Node, expected: DeclType) -> BodyExpr:
         args = node.get("args").items
         if name in ("run", "checkpoint") and name in self.decl.imported:
             if len(node.get("keywords").items) != 0:
@@ -1402,7 +1423,7 @@ class BodyChecker:
             self.arity(node, 1 if name == "run" else 0, 1 if name == "run" else 0)
             if name == "checkpoint":
                 return BodyExpr("Call", DeclType("Coroutine").add(DeclType("None")), node, "snek.checkpoint")
-            if self.ctx.name != "snek.main":
+            if self.ctx.function.name != "snek.main":
                 declaration_error("run() is only supported at module scope; use await inside async def", node)
             value = self.expr(args[0], DeclType("unknown"))
             if value.ty.kind != "Coroutine":
@@ -1453,6 +1474,11 @@ class BodyChecker:
             if not self.subclass(cls, declared.name) and not self.subclass(declared.name, cls):
                 declaration_error("isinstance is always False for unrelated classes", node)
             return BodyExpr("IsInstance", DeclType("bool"), node, cls).add(value)
+        return self.scalar_builtin(name, node, expected)
+
+    def scalar_builtin(self, name: str, node: Node, expected: DeclType) -> BodyExpr:
+        args = node.get("args").items
+        func = node.get("func")
         if name in ("min", "max"):
             if len(args) != 2:
                 body_unsupported("min/max except two scalar arguments", node)
@@ -1469,20 +1495,7 @@ class BodyChecker:
         if len(args) != 1:
             declaration_error(name + "() takes one argument", node)
         if name in ("i32", "i64", "f32", "f64"):
-            if name not in self.decl.imported and not self.builtin_mode:
-                declaration_error("'" + name + "' must be imported", func)
-            target = DeclType(name)
-            value = self.expr(args[0], target)
-            if value.ty.kind == "str" and int_type(target):
-                self.helper_signature("__parse_int")
-                parsed = BodyExpr("Call", DeclType("i64"), node, "__parse_int").add(value).add(self.integer(32 if name == "i32" else 64, node))
-                return parsed if name == "i64" else BodyExpr("Convert", target, node).add(parsed)
-            if not numeric_type(value.ty) and value.ty.kind != "bool":
-                body_unsupported("numeric conversion from " + value.ty.display(), node)
-            if value.ty.same(target):
-                value.mixed = False
-                return value
-            return BodyExpr("Convert", target, node).add(value)
+            return self.numeric_conversion(name, node)
         value = self.expr(args[0], expected if name == "abs" and not integer_node(args[0]) else DeclType("unknown"))
         if name == "str" or name == "repr":
             if name == "repr":
@@ -1493,7 +1506,7 @@ class BodyChecker:
         if name == "ord":
             if value.ty.kind != "str":
                 declaration_error(name + " needs a non-optional str in the scalar checker", node)
-            return BodyExpr("StrLen", DeclType("i32"), node).add(value) if name == "len" else BodyExpr("Call", DeclType("i32"), node, "rt.ord").add(value)
+            return BodyExpr("Call", DeclType("i32"), node, "rt.ord").add(value)
         if name == "chr":
             value = self.coerce(value, DeclType("i32"), args[0])
             if value.kind == "Const":
@@ -1525,6 +1538,22 @@ class BodyChecker:
             return BodyExpr("Compare", DeclType("bool"), node, "ne").add(value).add(zero)
         body_unsupported("call " + name, node)
         return value
+
+    def numeric_conversion(self, name: str, node: Node) -> BodyExpr:
+        if name not in self.decl.imported and not self.builtin_mode:
+            declaration_error("'" + name + "' must be imported", node.get("func"))
+        target = DeclType(name)
+        value = self.expr(node.get("args").items[0], target)
+        if value.ty.kind == "str" and int_type(target):
+            self.helper_signature("__parse_int")
+            parsed = BodyExpr("Call", DeclType("i64"), node, "__parse_int").add(value).add(self.integer(32 if name == "i32" else 64, node))
+            return parsed if name == "i64" else BodyExpr("Convert", target, node).add(parsed)
+        if not numeric_type(value.ty) and value.ty.kind != "bool":
+            body_unsupported("numeric conversion from " + value.ty.display(), node)
+        if value.ty.same(target):
+            value.mixed = False
+            return value
+        return BodyExpr("Convert", target, node).add(value)
 
     def list_element(self, value: BodyExpr, node: Node) -> DeclType:
         if value.ty.kind != "list":
@@ -2050,11 +2079,11 @@ class BodyChecker:
         name = func.get("attr").text
         direct = False
         if recv_node.kind == "Call" and named(recv_node.get("func"), "super"):
-            if self.ctx.owner == "" or len(recv_node.get("args").items) != 0 or len(recv_node.get("keywords").items) != 0:
+            if self.ctx.function.owner == "" or len(recv_node.get("args").items) != 0 or len(recv_node.get("keywords").items) != 0:
                 declaration_error("super() requires a method and no arguments", node)
             if name == "__init__":
                 declaration_error("super().__init__ must be a top-level constructor statement before self is used", node)
-            base = self.decl.classes[self.ctx.owner].base
+            base = self.decl.classes[self.ctx.function.owner].base
             if base == "" or name not in self.decl.classes[base].methods:
                 if base != "" and name == "__str__" and self.subclass(base, "BaseException"):
                     self.arity(node, 0, 0)
@@ -2218,8 +2247,8 @@ class BodyChecker:
         sig.ret = DeclType("class", name)
         for param in sig.params:
             body_type(param.ty, cls.node)
-        self.ctx = BodyFunction(name + ".__new__", sig)
-        self.ctx.owner = name
+        self.ctx = BodyContext(name + ".__new__", sig)
+        self.ctx.function.owner = name
         self.ctx.initializing = True
         assigned: dict[str, str] = {}
         self.ctx.ctor_assigned = assigned
@@ -2231,8 +2260,8 @@ class BodyChecker:
             terminated = self.init_body(name, owner, self.decl.classes[owner].init_node.get("body"), assigned)
         if not terminated:
             self.construct(name, assigned, cls.node)
-            self.ctx.body.append(BodyStmt("Return", cls.node).add(self.ctx.get("self", cls.node)))
-        self.functions.append(self.ctx)
+            self.ctx.function.body.append(BodyStmt("Return", cls.node).add(self.ctx.get("self", cls.node)))
+        self.functions.append(self.ctx.function)
 
     def construct(self, name: str, assigned: dict[str, str], node: Node) -> None:
         if "self" in self.ctx.flow.assigned:
@@ -2240,7 +2269,7 @@ class BodyChecker:
         expr = self.construct_value(name, assigned, node)
         self.ctx.declare("self", expr.ty, node)
         self.ctx.flow.assigned["self"] = True
-        self.ctx.body.append(BodyStmt("SetLocal", node, "self").add(expr))
+        self.ctx.function.body.append(BodyStmt("SetLocal", node, "self").add(expr))
 
     def construct_value(self, name: str, assigned: dict[str, str], node: Node) -> BodyExpr:
         cls = self.decl.classes[name]
@@ -2256,8 +2285,8 @@ class BodyChecker:
         return expr
 
     def init_body(self, name: str, owner: str, body: Node, assigned: dict[str, str]) -> bool:
-        previous_owner = self.ctx.owner
-        self.ctx.owner = owner
+        previous_owner = self.ctx.function.owner
+        self.ctx.function.owner = owner
         bound_names(body, self.ctx.bound)
         self.prepare(body)
         terminated = False
@@ -2282,7 +2311,7 @@ class BodyChecker:
                 bound = self.bind_call(base, signature, call)
                 expr = bound
                 if bound.kind == "Seq":
-                    self.ctx.body.extend(bound.pre)
+                    self.ctx.function.body.extend(bound.pre)
                     expr = bound.args[0]
                 base_body = self.decl.classes[base].init_node.get("body")
                 locals: list[str] = []
@@ -2300,16 +2329,16 @@ class BodyChecker:
                     local = mapping[param.name]
                     self.ctx.declare(local, param.ty, node)
                     self.ctx.flow.assigned[local] = True
-                    self.ctx.body.append(BodyStmt("SetLocal", node, local).add(expr.args[index]))
-                outer = self.ctx.body
-                self.ctx.body = []
+                    self.ctx.function.body.append(BodyStmt("SetLocal", node, local).add(expr.args[index]))
+                outer = self.ctx.function.body
+                self.ctx.function.body = []
                 self.ctx.inline_exits.append(False)
                 ended = self.init_body(name, base, rename_body(base_body, mapping), assigned)
                 exited = self.ctx.inline_exits.pop()
                 inline = BodyStmt("InlineBlock", node)
-                inline.body = self.ctx.body
+                inline.body = self.ctx.function.body
                 outer.append(inline)
-                self.ctx.body = outer
+                self.ctx.function.body = outer
                 terminated = terminated or (ended and not exited)
                 continue
             if "self" not in self.ctx.flow.assigned and node.kind in ("Assign", "AnnAssign"):
@@ -2328,7 +2357,7 @@ class BodyChecker:
                         declaration_error("field annotations belong in the class body", node)
                     value = self.coerce(self.expr(value_node, field.ty), field.ty, value_node)
                     temp = self.ctx.temp(field.ty, node)
-                    self.ctx.body.append(BodyStmt("SetLocal", node, temp).add(value))
+                    self.ctx.function.body.append(BodyStmt("SetLocal", node, temp).add(value))
                     assigned[field_name] = temp
                     continue
             if refers_self(node):
@@ -2342,9 +2371,9 @@ class BodyChecker:
                     self.ctx.inline_return_ok = False
             checked = self.statement(node)
             self.ctx.inline_return_ok = False
-            self.ctx.body.extend(checked.stmts)
+            self.ctx.function.body.extend(checked.stmts)
             terminated = terminated or checked.terminated
-        self.ctx.owner = previous_owner
+        self.ctx.function.owner = previous_owner
         return terminated
 
     def constructor_return(self, node: Node) -> BodyBlock:
@@ -2358,7 +2387,7 @@ class BodyChecker:
             self.ctx.inline_exits[-1] = True
             result.stmts.append(BodyStmt("ExitInline", node))
             return result
-        ty = self.ctx.sig.ret
+        ty = self.ctx.function.sig.ret
         if "self" not in self.ctx.flow.assigned:
             expr = self.construct_value(ty.name, self.ctx.ctor_assigned, node)
             self.ctx.declare("self", ty, node)
@@ -2433,7 +2462,7 @@ class BodyChecker:
             stmt.body.extend(self.store(target, value))
             return stmt
         name = target.get("id").text
-        if name == "self" and self.ctx.owner != "":
+        if name == "self" and self.ctx.function.owner != "":
             declaration_error("cannot assign to self", target)
         if annotation.kind != "unknown":
             body_type(annotation, target)
@@ -2484,7 +2513,7 @@ class BodyChecker:
         self.no_mixed(value, target)
         if target.kind == "Name":
             name = target.get("id").text
-            if name == "self" and self.ctx.owner != "":
+            if name == "self" and self.ctx.function.owner != "":
                 declaration_error("cannot assign to self", target)
             if name in self.ctx.types:
                 value = self.coerce(value, self.ctx.types[name], target)
@@ -2537,7 +2566,7 @@ class BodyChecker:
             declaration_error("unsupported augmented assignment target", target)
         if old.kind == "GetField" and self.field(old.args[0], old.text, target).final:
             declaration_error("'" + old.text + "' is Final", target)
-        if target.kind == "Name" and target.get("id").text == "self" and self.ctx.owner != "":
+        if target.kind == "Name" and target.get("id").text == "self" and self.ctx.function.owner != "":
             declaration_error("cannot assign to self", target)
         current = self.capture(old, result.stmts)
         rhs = node.get("value")
@@ -2616,7 +2645,7 @@ class BodyChecker:
                 declaration_error("return in a finally block would swallow an in-flight exception", node)
             if self.ctx.initializing:
                 return self.constructor_return(node)
-            if self.ctx.name == "snek.main":
+            if self.ctx.function.name == "snek.main":
                 declaration_error("return outside a function", node)
             value_node = node.get("value")
             ret = BodyStmt("Return", node)
