@@ -9,7 +9,6 @@ import ast
 import json
 import os
 import random
-import string
 import sys
 import tempfile
 import unittest
@@ -20,11 +19,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from bootstrap.parser import Lexer, parse, utf8
+from bootstrap.linker import parser_source
 from bootstrap.bootstrap import assemble
 from snekc import driver, runner
-from snekc.builtins import BUILTINS_SOURCE, STR_METHODS_TEMPLATE
+from snekc.builtins import BUILTINS_SOURCE, STR_METHODS_SOURCE
 from snekc.formatting import FORMAT_SOURCE
-from snekc.unicode import FLAG_NAMES
 from snekc.wasm import encode
 
 
@@ -127,7 +126,9 @@ class ParserTests(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory(prefix="snek-parser-")
         cls.addClassCleanup(cls.tmp.cleanup)
         cls.wasm = Path(cls.tmp.name) / "parser.wasm"
-        driver.build(ROOT / "bootstrap/parser.py", cls.wasm, optimize=False)
+        cls.source = Path(cls.tmp.name) / "parser.bundle.py"
+        cls.source.write_text(parser_source())
+        driver.build(cls.source, cls.wasm, optimize=False)
 
     def wasm_parse(self, source):
         data = source.encode("utf-8") if isinstance(source, str) else source
@@ -156,12 +157,12 @@ class ParserTests(unittest.TestCase):
 
     def test_builtin_sources(self):
         self.compare(BUILTINS_SOURCE)
-        self.compare(string.Template(STR_METHODS_TEMPLATE).substitute(FLAG_NAMES) + FORMAT_SOURCE)
+        self.compare(STR_METHODS_SOURCE + FORMAT_SOURCE)
 
     def test_snek_encoder_builds_parser(self):
         encoder = Path(self.tmp.name) / "encoder.wasm"
         driver.build(ROOT / "bootstrap/encode.py", encoder, optimize=False)
-        source = (ROOT / "bootstrap/parser.py").read_text()
+        source = parser_source()
         wat = driver.compile_to_wat(source)
         binary = assemble(encoder, wat)
         self.assertEqual(binary, encode(wat, debug_names=False))
@@ -287,7 +288,7 @@ class ParserTests(unittest.TestCase):
         if not os.environ.get("SNEK_WASM_OPT"):
             self.skipTest("set SNEK_WASM_OPT to exercise an optimized parser")
         optimized = Path(self.tmp.name) / "parser.opt.wasm"
-        driver.build(ROOT / "bootstrap/parser.py", optimized, optimize=True)
+        driver.build(self.source, optimized, optimize=True)
         source = (ROOT / "bootstrap/parser.py").read_bytes()
         raw = runner.run_binary(self.wasm, stdin=source)
         opt = runner.run_binary(optimized, stdin=source)

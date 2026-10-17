@@ -6,6 +6,34 @@ same source into byte-identical stage 3. Those rebuilds run no Python parser,
 checker, IR bridge, emitter or encoder. Python remains the default reference
 compiler; select the independent implementation with `--compiler snek`.
 
+## Source layout and preparation
+
+`parser.py`, `declarations.py`, `bodies.py`, and the `emit_*.py`/`machine_*.py`
+modules are the production compiler written in Snek. `encode.py` is its binary
+encoder. They live here alongside the host build tools for historical reasons;
+the directory name does not mean these passes are experimental.
+
+The host-only `linker.py` uses an explicit module/import manifest and Python
+tokenization to select definitions and namespace the encoder. It does not
+compile user programs, match import text, or search function bodies with regex.
+`build_declarations.py`, `build_bodies.py`, and `build_machines.py` also expose
+standalone probes of those passes. `body_bridge.py` remains necessary for seed
+construction; it is forbidden during subsequent self-hosted stages.
+
+Authored runtime programs live in `snekc/runtime/*.snek`: exceptions, string
+methods, and formatting. A small resource loader resolves private
+`__unicode_*` identifiers against the compiler's Unicode flag ABI, replacing
+only identifier tokens. Function source locations and lazy helper parsing are
+preserved. The bootstrap embeds the resulting source fragments as generated
+data, so the standalone compiler needs no resource files at runtime.
+
+The pinned, generated Unicode name functions live in `unicode_names.py`, not
+inside the handwritten parser. Regenerate or verify them with
+`generate_unicode_names.py --write`/`--check` under Python with Unicode 15.1.
+The linker embeds this module into both parser probes and the full compiler.
+Compiler entry and profiling builds share the phase definitions in
+`build_emitter.py`.
+
 ## Run the full compiler bootstrap
 
 The `Self-hosting` GitHub Actions workflow runs on pushes, pull requests and
@@ -152,9 +180,10 @@ without publishing a partial binary on stdout. Debug custom sections are omitted
 ## Run the source parser
 
 ```sh
-python -m snekc build bootstrap/parser.py --no-opt -o bootstrap/build/parser.wasm
+python -m bootstrap.linker --out bootstrap/build/parser.bundle.py
+python -m snekc build bootstrap/build/parser.bundle.py --no-opt -o bootstrap/build/parser.wasm
 wasmtime run bootstrap/build/parser.wasm < bootstrap/encode.py
-python -m snekc run bootstrap/parser.py --no-opt < bootstrap/parser.py
+python -m snekc run bootstrap/build/parser.bundle.py --no-opt < bootstrap/parser.py
 python tests/check_parser.py
 ```
 

@@ -1,4 +1,4 @@
-"""Build the experimental standalone body checker, not a full self-hosted compiler."""
+"""Build a standalone probe of the production owned body checker."""
 from __future__ import annotations
 
 import argparse
@@ -12,8 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from bootstrap.bodies import BodyChecker
-from bootstrap.build_declarations import bundle_source as declaration_bundle, declare, remove_once
+from bootstrap.build_declarations import bundle_source as declaration_bundle, declare
 from bootstrap.parser import parse, string
+from bootstrap.linker import module_source
 from bootstrap.runtime_data import configuration, indexed_runtime, runtime_functions
 
 
@@ -53,28 +54,9 @@ def check(source: str) -> BodyChecker:
 
 
 def bundle_source(*, entry: bool = True) -> str:
-    source = remove_once(declaration_bundle(), 'if __name__ == "__main__":\n    declaration_command()\n')
-    formats = (ROOT / "bootstrap/formats.py").read_text()
-    for line in ("from __future__ import annotations\n", "from snek import i32, i64\n",
-                 "from bootstrap.parser import Node\n",
-                 "from bootstrap.declarations import declaration_error\n"):
-        formats = remove_once(formats, line)
-    source += "\n" + formats
-    scopes = (ROOT / "bootstrap/scopes.py").read_text()
-    for line in ("from __future__ import annotations\n", "from bootstrap.parser import Node, missing\n",
-                 "from bootstrap.declarations import declaration_error\n"):
-        scopes = remove_once(scopes, line)
-    source += "\n" + scopes
-    bodies = (ROOT / "bootstrap/bodies.py").read_text()
-    for line in (
-        "from __future__ import annotations\n",
-        "from snek import i32, i64\n",
-        "from bootstrap.parser import Node, missing, scalar, sequence, string, parse_at\n",
-        "from bootstrap.formats import body_format\n",
-        "from bootstrap.scopes import BodyScope, body_scope, scope_walk, add_name\n",
-        "from bootstrap.declarations import DeclType, DeclParam, DeclSignature, DeclField, Declarations, declaration_error, docstring, named, integer_text, floating, float_key, direct_yield\n",
-    ):
-        bodies = remove_once(bodies, line)
+    source = declaration_bundle(entry=False)
+    source += "\n" + module_source("formats") + "\n" + module_source("scopes")
+    bodies = module_source("bodies")
     runtime, intrinsics, contract = configuration()
     helpers = runtime_functions(runtime)
     data = '\ndef body_runtime_tree() -> Node:\n    functions: list[Node] = []\n'
