@@ -18,6 +18,8 @@ jobs:
   compiler:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    outputs:
+      matrix: ${{ steps.targets.outputs.matrix }}
     env:
       SNEK_RUNTIME: node
     steps:
@@ -30,11 +32,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '25.9.0'
+      - name: Read supported packaging targets
+        id: targets
+        run: echo "matrix=$(python packaging/build_packages.py --matrix)" >> "$GITHUB_OUTPUT"
       - name: Build verified compiler from source
         run: |
           test ! -e bootstrap/build
           python bootstrap/bootstrap_compiler.py
-          python tests/check_selfhost_compiler.py
+          python tests/run_suites.py compiler
       - uses: actions/upload-artifact@v4
         with:
           name: native-compiler-proof
@@ -47,25 +52,7 @@ jobs:
     timeout-minutes: 40
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - os: macos-15
-            target: aarch64-apple-darwin
-            executable: snek
-          - os: macos-15-intel
-            target: x86_64-apple-darwin
-            executable: snek
-          - os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-            executable: snek
-            wheel_platform: manylinux_2_35_x86_64
-          - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            executable: snek
-            wheel_platform: manylinux_2_39_aarch64
-          - os: windows-2022
-            target: x86_64-pc-windows-msvc
-            executable: snek.exe
+      matrix: ${{ fromJSON(needs.compiler.outputs.matrix) }}
     defaults:
       run:
         shell: bash
@@ -98,12 +85,15 @@ jobs:
       - name: Verify embedded compiler without runtime JIT
         run: cargo +1.96.0 test --manifest-path native/Cargo.toml --release --locked
       - name: Native CLI and full language corpus
-        run: python tests/check_native.py --corpus
+        run: python tests/run_suites.py native
       - name: Benchmark harness regressions
         run: |
-          python tests/check_native_bench.py
-          python tests/check_compiler_profile.py
-          python tests/check_lazy_runtime.py
+          # Windows has no wait4; permit only that exact platform limitation.
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            python tests/run_suites.py tooling --allow-skip-reason 'requires POSIX wait4'
+          else
+            python tests/run_suites.py tooling
+          fi
       - name: Build npm and Python distributions
         run: python packaging/build_packages.py --binary native/target/release/${{ matrix.executable }} --target ${{ matrix.target }}
       - name: Check Linux wheel compatibility
@@ -116,7 +106,7 @@ jobs:
           mv "${wheels[0]}" "$RUNNER_TEMP/unrepaired/"
           cp "$RUNNER_TEMP/repaired/"*.whl dist/
       - name: Test npx, bunx and uvx offline
-        run: python tests/check_packages.py
+        run: python tests/run_suites.py packaging
       - uses: actions/upload-artifact@v4
         with:
           name: snek-lang-${{ matrix.target }}

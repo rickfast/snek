@@ -16,7 +16,7 @@ from snekc.formatting import parse_spec
 from snekc.types import STR, I64, F64, BOOL
 
 
-class LanguageTests(selfhost.SelfCheckTests):
+class LanguageCases:
     def test_expanded_examples(self):
         for name in ("caesar", "exceptions", "finally_flow", "format_specs", "fstring_fusion",
                      "hello", "inheritance", "named_unicode", "shapes", "special_methods",
@@ -225,6 +225,10 @@ print(outer()(), choose(True).__name__, choose(False).__name__)
                 result = base.runner.run_binary(self.wasm, stdin=source.encode())
                 self.assertNotEqual(result.code, 0)
                 self.assertEqual(result.stdout, b"")
+
+
+CASES = (*selfhost.CASES, LanguageCases)
+LanguageTests = base.checker_variant("LanguageTests", CASES, selfhost.RebuiltCheckerFixture)
 
 
 if __name__ == "__main__":

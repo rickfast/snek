@@ -142,7 +142,7 @@ def expression_records(value):
             yield from expression_records(child)
 
 
-class OrderedTests(runtime.RuntimeTests):
+class OrderedCases:
     def test_ordered_fixture(self):
         self.compare((base.ROOT / "examples/list_builtins.py").read_text())
 
@@ -235,6 +235,10 @@ class OrderedTests(runtime.RuntimeTests):
         self.assertEqual(result.code, 0, result.stderr.decode())
         self.assertEqual(result.stderr, b"")
         self.assertEqual(base.json.loads(result.stdout), base.check_source(SMOKE_SOURCE))
+
+
+CASES = (*runtime.CASES, OrderedCases)
+OrderedTests = base.checker_variant("OrderedTests", CASES)
 
 
 if __name__ == "__main__":

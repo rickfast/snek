@@ -199,7 +199,8 @@ UNPORTED = [
 ]
 
 
-class BodyTests(unittest.TestCase):
+class BodyFixture:
+    """Reusable seed-checker fixture and differential assertions; no test cases."""
     @classmethod
     def setUpClass(cls):
         cls.temp = tempfile.TemporaryDirectory(prefix="snek-body-tests-")
@@ -247,6 +248,8 @@ class BodyTests(unittest.TestCase):
             self.same_execution(self.executable(wat, True), expected)
         return owned
 
+
+class BodyCases:
     def test_scalar_fixture(self):
         self.compare((ROOT / "examples/scalar_checker.py").read_text())
         self.compare((ROOT / "examples/uncaught_keyerror.py").read_text())
@@ -436,6 +439,15 @@ print(f(), 9223372036854775807, -0x8000000000000000)
             result = subprocess.run(["wasm-tools", "validate", str(binary)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
         self.assertNotIn('"wasi_snapshot_preview1"', wat)
+
+
+def checker_variant(name, cases, fixture=BodyFixture):
+    """Compose an explicit case inventory with a seed or rebuilt checker fixture."""
+    return type(name, (*cases, fixture, unittest.TestCase), {"__module__": cases[-1].__module__})
+
+
+CASES = (BodyCases,)
+BodyTests = checker_variant("BodyTests", CASES)
 
 
 if __name__ == "__main__":

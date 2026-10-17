@@ -201,7 +201,7 @@ ERRORS = [
 ]
 
 
-class AggregateTests(base.BodyTests):
+class AggregateCases:
     def test_aggregate_fixture(self):
         self.compare((base.ROOT / "examples/aggregate_checker.py").read_text())
         self.compare((base.ROOT / "examples/lists.py").read_text())
@@ -282,6 +282,10 @@ class AggregateTests(base.BodyTests):
         if base.shutil.which("wasm-tools"):
             result = base.subprocess.run(["wasm-tools", "validate", str(binary)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
+
+
+CASES = (*base.CASES, AggregateCases)
+AggregateTests = base.checker_variant("AggregateTests", CASES)
 
 
 if __name__ == "__main__":
