@@ -111,7 +111,12 @@ def flatten(source: str, allowed_imports: tuple[str, ...], *, select: tuple[str,
             at = words.index("import")
             module = "".join(words[1:at])
             names = words[at + 1:]
-            if module not in allowed_imports or any(t == "as" or t == "*" or not (t.isidentifier() or t in (",", "(", ")")) for t in names):
+            if names and names[0] == "(" and names[-1] == ")":
+                names = names[1:-1]
+            valid = bool(names)
+            for index, name in enumerate(names):
+                valid = valid and ((name.isidentifier() and name != "as") if index % 2 == 0 else name == ",")
+            if module not in allowed_imports or not valid or (module == "__future__" and names != ["annotations"]):
                 raise ValueError("unapproved bundle import: " + " ".join(words))
             continue
         if words[0] in ("def", "class"):

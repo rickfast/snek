@@ -79,6 +79,7 @@ if __name__ == '__main__':
 
     def test_fail_closed(self):
         bad_sources = ["import os\n", "from os import path\n", "from allowed import *\n",
+                       "from allowed import ()\n", "from allowed import first second\n",
                        "from allowed import thing as other\n", "x = 3\n", "run()\n",
                        "@decorate\ndef f():\n    pass\n", "def f():\n    pass\ndef f():\n    pass\n"]
         for source in bad_sources:
