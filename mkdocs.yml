@@ -86,6 +86,7 @@ nav:
       - Examples: learn/examples.md
   - Language:
       - Overview: language/index.md
+      - Modules and imports: language/modules.md
       - Types and numbers: language/types.md
       - Functions and closures: language/functions.md
       - Classes and protocols: language/classes.md

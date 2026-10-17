@@ -24,6 +24,7 @@ snek --timings build program.snek
 | `build SOURCE [-o PATH]` | Write an unoptimized core Wasm module |
 | `run SOURCE [--env NAME[=VALUE]] -- [ARGS...]` | Compile and execute with embedded Wasmtime |
 | `--timings` | Emit a `SNEK_TIMINGS` JSON record on stderr |
+| `--module-root PATH` | Resolve local imports under this root; defaults to the entry file's directory |
 | `--version`, `--help` | Version and command help |
 
 The native CLI does not currently support `--component`, `--no-opt`, or
@@ -43,6 +44,7 @@ python -m snekc build program.snek --component
 | --- | --- | --- |
 | `--compiler python\|snek` | All | Reference compiler (default) or independent self-hosted compiler |
 | `--frontend cpython\|snek` | All | Parser selection within the Python reference pipeline |
+| `--module-root PATH` | All | Explicit local module/package root |
 | `-o PATH`, `--out PATH` | `build` | Explicit output path |
 | `--no-opt` | `build`, `run` | Skip Binaryen; encode core Wasm directly |
 | `--keep-wat` | `build` | Keep readable WAT beside the binary |
@@ -53,6 +55,11 @@ python -m snekc build program.snek --component
 Component builds also write a `.wit` file describing the imports and exports.
 `run` uses a temporary output directory. Put guest arguments after `--` to
 distinguish them from compiler options.
+
+For a package entry point, use e.g. `snek run app/main.py --module-root .`.
+Module projects use the shared Snek-owned parser/linker with either compiler;
+`--frontend` retains its existing meaning for standalone sources and reference
+runtime helpers. See [module rules](../language/modules.md).
 
 !!! note "Parser selection is not compiler selection"
     `--frontend snek` uses the Snek-written parser through the Python reference

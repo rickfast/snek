@@ -51,6 +51,12 @@ but test classes no longer inherit other test classes. The historical cumulative
 variants are retained deliberately: rebuilt variants repeat earlier semantics
 against their rebuilt checker rather than merely reusing a seed's result.
 
+`check_modules.py` runs local-module fixtures through the reference and
+self-hosted compilers, on core and component routes. It compares supported
+`.py` projects against CPython, checks namespace/initialization behavior and
+source diagnostics, and rejects ambiguous/escaping paths and source-overwriting
+outputs. Native CLI tests additionally exercise imports with an empty `PATH`.
+
 CI runs every registered script on pushes and pull requests. Its two independent
 full compiler bootstrap jobs start from a clean checkout with no restored compiler
 artifacts (Node and Python Wasmtime). Separate regression jobs cover the reference

@@ -65,9 +65,10 @@ class SuiteTests(unittest.TestCase):
     def test_failed_check_does_not_hide_later_checks(self):
         with patch.object(suites, "prerequisites"), \
              patch.object(suites.subprocess, "run") as run, redirect_stdout(io.StringIO()):
-            run.side_effect = [subprocess.CompletedProcess([], code) for code in (1, 0, 0, 0)]
+            count = len(suites.SUITES["reference"])
+            run.side_effect = [subprocess.CompletedProcess([], code) for code in [1] + [0] * (count - 1)]
             self.assertTrue(suites.main(["reference"]))
-            self.assertEqual(run.call_count, 4)
+            self.assertEqual(run.call_count, count)
 
     def script(self, source, **kwargs):
         with tempfile.TemporaryDirectory() as directory, redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):

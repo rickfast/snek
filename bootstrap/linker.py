@@ -22,6 +22,7 @@ MANIFEST = {
     "declarations": ("__future__", "snek", "bootstrap.parser", "bootstrap.encode"),
     "formats": ("__future__", "snek", "bootstrap.parser", "bootstrap.declarations"),
     "scopes": ("__future__", "bootstrap.parser", "bootstrap.declarations"),
+    "modules": ("__future__", "snek", "bootstrap.parser", "bootstrap.declarations", "bootstrap.scopes"),
     "bodies": ("__future__", "snek", "bootstrap.parser", "bootstrap.formats", "bootstrap.scopes", "bootstrap.declarations"),
     "emit_support": ("__future__", "snek", "bootstrap.declarations"),
     "emit_program": ("__future__", "snek", "bootstrap.parser", "bootstrap.declarations", "bootstrap.bodies", "bootstrap.emit_support", "snekc.runtime_abi"),

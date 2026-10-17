@@ -13,6 +13,8 @@ class CompileError(Exception):
         self.col: int | None = getattr(node, "col_offset", None)
 
     def format(self, filename: str, source: str | None = None) -> str:
+        filename = getattr(self, "filename", filename)
+        source = getattr(self, "source", source)
         loc = filename
         if self.lineno is not None:
             loc += f":{self.lineno}:{(self.col or 0) + 1}"

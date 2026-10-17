@@ -15,6 +15,7 @@ from .emit_wat import emit_module
 from .errors import CompileError
 from . import frontend as source_frontend
 from . import selfhost
+from .project import Project
 from .wasm import EncodeError, encode
 
 WASM_FEATURES = [
@@ -42,14 +43,35 @@ class Result:
 
 
 def compile_to_wat(source: str, filename: str = "<input>", *, component: bool = False,
-                   frontend: str | None = None, compiler: str | None = None) -> str:
+                   frontend: str | None = None, compiler: str | None = None,
+                   module_root: Path | None = None, _project: Project | None = None) -> str:
+    project = _project
+    if project is None and (module_root is not None or Path(filename).is_file()):
+        project = Project(Path(filename), source, module_root)
     if selfhost.selected(compiler):
         if frontend not in (None, "snek"):
             raise ValueError("the Snek compiler owns its frontend; --frontend cpython requires --compiler python")
+        if project:
+            wat = project.compile(wat=True, component=component).decode("utf-8")
+            if not wat.startswith("(module"):
+                raise RuntimeError("Snek compiler did not return core WAT")
+            return wat
         return selfhost.wat(source, component=component)
     selected = source_frontend.select(frontend)
-    tree = source_frontend.parse_source(source, filename, frontend=selected)
-    return emit_module(check_module(tree, frontend=selected), component=component)
+    if project:
+        owned = project.owned_tree()
+        tree = source_frontend.to_ast(owned)
+        # A single source keeps its chosen reference frontend unchanged.
+        if len(project.sources) == 1 and "." not in project.entry:
+            tree = source_frontend.parse_source(source, filename, frontend=selected)
+    else:
+        tree = source_frontend.parse_source(source, filename, frontend=selected)
+    try:
+        return emit_module(check_module(tree, frontend=selected), component=component)
+    except CompileError as error:
+        if project:
+            project.locate(error)
+        raise
 
 
 def find_wasm_opt() -> list[str]:
@@ -103,9 +125,11 @@ def wasm_tools(*args: str) -> str:
 
 
 def build(src: Path, out: Path | None = None, optimize: bool = True, keep_wat: bool = False,
-          *, component: bool = False, frontend: str | None = None, compiler: str | None = None) -> Result:
+          *, component: bool = False, frontend: str | None = None, compiler: str | None = None,
+          module_root: Path | None = None) -> Result:
     from . import component as cm
     source = src.read_text()
+    project = Project(src, source, module_root)
     options = {"compiler": compiler} if compiler is not None else {}
     out = out or src.with_suffix(".wasm")
     destinations = [out]
@@ -119,13 +143,17 @@ def build(src: Path, out: Path | None = None, optimize: bool = True, keep_wat: b
     direct = selfhost.selected(compiler) and not keep_wat and not component
     if direct and frontend not in (None, "snek"):
         raise ValueError("the Snek compiler owns its frontend; --frontend cpython requires --compiler python")
-    wat = None if direct else compile_to_wat(source, str(src), component=component, frontend=frontend, **options)
+    direct_binary = selfhost.core_binary(project.compile()) if direct else None
+    wat = None if direct else compile_to_wat(source, str(src), component=component, frontend=frontend, _project=project, **options)
+    if any(s.path in resolved for s in project.sources.values() if s.text is not None):
+        raise ToolError("output paths must not overwrite any project source")
     # Never use a neighboring source .wat as scratch space, nor leave a partial
     # artifact at the destination after an assembly/validation failure.
     with tempfile.TemporaryDirectory(prefix="snek-build-") as d:
         wat_path, binary = Path(d, "core.wat"), Path(d, "core.wasm")
         if direct:
-            write_binary(selfhost.compile(source), binary, optimize)
+            assert direct_binary is not None
+            write_binary(direct_binary, binary, optimize)
         else:
             assert wat is not None
             wat_path.write_text(wat)

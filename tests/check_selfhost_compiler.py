@@ -58,7 +58,8 @@ class SelfhostCompilerTests(unittest.TestCase):
             source.write_text(SMOKE_SOURCE)
             with patch.object(selfhost, "invoke", wraps=selfhost.invoke) as invoke:
                 result = driver.build(source, optimize=False, compiler="snek")
-            invoke.assert_called_once_with(SMOKE_SOURCE.encode(), [])
+            from snekc.project import Project
+            invoke.assert_called_once_with(Project(source, SMOKE_SOURCE).envelope().encode(), ["--project"])
             self.assertIsNone(result.wat)
             self.assertEqual(result.wasm_path.read_bytes(), selfhost.encode(selfhost.wat(SMOKE_SOURCE)))
             executed = runner.run_binary(result.wasm_path)

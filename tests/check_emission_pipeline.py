@@ -14,6 +14,7 @@ from bootstrap.build_bodies import check
 from bootstrap.emit_module import emit_source_module
 from snekc import driver, selfhost
 from snekc.errors import CompileError
+from snekc.project import Project
 from snekc.wasm import encode
 
 
@@ -55,7 +56,7 @@ class DirectBuildTests(unittest.TestCase):
              patch.object(driver, "encode", side_effect=AssertionError("host encoder")), \
              patch.object(driver, "find_wasm_opt", side_effect=AssertionError("optimizer")):
             result = driver.build(self.source, self.output, optimize=False, compiler="snek")
-        invoke.assert_called_once_with(self.source.read_bytes(), [])
+        invoke.assert_called_once_with(Project(self.source, self.source.read_text()).envelope().encode(), ["--project"])
         self.assertEqual(self.output.read_bytes(), self.binary)
         self.assertIsNone(result.wat)
         self.assertEqual(result.wasm_path, self.output)
@@ -64,7 +65,7 @@ class DirectBuildTests(unittest.TestCase):
         with patch.dict(os.environ, {"SNEK_COMPILER": "snek"}), \
              patch.object(selfhost, "invoke", return_value=self.binary) as invoke:
             driver.build(self.source, self.output, optimize=False)
-        invoke.assert_called_once_with(self.source.read_bytes(), [])
+        invoke.assert_called_once_with(Project(self.source, self.source.read_text()).envelope().encode(), ["--project"])
 
     def test_explicit_python_selection_retains_wat(self):
         with patch.dict(os.environ, {"SNEK_COMPILER": "snek"}), \
@@ -76,7 +77,7 @@ class DirectBuildTests(unittest.TestCase):
         with patch.object(selfhost, "invoke", side_effect=[b"(module)", self.binary]) as invoke:
             result = driver.build(self.source, self.output, optimize=False, keep_wat=True, compiler="snek")
         self.assertEqual([call.args for call in invoke.call_args_list],
-                         [(self.source.read_bytes(), ["--wat"]), (b"(module)", ["--encode"])])
+                         [(Project(self.source, self.source.read_text()).envelope().encode(), ["--project", "--wat"]), (b"(module)", ["--encode"])])
         self.assertEqual(result.wat, "(module)")
         self.assertEqual(self.output.with_suffix(".wat").read_text(), result.wat)
 

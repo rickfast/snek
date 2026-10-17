@@ -13,7 +13,7 @@ Python code compilable.
 | `i32`-sized values that later grow arbitrarily | Integers have fixed width and overflow wraps |
 | `T | None` for any type | Optional types are limited to reference values |
 | Numeric `dict.get(key)` | Supply a numeric default: `values.get(key, 0)` |
-| Arbitrary package imports | Only recognized type/library imports; no general module loader |
+| Arbitrary package imports | Local static modules/packages plus supported standard namespaces; no arbitrary Python packages |
 | `asyncio` task scheduling | Sequential typed coroutines, `run`, `checkpoint`, streams, and timers |
 | Relying on generator garbage collection for cleanup | Explicitly close unfinished generators |
 
@@ -21,9 +21,12 @@ Python code compilable.
 
 Supported namespaces include `snek.sys`, `snek.io`, `snek.os`, `snek.time`, and
 `snek.secrets`, plus recognized annotation imports such as `typing.Callable` and
-`typing.Iterator`. These are compile-time namespaces, not a general Python import
-system. You cannot bring in NumPy or a neighboring application module with an
-ordinary import and expect it to compile.
+`typing.Iterator`. You can also import neighboring application modules and
+packages containing supported Snek code. The default import root is the entry
+file's directory; use `--module-root` to select a project root. Keep modules as
+`.py` for normal CPython imports. These are compile-time namespaces, not a
+general Python import system: NumPy and arbitrary installed Python packages
+cannot be imported. See [modules and imports](../language/modules.md).
 
 ## Keep the useful similarities
 

@@ -62,7 +62,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(compile.call_count, 2)
         for call in compile.call_args_list:
             self.assertEqual(call.args, ("print(missing)\n", str(self.source)))
-            self.assertEqual(call.kwargs, {"frontend": "snek", "compiler": "python"})
+            self.assertEqual(call.kwargs, {"frontend": "snek", "compiler": "python", "module_root": None})
 
     def test_compile_error_reads_source_only_for_diagnostic(self):
         error = CompileError("unknown name 'missing'")

@@ -21,6 +21,7 @@ from .frontend import FRONTENDS
 
 def source_arguments(command: argparse.ArgumentParser) -> None:
     command.add_argument("src", type=Path)
+    command.add_argument("--module-root", type=Path, help="local import root (default: entry file's directory)")
     command.add_argument("--frontend", choices=FRONTENDS, help="source parser (default: SNEK_FRONTEND or cpython)")
     command.add_argument("--compiler", choices=("python", "snek"), help="compiler implementation (default: SNEK_COMPILER or python)")
 
@@ -61,22 +62,22 @@ def main(argv: list[str] | None = None) -> int:
         if ns.cmd in ("check", "wat"):
             source = ns.src.read_text()
         if ns.cmd == "check":
-            driver.compile_to_wat(source, str(ns.src), frontend=ns.frontend, compiler=ns.compiler)
+            driver.compile_to_wat(source, str(ns.src), frontend=ns.frontend, compiler=ns.compiler, module_root=ns.module_root)
             print(f"{ns.src}: ok")
             return 0
         if ns.cmd == "wat":
-            sys.stdout.write(driver.compile_to_wat(source, str(ns.src), frontend=ns.frontend, compiler=ns.compiler))
+            sys.stdout.write(driver.compile_to_wat(source, str(ns.src), frontend=ns.frontend, compiler=ns.compiler, module_root=ns.module_root))
             return 0
         if ns.cmd == "build":
             res = driver.build(ns.src, ns.out, optimize=not ns.no_opt, keep_wat=ns.keep_wat,
-                               component=ns.component, frontend=ns.frontend, compiler=ns.compiler)
+                               component=ns.component, frontend=ns.frontend, compiler=ns.compiler, module_root=ns.module_root)
             print(f"wrote {res.wasm_path} ({res.wasm_path.stat().st_size} bytes)")
             if res.wit_path:
                 print(f"wrote {res.wit_path}")
             return 0
         with tempfile.TemporaryDirectory() as d:
             wasm = Path(d, ns.src.stem + ".wasm")
-            driver.build(ns.src, wasm, optimize=not ns.no_opt, component=ns.component, frontend=ns.frontend, compiler=ns.compiler)
+            driver.build(ns.src, wasm, optimize=not ns.no_opt, component=ns.component, frontend=ns.frontend, compiler=ns.compiler, module_root=ns.module_root)
             res = runner.run_binary(wasm, args, stdin=None, env=grants)
         sys.stdout.buffer.write(res.stdout)
         sys.stderr.buffer.write(res.stderr)

@@ -2,6 +2,60 @@
 
 The goal is Python syntax with static semantics. A snek program should read as ordinary typed Python, run unchanged under CPython (with the `snek` shim), and compile to small, fast WasmGC modules without a Python runtime. Where Python's dynamic semantics and a static compiler disagree, snek rejects the program at compile time rather than silently behaving differently. The divergences that remain are listed at the end.
 
+## Modules and imports
+
+Programs can import local `.py` and `.snek` modules and packages. The compiler
+links the complete reachable program before checking and emitting a single
+Wasm module; there is no runtime Python import system or separate compilation.
+
+- **Root.** Both CLIs accept `--module-root PATH`. The default is the entry
+  file's directory, independent of the working directory. Absolute imports are
+  relative to this root, not `sys.path`, site-packages, or the ambient filesystem.
+  The entry and resolved sources must stay under the root; escaping symlinks
+  and multiple logical names for the same source are rejected.
+- **Files and packages.** `import geometry.point` can resolve
+  `geometry/__init__.py` and `geometry/point.py`, or their `.snek` equivalents.
+  Packages require an `__init__` file. If a name has more than one candidate
+  (`point.py` and `point.snek`, or a module and a package), resolution fails
+  rather than silently choosing one. Standard namespaces (`snek`, `typing`,
+  `collections`, `types`, `__future__`) are reserved.
+- **Bindings.** `import module`, dotted imports, `as` aliases, named `from`
+  imports, re-exports, and package-relative imports work. Functions and classes
+  retain separate module namespaces, including in annotations, inheritance,
+  closures and defaults. Imports bind static namespaces, not runtime module
+  objects. Local variables and parameters can shadow imports. Each module must
+  import its own annotation/library names; imports do not leak between files.
+- **Initialization.** Imports must be direct module-level statements. An
+  imported module's executable statements run once, at its first import, in
+  source order; package initializers run before their children. The entry has
+  `__name__ == "__main__"`; imported files use their dotted module names.
+  Imported `__main__` guards do not run. General import cycles are errors with
+  the dependency chain shown. An initializing package can import its children,
+  and those children can import siblings through the package.
+- **Static limits.** Exports are functions, classes and imported names.
+  Module-level variable/constant declarations remain unsupported, as do mutable
+  globals, module-attribute mutation, wildcard/conditional/function-local imports,
+  conditional module-level function/class declarations, dynamic imports and
+  namespace packages. As with single-file Snek, function and
+  class declarations are collected before body checking; this is not an
+  emulation of Python's dynamic declaration timing. Use functions and explicitly
+  passed objects for state. Keep files as `.py` when CPython should import them
+  without a custom loader.
+- **Implementation.** `bootstrap/modules.py` is Snek code and performs parsing,
+  namespace linking and initialization ordering. The reference compiler executes
+  it with the shim and adapts the owned tree; the independent compiler executes
+  it in Wasm. Project syntax is therefore parsed by the Snek-owned parser; a
+  single-file program without local imports retains its existing frontend.
+  The Python/Rust launchers only resolve requested paths and supply source text
+  through the versioned project envelope. Dependency source locations are
+  mapped back into diagnostics. Reading compilation inputs grants no filesystem
+  access to the resulting guest. The historical fixed bootstrap-bundle tool
+  remains separate and unchanged in purpose.
+
+See `examples/modules/main.py` for a multi-file program that also runs under
+CPython. Build it with `python -m snekc run examples/modules/main.py --no-opt`
+or `snek run examples/modules/main.py`.
+
 ## Types and inference
 
 - **Annotations.** Function signatures and class fields must be annotated. Locals are inferred from their first assignment and keep that type.
@@ -283,8 +337,8 @@ def __exit__(self, exc_type: type[BaseException] | None,
 static namespaces separately from user classes/functions. The checker maps
 stream operations to typed IR calls; an ordinary local with the same name takes
 lexical precedence. Module aliases and direct stream imports are supported;
-streams are first-class values with `snek.io` type annotations. A general module
-loader is deferred. The CPython shim supplies the same source API for
+streams are first-class values with `snek.io` type annotations. Local source
+modules use the static linker described above. The CPython shim supplies the same source API for
 differential tests.
 
 Text writes accept `str`, encode UTF-8 and return a code-point count. Binary

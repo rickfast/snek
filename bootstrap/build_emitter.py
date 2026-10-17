@@ -30,7 +30,7 @@ ENCODE_STEPS = (
 
 def bundle_source() -> str:
     parts = [module_source(name) for name in (
-        "runtime_abi", "emit_support", "emit_program", "emit_runtime", "emit_host",
+        "modules", "runtime_abi", "emit_support", "emit_program", "emit_runtime", "emit_host",
         "machine_lower", "machine_emit", "emit_suspension", "emit_module")]
     root = Path(__file__).resolve().parents[1]
     data = "\ndef emit_memory_source() -> str:\n    return " + repr((root / "snekc/abi_memory.wat").read_text()) + "\n"
@@ -53,17 +53,33 @@ def emitter_command() -> None:
     component = False
     text = False
     encoding = False
+    project = False
     for argument in sys.argv[1:]:
         if argument == "--component": component = True
         elif argument == "--wat": text = True
         elif argument == "--encode": encoding = True
+        elif argument == "--project": project = True
         else: raise ValueError("unknown compiler argument: " + argument)
     data = read_bytes()
     if encoding:
         write_bytes(wasm_encode(data))
         return
 '''
-    source += "".join("    " + statement + "\n" for _, statement in COMPILER_STEPS[1:])
+    for name, statement in COMPILER_STEPS[1:]:
+        if name == "parse_source":
+            source += '''    if project:
+        try:
+            module = module_project(source)
+        except ValueError as error:
+            if str(error).startswith("SNEK-MODULE-NEEDED "):
+                print(str(error))
+                return
+            raise
+    else:
+        module = parse(source)
+'''
+        else:
+            source += "    " + statement + "\n"
     if binary:
         source += '    if text:\n        print(wat, end="")\n        return\n'
         source += "".join("    " + statement + "\n" for _, statement in ENCODE_STEPS)

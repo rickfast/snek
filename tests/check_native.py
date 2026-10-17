@@ -104,6 +104,37 @@ class NativeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(output.read_bytes(), (ROOT / "bootstrap/build/compiler.stage3.wasm").read_bytes())
 
+    def test_local_modules_without_external_dependencies(self):
+        self.source.write_text('from pkg.helper import answer\nprint(answer())\n')
+        package = self.root / "pkg"
+        package.mkdir()
+        (package / "__init__.py").write_text('print("package")\n')
+        helper = package / "helper.py"
+        helper.write_text('from snek import i32\ndef answer() -> i32:\n    return 42\n')
+        result = self.cli("run", self.source)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b"package\n42\n", b""))
+        original = helper.read_bytes()
+        result = self.cli("build", self.source, "-o", helper)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn(b"project source", result.stderr)
+        self.assertEqual(helper.read_bytes(), original)
+
+    def test_module_errors_and_explicit_root(self):
+        package = self.root / "pkg"
+        package.mkdir()
+        (package / "__init__.py").write_text("")
+        entry = package / "main.py"
+        entry.write_text('from .helper import answer\nprint(answer())\n')
+        helper = package / "helper.snek"
+        helper.write_text('from snek import i32\ndef answer() -> i32:\n    return 42\n')
+        result = self.cli("run", entry, "--module-root", self.root)
+        self.assertEqual((result.returncode, result.stdout, result.stderr), (0, b"42\n", b""))
+        helper.write_text('def answer() -> None:\n    print(missing)\n')
+        result = self.cli("check", entry, "--module-root", self.root)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(b"helper.snek: line 2", result.stderr)
+        self.assertIn(b"missing", result.stderr)
+
 
 def corpus():
     """Execute the same positive and negative corpus as the reference CLI."""

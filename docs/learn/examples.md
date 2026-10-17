@@ -1,5 +1,15 @@
 # Examples
 
+For a multi-file application, run this from the checkout:
+
+```sh
+python -m snekc run examples/modules/main.py --no-opt
+```
+
+Its `geometry` package demonstrates classes,
+relative imports and re-exports; the unchanged `.py` sources also run under
+CPython with the Snek shim. See [modules and imports](../language/modules.md).
+
 The repository's examples are executable regression fixtures. Most can be run
 with either compiler, and the core/component corpus compares supported behavior
 against CPython.

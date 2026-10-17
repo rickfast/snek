@@ -358,6 +358,10 @@ is built by the Python compiler. Before publishing `declarations.bundle.py` and
 `declarations.wasm` into `bootstrap/build/`, the script executes the Wasm pass
 on its own bundled source and requires exact JSON parity with the shim.
 
+This historical build tool is separate from `bootstrap/modules.py`, the static
+application-module linker now embedded in the full compiler. Both CLIs can
+compile ordinary local module projects; see [module rules](../DESIGN.md#modules-and-imports).
+
 The standalone command reads UTF-8 source and prints versioned declaration IR.
 Function/method bodies and module statements remain owned syntax trees in the
 in-memory model; JSON reports signatures/layouts and the main-statement count,

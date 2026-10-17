@@ -59,9 +59,13 @@ WasmGC does not emulate CPython's refcount-triggered finalization.
 
 ## My Python dependency does not import
 
-Snek has no general module/package loader. Only supported type and library
-namespaces are recognized. An annotation does not make a Python dependency
-compatible with the static language.
+Local source modules and packages work when their code is in Snek's supported
+subset. Imports are resolved under the entry directory, or `--module-root PATH`,
+not Python's installed packages. Check that packages contain `__init__.py` or
+`__init__.snek`, and that a module does not have competing `.py` and `.snek`
+files. Import cycles, wildcard imports and dynamic imports are rejected. An
+annotation does not make an arbitrary Python dependency compatible with Snek.
+See [modules and imports](../language/modules.md).
 
 ## Report a compiler problem
 

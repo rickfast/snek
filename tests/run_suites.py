@@ -35,6 +35,10 @@ CHECKS = {
     )
 }
 CHECKS.update({
+    "modules": Check("check_modules.py", ("runtime",)),
+    "selfhost-modules": Check("check_modules.py", ("runtime", "compiler"), "snek"),
+    "module-components": Check("check_modules.py", ("component-tools",), args=("--component",)),
+    "selfhost-module-components": Check("check_modules.py", ("component-tools", "compiler"), "snek", ("--component",)),
     "benchmarks": Check("check_benchmarks.py", ("node", "wasmtime-py")),
     "wasm": Check("check_wasm.py", ("wasm-tools",)),
     **{name: Check("check_" + name + ".py", ("runtime", "optimizer")) for name in (
@@ -64,13 +68,13 @@ CHECKS.update({
 SUITES = {
     "fast": ("suites", "closures", "keyed_builtins", "lazy_runtime", "wasm", "benchmarks", "native_bench", "compiler_profile", "tooling", "linker", "emission_pipeline", "cli", "runtime_abi", "body_context"),
     "tooling": ("suites", "native_bench", "compiler_profile", "lazy_runtime", "tooling"),
-    "reference": ("reference-corpus", "byte_io", "formatting", "string_fusion"),
+    "reference": ("reference-corpus", "modules", "byte_io", "formatting", "string_fusion"),
     "bootstrap": ("parser", "frontend", "declarations", "bootstrap", "emitter_support", "machine_lowering"),
     "checkers": ("bodies", "aggregate_bodies", "runtime_bodies", "ordered_bodies", "selfhost_bodies", "language_bodies"),
     "compiler": ("selfhost_compiler",),
-    "selfhost": ("selfhost_compiler", "lazy_runtime", "selfhost-corpus"),
-    "components": ("components", "stdlib", "host_library", "component_lifecycle"),
-    "selfhost-components": ("selfhost-component-corpus", "selfhost_components", "selfhost-component-lifecycle"),
+    "selfhost": ("selfhost_compiler", "selfhost-modules", "lazy_runtime", "selfhost-corpus"),
+    "components": ("components", "module-components", "stdlib", "host_library", "component_lifecycle"),
+    "selfhost-components": ("selfhost-component-corpus", "selfhost-module-components", "selfhost_components", "selfhost-component-lifecycle"),
     "checker-components": ("language_components",),
     "native": ("native",),
     "packaging": ("packages",),

@@ -5,6 +5,7 @@ known before execution. There is no embedded Python interpreter in generated cod
 
 | Topic | Includes |
 | --- | --- |
+| [Modules and imports](modules.md) | Local files, packages, relative imports, aliases, initialization |
 | [Types and numbers](types.md) | Annotations, local inference, machine widths, conversions, optionals |
 | [Functions and closures](functions.md) | Defaults, keyword binding, callable values, shared captures |
 | [Classes and protocols](classes.md) | Fields, inheritance, initialization, equality, context managers |

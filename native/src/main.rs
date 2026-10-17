@@ -1,7 +1,6 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use std::{
-    fs,
     io::Write,
     path::{Path, PathBuf},
     time::Instant,
@@ -15,6 +14,7 @@ use wasmtime_wasi::{
 
 #[path = "../engine_config.rs"]
 mod engine_config;
+mod project;
 
 const COMPILER: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/compiler.cwasm"));
 
@@ -35,6 +35,9 @@ fn load_compiler(engine: &Engine) -> Result<Module> {
     about = "Compile and run Snek without an external Wasm runtime"
 )]
 struct Cli {
+    /// Root for local modules and packages (default: entry file's directory).
+    #[arg(long, global = true)]
+    module_root: Option<PathBuf>,
     /// Report internal phase timings as JSON on stderr (for benchmarking).
     #[arg(long, global = true)]
     timings: bool,
@@ -112,42 +115,67 @@ fn invoke(
 
 fn compile(
     engine: &Engine,
-    path: &Path,
+    project: &mut project::Project,
     wat: bool,
     timings: &mut Timings,
 ) -> Result<Option<Vec<u8>>> {
-    let source = fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
-    std::str::from_utf8(&source).context("source must be UTF-8")?;
+    let start = Instant::now();
+    let module = load_compiler(engine)?;
+    timings.compiler_load_ms = elapsed_ms(start);
+    loop {
+        let Some(bytes) = compiler_request(
+            engine,
+            &module,
+            project,
+            if wat { "--wat" } else { "--project" },
+            timings,
+        )?
+        else {
+            return Ok(None);
+        };
+        if let Some(request) = bytes.strip_prefix(b"SNEK-MODULE-NEEDED ") {
+            project.add(std::str::from_utf8(request)?.trim())?;
+            continue;
+        }
+        if !(if wat {
+            bytes.starts_with(b"(module")
+        } else {
+            bytes.starts_with(b"\0asm\x01\0\0\0")
+        }) {
+            bail!("embedded compiler returned invalid output");
+        }
+        return Ok(Some(bytes));
+    }
+}
+
+fn compiler_request(
+    engine: &Engine,
+    module: &Module,
+    project: &project::Project,
+    mode: &str,
+    timings: &mut Timings,
+) -> Result<Option<Vec<u8>>> {
     let stdout = MemoryOutputPipe::new(256 * 1024 * 1024);
     let stderr = MemoryOutputPipe::new(1024 * 1024);
     let mut wasi = WasiCtxBuilder::new();
     wasi.arg("snek-compiler")
-        .stdin(MemoryInputPipe::new(source))
+        .arg("--project")
+        .arg(mode)
+        .stdin(MemoryInputPipe::new(project.envelope()?))
         .stdout(stdout.clone())
         .stderr(stderr.clone());
-    if wat {
-        wasi.arg("--wat");
-    }
-    let start = Instant::now();
-    let module = load_compiler(engine)?;
-    timings.compiler_load_ms = elapsed_ms(start);
-    let status = invoke(engine, &module, wasi.build_p1(), &mut timings.compiler)
+    let mut request_timings = ExecutionTimings::default();
+    let status = invoke(engine, module, wasi.build_p1(), &mut request_timings)
         .context("embedded compiler trapped")?;
+    timings.compiler.instantiate_ms += request_timings.instantiate_ms;
+    timings.compiler.execute_ms += request_timings.execute_ms;
     let diagnostic = stderr.contents();
     if status != 0 || !diagnostic.is_empty() {
         let message = String::from_utf8_lossy(&diagnostic);
-        eprintln!("{}: {}", path.display(), message.trim());
+        eprintln!("{}", project.diagnostic(message.trim()));
         return Ok(None);
     }
-    let output = stdout.contents().to_vec();
-    if !(if wat {
-        output.starts_with(b"(module")
-    } else {
-        output.starts_with(b"\0asm\x01\0\0\0")
-    }) {
-        bail!("embedded compiler returned invalid output");
-    }
-    Ok(Some(output))
+    Ok(Some(stdout.contents().to_vec()))
 }
 
 fn write_output(source: &Path, destination: &Path, bytes: &[u8]) -> Result<()> {
@@ -184,12 +212,14 @@ fn run(cli: Cli, timings: &mut Timings) -> Result<i32> {
         }
         Command::Wat { source } => (source, true),
     };
-    let Some(output) = compile(&engine, source, wat, timings)? else {
+    let mut project = project::Project::new(source, cli.module_root.as_deref())?;
+    let Some(output) = compile(&engine, &mut project, wat, timings)? else {
         return Ok(1);
     };
     match cli.command {
         Command::Build { source, out } => {
             let out = out.unwrap_or_else(|| source.with_extension("wasm"));
+            project.check_output(&out)?;
             write_output(&source, &out, &output)?;
             eprintln!("wrote {} ({} bytes)", out.display(), output.len());
         }
@@ -258,6 +288,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn embedded_compiler_runs_without_a_jit() -> Result<()> {
@@ -266,7 +297,8 @@ mod tests {
         let engine = Engine::new(&config)?;
         let source = tempfile::NamedTempFile::new()?;
         fs::write(source.path(), b"print(42)\n")?;
-        let output = compile(&engine, source.path(), false, &mut Timings::default())?;
+        let mut project = project::Project::new(source.path(), None)?;
+        let output = compile(&engine, &mut project, false, &mut Timings::default())?;
         assert!(output.unwrap().starts_with(b"\0asm\x01\0\0\0"));
         Ok(())
     }

@@ -157,6 +157,12 @@ The IR is the language/backend seam. WAT remains the shared instruction represen
 
 ## What works
 
+- **Local modules and packages.** Ordinary imports, aliases, relative imports and
+  re-exports of functions/classes from `.py` or `.snek` files. Package initialization
+  runs once; cycles, ambiguous paths and root escapes are diagnosed. Both CLIs
+  accept `--module-root`; the default is the entry file's directory. Try
+  `python -m snekc run examples/modules/main.py --no-opt`. See
+  [module rules](DESIGN.md#modules-and-imports) for the static subset and limits.
 - **Machine numerics.** `i32`, `i64`, `f32`, `f64` and `bool`, with Python's `//` and `%` semantics.
   - Integer overflow wraps.
   - Float→int conversions raise like `int()`.
@@ -373,3 +379,4 @@ The suite now covers eleven workloads, including dictionaries, list builtins, pr
 6. **Done: typed closures and lambdas.** A typed funcref paired with a GC environment of shared cells, with `nonlocal` and escaping captures. Callable `key=` for sorting/extrema is implemented too. See [DESIGN.md](DESIGN.md#closures-and-callable-values) for the supported subset.
 7. **Done: own core binary encoder.** `--no-opt` builds need only Python; `wasm-opt` is used only for optimization. Component packaging still uses `wasm-tools`. See [DESIGN.md](DESIGN.md#native-binary-encoding).
 8. **Done: self-hosting.** The independent compiler consumes its unchanged Snek source and emits byte-identical stage-2 and stage-3 compiler binaries. Parsing, checking, closure/suspension lowering, runtime and Unicode generation, ordinary emission, module assembly and core binary encoding run in Snek, with Python compiler entry points disabled during the proof. `--compiler snek` supports core and component builds; Python remains the default reference implementation. Component packaging still uses the host linker and `wasm-tools`. See [`bootstrap/`](bootstrap/README.md) for reproducible proof and regression commands.
+9. **Done: local modules and packages.** Static local imports, aliases, relative imports, function/class re-exports and initialization ordering work through the shared Snek-owned linker, in both compilers and the native CLI. `--module-root` selects the source root. See [module rules](DESIGN.md#modules-and-imports); dynamic imports, module globals and package registry resolution remain out of scope.

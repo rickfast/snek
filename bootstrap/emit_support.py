@@ -298,7 +298,7 @@ class EmitTypes:
         out: list[str] = []
         for name in decl.class_order:
             cls = decl.classes[name]
-            data = emit_utf8(name)
+            data = emit_utf8(name.split(":")[-1] if name.startswith("@user:") else name)
             chars: list[str] = []
             for byte in data: chars.append(f"(i32.const {byte})")
             out.append(f"  (global ${name}.name (ref $str) (struct.new $str "

@@ -460,7 +460,7 @@ class Emitter(CollectionEmitter, ProtocolEmitter, MachineEmitter, ClosureEmitter
         out = []
         for cls in self.m.classes:
             # Constant-expression string for the class name (array.new_fixed is a const op).
-            data = cls.name.encode()
+            data = (cls.name.rsplit(":", 1)[-1] if cls.name.startswith("@user:") else cls.name).encode()
             chars = " ".join(f"(i32.const {b})" for b in data)
             out.append(f"  (global ${cls.name}.name (ref $str) (struct.new $str "
                        f"(array.new_fixed $u8s {len(data)} {chars}) (i32.const 0) (i32.const {len(data)}) "
