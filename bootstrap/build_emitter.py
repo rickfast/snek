@@ -30,7 +30,7 @@ ENCODE_STEPS = (
 
 def bundle_source() -> str:
     parts = [module_source(name) for name in (
-        "emit_support", "emit_program", "emit_runtime", "emit_host",
+        "runtime_abi", "emit_support", "emit_program", "emit_runtime", "emit_host",
         "machine_lower", "machine_emit", "emit_suspension", "emit_module")]
     root = Path(__file__).resolve().parents[1]
     data = "\ndef emit_memory_source() -> str:\n    return " + repr((root / "snekc/abi_memory.wat").read_text()) + "\n"

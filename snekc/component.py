@@ -7,36 +7,15 @@ Snek encodes the enclosed core program first, optionally optimizing it with Bina
 from pathlib import Path
 
 from . import wasi_bindings as library
+from .runtime_abi import abi_component_base_imports, abi_component_input_imports
 
 WIT = Path(__file__).with_name("wit")
 RUNTIME = Path(__file__).with_name("component_runtime.wat")
 INPUT_RUNTIME = Path(__file__).with_name("component_input.wat")
 
 # Core imports implemented by canonical built-ins or lowered WASI functions.
-IMPORTS = {
-    "stdout": "(param i32) (result i32)",
-    "stderr": "(param i32) (result i32)",
-    "exit": "(param i32)",
-    "stream-new": "(result i64)",
-    "stream-write": "(param i32 i32 i32) (result i32)",
-    "stream-drop": "(param i32)",
-    "future-read": "(param i32 i32) (result i32)",
-    "future-drop": "(param i32)",
-    "set-new": "(result i32)",
-    "set-drop": "(param i32)",
-    "join": "(param i32 i32)",
-    "task-return": "(param i32)",
-    "task-cancel": "",
-}
-
-
-INPUT_IMPORTS = {
-    "stdin": "(param i32)",
-    "stream-read": "(param i32 i32 i32) (result i32)",
-    "stream-drop-reader": "(param i32)",
-    "stream-cancel-read": "(param i32) (result i32)",
-    "future-cancel-read": "(param i32) (result i32)",
-}
+IMPORTS = abi_component_base_imports()
+INPUT_IMPORTS = abi_component_input_imports()
 
 
 def core_imports(*, stdin=False, features=()):

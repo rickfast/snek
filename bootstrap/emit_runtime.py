@@ -139,7 +139,22 @@ def emit_list_operation(self: SourceEmitter, m: str, t: DeclType, op: str) -> st
     elif op == 'insert':
         body = f"(param $l (ref {L})) (param $i i32) (param $v {R})\n    (local $n i32) (local $d (ref {A}))\n    (local.set $n {LEN})\n    {clamp('$i')}\n    (if (i32.gt_s (local.get $i) (local.get $n)) (then (local.set $i (local.get $n))))\n    (call {L}.append (local.get $l) (local.get $v))\n    (local.set $d {DATA})\n    (array.copy {A} {A} (local.get $d) (i32.add (local.get $i) (i32.const 1)) (local.get $d) (local.get $i)\n                (i32.sub (local.get $n) (local.get $i)))\n    (array.set {A} (local.get $d) (local.get $i) (local.get $v)))"
     elif op == 'extend':
-        body = f'(param $l (ref {L})) (param $o (ref {L}))\n    (local $n i32) (local $k i32) (local $need i32) (local $cap i32) (local $d (ref {A})) (local $g (ref null {A}))\n    (local.set $n {LEN})\n    (local.set $k (struct.get {L} $len (local.get $o)))  ;; before growing: o may be l itself\n    (local.set $need (i32.add (local.get $n) (local.get $k)))\n    (local.set $d {DATA})\n    (if (i32.gt_u (local.get $need) (array.len (local.get $d)))\n      (then\n        (local.set $cap (i32.shl (array.len (local.get $d)) (i32.const 1)))\n        (if (i32.lt_u (local.get $cap) (local.get $need)) (then (local.set $cap (local.get $need))))\n        (local.set $g (array.new_default {A} (local.get $cap)))\n        (array.copy {A} {A} (local.get $g) (i32.const 0) (local.get $d) (i32.const 0) (local.get $n))\n        (local.set $d (ref.as_non_null (local.get $g)))\n        (struct.set {L} $data (local.get $l) (local.get $d))))\n    (array.copy {A} {A} (local.get $d) (local.get $n) (struct.get {L} $data (local.get $o)) (i32.const 0) (local.get $k))\n    (struct.set {L} $len (local.get $l) (local.get $need)))'
+        body = f'''(param $l (ref {L})) (param $o (ref {L}))
+    (local $n i32) (local $k i32) (local $need i32) (local $cap i32) (local $d (ref {A})) (local $g (ref null {A}))
+    (local.set $n {LEN})
+    (local.set $k (struct.get {L} $len (local.get $o)))  ;; before growing: o may be l itself
+    (local.set $need (i32.add (local.get $n) (local.get $k)))
+    (local.set $d {DATA})
+    (if (i32.gt_u (local.get $need) (array.len (local.get $d)))
+      (then
+        (local.set $cap (i32.shl (array.len (local.get $d)) (i32.const 1)))
+        (if (i32.lt_u (local.get $cap) (local.get $need)) (then (local.set $cap (local.get $need))))
+        (local.set $g (array.new_default {A} (local.get $cap)))
+        (array.copy {A} {A} (local.get $g) (i32.const 0) (local.get $d) (i32.const 0) (local.get $n))
+        (local.set $d (ref.as_non_null (local.get $g)))
+        (struct.set {L} $data (local.get $l) (local.get $d))))
+    (array.copy {A} {A} (local.get $d) (local.get $n) (struct.get {L} $data (local.get $o)) (i32.const 0) (local.get $k))
+    (struct.set {L} $len (local.get $l) (local.get $need)))'''
     elif op == 'remove':
         self.operation(t, 'find')
         body = f"(param $l (ref {L})) (param $v {R})\n    (local $i i32) (local $n i32) (local $d (ref {A}))\n    (local.set $i (call {L}.find (local.get $l) (local.get $v) (i32.const 0) (i32.const 0x7FFFFFFF)))\n    (if (i32.lt_s (local.get $i) (i32.const 0))\n      (then {self.error('ValueError', 'list.remove(x): x not in list')}))\n    (if (i32.ge_u (local.get $i) {LEN}) (then (return)))  ;; __eq__ may have shrunk the list\n    (local.set $n (i32.sub {LEN} (i32.const 1)))\n    (local.set $d {DATA})\n    {shift_down}\n    {clear}\n    (struct.set {L} $len (local.get $l) (local.get $n)))"
@@ -176,7 +191,40 @@ def emit_list_basic(self: SourceEmitter, m: str, t: DeclType) -> str:
     oob = self.error('IndexError', 'list index out of range')
     oob_set = self.error('IndexError', 'list assignment index out of range')
     empty = self.error('IndexError', 'pop from empty list')
-    code = f'  (func $list.{m}.get (param $l (ref $list.{m})) (param $i i32) (result {R})\n    (local $n i32)\n    (local.set $n (struct.get $list.{m} $len (local.get $l)))\n    (if (i32.lt_s (local.get $i) (i32.const 0)) (then (local.set $i (i32.add (local.get $i) (local.get $n)))))\n    (if (i32.ge_u (local.get $i) (local.get $n)) (then {oob}))\n    {load})\n  (func $list.{m}.set (param $l (ref $list.{m})) (param $i i32) (param $v {R})\n    (local $n i32)\n    (local.set $n (struct.get $list.{m} $len (local.get $l)))\n    (if (i32.lt_s (local.get $i) (i32.const 0)) (then (local.set $i (i32.add (local.get $i) (local.get $n)))))\n    (if (i32.ge_u (local.get $i) (local.get $n)) (then {oob_set}))\n    (array.set $arr.{m} (struct.get $list.{m} $data (local.get $l)) (local.get $i) (local.get $v)))\n  (func $list.{m}.append (param $l (ref $list.{m})) (param $v {R})\n    (local $n i32) (local $d (ref $arr.{m})) (local $grown (ref null $arr.{m}))\n    (local.set $n (struct.get $list.{m} $len (local.get $l)))\n    (local.set $d (struct.get $list.{m} $data (local.get $l)))\n    (if (i32.eq (local.get $n) (array.len (local.get $d)))\n      (then\n        (local.set $grown (array.new_default $arr.{m}\n          (select (i32.const 4) (i32.shl (local.get $n) (i32.const 1)) (i32.lt_u (local.get $n) (i32.const 2)))))\n        (array.copy $arr.{m} $arr.{m} (local.get $grown) (i32.const 0) (local.get $d) (i32.const 0) (local.get $n))\n        (local.set $d (ref.as_non_null (local.get $grown)))\n        (struct.set $list.{m} $data (local.get $l) (local.get $d))))\n    (array.set $arr.{m} (local.get $d) (local.get $n) (local.get $v))\n    (struct.set $list.{m} $len (local.get $l) (i32.add (local.get $n) (i32.const 1))))\n  (func $list.{m}.pop (param $l (ref $list.{m})) (result {R})\n    (local $n i32) (local $d (ref $arr.{m})) (local $v {self.types.storage(e)})\n    (local.set $n (struct.get $list.{m} $len (local.get $l)))\n    (if (i32.eqz (local.get $n)) (then {empty}))\n    (local.set $n (i32.sub (local.get $n) (i32.const 1)))\n    (local.set $d (struct.get $list.{m} $data (local.get $l)))\n    (local.set $v ({get} $arr.{m} (local.get $d) (local.get $n))){clear}\n    (struct.set $list.{m} $len (local.get $l) (local.get $n))\n    {pop_val})'
+    code = f'''  (func $list.{m}.get (param $l (ref $list.{m})) (param $i i32) (result {R})
+    (local $n i32)
+    (local.set $n (struct.get $list.{m} $len (local.get $l)))
+    (if (i32.lt_s (local.get $i) (i32.const 0)) (then (local.set $i (i32.add (local.get $i) (local.get $n)))))
+    (if (i32.ge_u (local.get $i) (local.get $n)) (then {oob}))
+    {load})
+  (func $list.{m}.set (param $l (ref $list.{m})) (param $i i32) (param $v {R})
+    (local $n i32)
+    (local.set $n (struct.get $list.{m} $len (local.get $l)))
+    (if (i32.lt_s (local.get $i) (i32.const 0)) (then (local.set $i (i32.add (local.get $i) (local.get $n)))))
+    (if (i32.ge_u (local.get $i) (local.get $n)) (then {oob_set}))
+    (array.set $arr.{m} (struct.get $list.{m} $data (local.get $l)) (local.get $i) (local.get $v)))
+  (func $list.{m}.append (param $l (ref $list.{m})) (param $v {R})
+    (local $n i32) (local $d (ref $arr.{m})) (local $grown (ref null $arr.{m}))
+    (local.set $n (struct.get $list.{m} $len (local.get $l)))
+    (local.set $d (struct.get $list.{m} $data (local.get $l)))
+    (if (i32.eq (local.get $n) (array.len (local.get $d)))
+      (then
+        (local.set $grown (array.new_default $arr.{m}
+          (select (i32.const 4) (i32.shl (local.get $n) (i32.const 1)) (i32.lt_u (local.get $n) (i32.const 2)))))
+        (array.copy $arr.{m} $arr.{m} (local.get $grown) (i32.const 0) (local.get $d) (i32.const 0) (local.get $n))
+        (local.set $d (ref.as_non_null (local.get $grown)))
+        (struct.set $list.{m} $data (local.get $l) (local.get $d))))
+    (array.set $arr.{m} (local.get $d) (local.get $n) (local.get $v))
+    (struct.set $list.{m} $len (local.get $l) (i32.add (local.get $n) (i32.const 1))))
+  (func $list.{m}.pop (param $l (ref $list.{m})) (result {R})
+    (local $n i32) (local $d (ref $arr.{m})) (local $v {self.types.storage(e)})
+    (local.set $n (struct.get $list.{m} $len (local.get $l)))
+    (if (i32.eqz (local.get $n)) (then {empty}))
+    (local.set $n (i32.sub (local.get $n) (i32.const 1)))
+    (local.set $d (struct.get $list.{m} $data (local.get $l)))
+    (local.set $v ({get} $arr.{m} (local.get $d) (local.get $n))){clear}
+    (struct.set $list.{m} $len (local.get $l) (local.get $n))
+    {pop_val})'''
     if self.checked.has_repr(e):
         item = self.to_string(e, f'(call $list.{m}.get (local.get $l) (local.get $i))', True)
         code += f"\n  (func $list.{m}.to_str (param $l (ref $list.{m})) (result (ref $str))\n    (local $s (ref null $str)) (local $i i32) (local $n i32)\n    (local.set $s {self.literals.lit('[')})\n    (local.set $n (struct.get $list.{m} $len (local.get $l)))\n    (block $done\n      (loop $next\n        (br_if $done (i32.ge_u (local.get $i) (local.get $n)))\n        (if (local.get $i)\n          (then (local.set $s (call $rt.str_concat (ref.as_non_null (local.get $s)) {self.literals.lit(', ')}))))\n        (local.set $s (call $rt.str_concat (ref.as_non_null (local.get $s)) {item}))\n        (local.set $i (i32.add (local.get $i) (i32.const 1)))\n        (br $next)))\n    (call $rt.str_concat (ref.as_non_null (local.get $s)) {self.literals.lit(']')}))"
@@ -201,7 +249,72 @@ def emit_dict_core(self: SourceEmitter, t: DeclType) -> str:
     K, V = (self.types.valtype(t.args[0]), self.types.valtype(t.args[1]))
     key_hash = emit_hash(self, t.args[0], '(local.get $k)')
     same = self.equal(t.args[0], f'(struct.get {E} $key (local.get $e))', '(local.get $k)')
-    return f'  (func {D}.new (result (ref {D}))\n    (struct.new {D} (i32.const 0) (i32.const 0)\n      (array.new_default $u32s (i32.const 8)) (array.new_default {A} (i32.const 4)) (i32.const 0)))\n  (func {D}.find (param $d (ref {D})) (param $k {K}) (result i32)\n    (local $slots (ref $u32s)) (local $mask i32) (local $p i32) (local $n i32) (local $free i32)\n    (local $e (ref {E}))\n    (local.set $slots (struct.get {D} $slots (local.get $d)))\n    (local.set $mask (i32.sub (array.len (local.get $slots)) (i32.const 1)))\n    (local.set $p (i32.and {key_hash} (local.get $mask)))\n    (local.set $free (i32.const -1))\n    (loop $probe\n      (local.set $n (array.get $u32s (local.get $slots) (local.get $p)))\n      (if (i32.eqz (local.get $n))\n        (then (return (select (local.get $free) (local.get $p) (i32.ge_s (local.get $free) (i32.const 0))))))\n      (if (i32.eq (local.get $n) (i32.const -1))\n        (then (if (i32.lt_s (local.get $free) (i32.const 0)) (then (local.set $free (local.get $p)))))\n        (else\n          (local.set $e (ref.as_non_null (array.get {A} (struct.get {D} $entries (local.get $d))\n            (i32.sub (local.get $n) (i32.const 1)))))\n          (if {same} (then (return (local.get $p))))))\n      (local.set $p (i32.and (i32.add (local.get $p) (i32.const 1)) (local.get $mask)))\n      (br $probe))\n    (unreachable))\n  (func {D}.grow (param $d (ref {D}))\n    (local $old (ref {A})) (local $entries (ref {A})) (local $slots (ref $u32s))\n    (local $i i32) (local $j i32) (local $n i32) (local $p i32) (local $cap i32) (local $compact i32)\n    (local $e (ref null {E}))\n    (local.set $old (struct.get {D} $entries (local.get $d)))\n    (local.set $n (struct.get {D} $used (local.get $d)))\n    (local.set $compact (i32.eqz (struct.get {D} $iters (local.get $d))))\n    (local.set $cap (array.len (local.get $old)))\n    (if (i32.or (i32.eqz (local.get $compact))\n          (i32.ge_u (struct.get {D} $len (local.get $d)) (i32.shr_u (local.get $cap) (i32.const 1))))\n      (then (local.set $cap (i32.shl (local.get $cap) (i32.const 1)))))\n    (local.set $entries (array.new_default {A} (local.get $cap)))\n    (local.set $slots (array.new_default $u32s (i32.shl (array.len (local.get $entries)) (i32.const 1))))\n    (struct.set {D} $entries (local.get $d) (local.get $entries))\n    (struct.set {D} $slots (local.get $d) (local.get $slots))\n    (block $done (loop $next\n      (br_if $done (i32.ge_u (local.get $i) (local.get $n)))\n      (local.set $e (array.get {A} (local.get $old) (local.get $i)))\n      (if (i32.eqz (ref.is_null (local.get $e))) (then\n        (if (i32.eqz (local.get $compact)) (then (local.set $j (local.get $i))))\n        (array.set {A} (local.get $entries) (local.get $j) (local.get $e))\n        (local.set $p (call {D}.find (local.get $d) (struct.get {E} $key (ref.as_non_null (local.get $e)))))\n        (array.set $u32s (local.get $slots) (local.get $p) (i32.add (local.get $j) (i32.const 1)))\n        (local.set $j (i32.add (local.get $j) (i32.const 1)))))\n      (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))\n    (struct.set {D} $used (local.get $d) (select (local.get $j) (local.get $n) (local.get $compact))))\n  (func {D}.set (param $d (ref {D})) (param $k {K}) (param $v {V})\n    (local $p i32) (local $n i32) (local $used i32)\n    (local.set $p (call {D}.find (local.get $d) (local.get $k)))\n    (local.set $n (array.get $u32s (struct.get {D} $slots (local.get $d)) (local.get $p)))\n    (if (i32.gt_s (local.get $n) (i32.const 0)) (then\n      (struct.set {E} $value (ref.as_non_null (array.get {A} (struct.get {D} $entries (local.get $d))\n        (i32.sub (local.get $n) (i32.const 1)))) (local.get $v)) (return)))\n    (local.set $used (struct.get {D} $used (local.get $d)))\n    (if (i32.eq (local.get $used) (array.len (struct.get {D} $entries (local.get $d)))) (then\n      (call {D}.grow (local.get $d))\n      (local.set $used (struct.get {D} $used (local.get $d)))\n      (local.set $p (call {D}.find (local.get $d) (local.get $k)))))\n    (array.set {A} (struct.get {D} $entries (local.get $d)) (local.get $used)\n      (struct.new {E} (local.get $k) (local.get $v)))\n    (array.set $u32s (struct.get {D} $slots (local.get $d)) (local.get $p) (i32.add (local.get $used) (i32.const 1)))\n    (struct.set {D} $used (local.get $d) (i32.add (local.get $used) (i32.const 1)))\n    (struct.set {D} $len (local.get $d) (i32.add (struct.get {D} $len (local.get $d)) (i32.const 1))))'
+    return f'''  (func {D}.new (result (ref {D}))
+    (struct.new {D} (i32.const 0) (i32.const 0)
+      (array.new_default $u32s (i32.const 8)) (array.new_default {A} (i32.const 4)) (i32.const 0)))
+  (func {D}.find (param $d (ref {D})) (param $k {K}) (result i32)
+    (local $slots (ref $u32s)) (local $mask i32) (local $p i32) (local $n i32) (local $free i32)
+    (local $e (ref {E}))
+    (local.set $slots (struct.get {D} $slots (local.get $d)))
+    (local.set $mask (i32.sub (array.len (local.get $slots)) (i32.const 1)))
+    (local.set $p (i32.and {key_hash} (local.get $mask)))
+    (local.set $free (i32.const -1))
+    (loop $probe
+      (local.set $n (array.get $u32s (local.get $slots) (local.get $p)))
+      (if (i32.eqz (local.get $n))
+        (then (return (select (local.get $free) (local.get $p) (i32.ge_s (local.get $free) (i32.const 0))))))
+      (if (i32.eq (local.get $n) (i32.const -1))
+        (then (if (i32.lt_s (local.get $free) (i32.const 0)) (then (local.set $free (local.get $p)))))
+        (else
+          (local.set $e (ref.as_non_null (array.get {A} (struct.get {D} $entries (local.get $d))
+            (i32.sub (local.get $n) (i32.const 1)))))
+          (if {same} (then (return (local.get $p))))))
+      (local.set $p (i32.and (i32.add (local.get $p) (i32.const 1)) (local.get $mask)))
+      (br $probe))
+    (unreachable))
+  (func {D}.grow (param $d (ref {D}))
+    (local $old (ref {A})) (local $entries (ref {A})) (local $slots (ref $u32s))
+    (local $i i32) (local $j i32) (local $n i32) (local $p i32) (local $cap i32) (local $compact i32)
+    (local $e (ref null {E}))
+    (local.set $old (struct.get {D} $entries (local.get $d)))
+    (local.set $n (struct.get {D} $used (local.get $d)))
+    (local.set $compact (i32.eqz (struct.get {D} $iters (local.get $d))))
+    (local.set $cap (array.len (local.get $old)))
+    (if (i32.or (i32.eqz (local.get $compact))
+          (i32.ge_u (struct.get {D} $len (local.get $d)) (i32.shr_u (local.get $cap) (i32.const 1))))
+      (then (local.set $cap (i32.shl (local.get $cap) (i32.const 1)))))
+    (local.set $entries (array.new_default {A} (local.get $cap)))
+    (local.set $slots (array.new_default $u32s (i32.shl (array.len (local.get $entries)) (i32.const 1))))
+    (struct.set {D} $entries (local.get $d) (local.get $entries))
+    (struct.set {D} $slots (local.get $d) (local.get $slots))
+    (block $done (loop $next
+      (br_if $done (i32.ge_u (local.get $i) (local.get $n)))
+      (local.set $e (array.get {A} (local.get $old) (local.get $i)))
+      (if (i32.eqz (ref.is_null (local.get $e))) (then
+        (if (i32.eqz (local.get $compact)) (then (local.set $j (local.get $i))))
+        (array.set {A} (local.get $entries) (local.get $j) (local.get $e))
+        (local.set $p (call {D}.find (local.get $d) (struct.get {E} $key (ref.as_non_null (local.get $e)))))
+        (array.set $u32s (local.get $slots) (local.get $p) (i32.add (local.get $j) (i32.const 1)))
+        (local.set $j (i32.add (local.get $j) (i32.const 1)))))
+      (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $next)))
+    (struct.set {D} $used (local.get $d) (select (local.get $j) (local.get $n) (local.get $compact))))
+  (func {D}.set (param $d (ref {D})) (param $k {K}) (param $v {V})
+    (local $p i32) (local $n i32) (local $used i32)
+    (local.set $p (call {D}.find (local.get $d) (local.get $k)))
+    (local.set $n (array.get $u32s (struct.get {D} $slots (local.get $d)) (local.get $p)))
+    (if (i32.gt_s (local.get $n) (i32.const 0)) (then
+      (struct.set {E} $value (ref.as_non_null (array.get {A} (struct.get {D} $entries (local.get $d))
+        (i32.sub (local.get $n) (i32.const 1)))) (local.get $v)) (return)))
+    (local.set $used (struct.get {D} $used (local.get $d)))
+    (if (i32.eq (local.get $used) (array.len (struct.get {D} $entries (local.get $d)))) (then
+      (call {D}.grow (local.get $d))
+      (local.set $used (struct.get {D} $used (local.get $d)))
+      (local.set $p (call {D}.find (local.get $d) (local.get $k)))))
+    (array.set {A} (struct.get {D} $entries (local.get $d)) (local.get $used)
+      (struct.new {E} (local.get $k) (local.get $v)))
+    (array.set $u32s (struct.get {D} $slots (local.get $d)) (local.get $p) (i32.add (local.get $used) (i32.const 1)))
+    (struct.set {D} $used (local.get $d) (i32.add (local.get $used) (i32.const 1)))
+    (struct.set {D} $len (local.get $d) (i32.add (struct.get {D} $len (local.get $d)) (i32.const 1))))'''
 
 def emit_dict_helper(self: SourceEmitter, t: DeclType, op: str) -> str:
     D = self.types.heap(t)
@@ -358,7 +471,38 @@ def emit_list_builtin(emitter: SourceEmitter, t: DeclType, op: str) -> str:
     assert op == 'sorted', op
     left, right = (load('(local.get $i)', '$src'), load('(local.get $j)', '$src'))
     choose_right = f'(if (result i32) (local.get $reverse) (then {less(left, right)}) (else {less(right, left)}))'
-    return head + f' (param $reverse i32) (result (ref {L}))\n    (local $n i32) (local $data (ref {A})) (local $src (ref {A})) (local $dst (ref {A})) (local $swap (ref {A}))\n    (local $width i32) (local $lo i32) (local $mid i32) (local $hi i32) (local $i i32) (local $j i32) (local $out i32)\n    {setup}\n    (local.set $src (array.new_default {A} (local.get $n)))\n    (array.copy {A} {A} (local.get $src) (i32.const 0) (local.get $data) (i32.const 0) (local.get $n))\n    (local.set $dst (array.new_default {A} (local.get $n)))\n    (local.set $width (i32.const 1))\n    (block $done (loop $pass\n      (br_if $done (i32.ge_u (local.get $width) (local.get $n)))\n      (local.set $lo (i32.const 0))\n      (block $pass_done (loop $runs\n        (br_if $pass_done (i32.ge_u (local.get $lo) (local.get $n)))\n        (local.set $mid (i32.add (local.get $lo) (local.get $width)))\n        (if (i32.gt_u (local.get $mid) (local.get $n)) (then (local.set $mid (local.get $n))))\n        (local.set $hi (i32.add (local.get $mid) (local.get $width)))\n        (if (i32.gt_u (local.get $hi) (local.get $n)) (then (local.set $hi (local.get $n))))\n        (local.set $i (local.get $lo)) (local.set $j (local.get $mid)) (local.set $out (local.get $lo))\n        (block $merged (loop $merge\n          (br_if $merged (i32.ge_u (local.get $out) (local.get $hi)))\n          (if (if (result i32) (i32.ge_u (local.get $j) (local.get $hi)) (then (i32.const 0))\n                (else (if (result i32) (i32.ge_u (local.get $i) (local.get $mid)) (then (i32.const 1))\n                  (else {choose_right}))))\n            (then (array.set {A} (local.get $dst) (local.get $out) {right})\n              (local.set $j (i32.add (local.get $j) (i32.const 1))))\n            (else (array.set {A} (local.get $dst) (local.get $out) {left})\n              (local.set $i (i32.add (local.get $i) (i32.const 1)))))\n          (local.set $out (i32.add (local.get $out) (i32.const 1))) (br $merge)))\n        (local.set $lo (local.get $hi)) (br $runs)))\n      (local.set $swap (local.get $src)) (local.set $src (local.get $dst)) (local.set $dst (local.get $swap))\n      (local.set $width (i32.shl (local.get $width) (i32.const 1))) (br $pass)))\n    (struct.new {L} (local.get $n) (local.get $src)))'
+    return head + f''' (param $reverse i32) (result (ref {L}))
+    (local $n i32) (local $data (ref {A})) (local $src (ref {A})) (local $dst (ref {A})) (local $swap (ref {A}))
+    (local $width i32) (local $lo i32) (local $mid i32) (local $hi i32) (local $i i32) (local $j i32) (local $out i32)
+    {setup}
+    (local.set $src (array.new_default {A} (local.get $n)))
+    (array.copy {A} {A} (local.get $src) (i32.const 0) (local.get $data) (i32.const 0) (local.get $n))
+    (local.set $dst (array.new_default {A} (local.get $n)))
+    (local.set $width (i32.const 1))
+    (block $done (loop $pass
+      (br_if $done (i32.ge_u (local.get $width) (local.get $n)))
+      (local.set $lo (i32.const 0))
+      (block $pass_done (loop $runs
+        (br_if $pass_done (i32.ge_u (local.get $lo) (local.get $n)))
+        (local.set $mid (i32.add (local.get $lo) (local.get $width)))
+        (if (i32.gt_u (local.get $mid) (local.get $n)) (then (local.set $mid (local.get $n))))
+        (local.set $hi (i32.add (local.get $mid) (local.get $width)))
+        (if (i32.gt_u (local.get $hi) (local.get $n)) (then (local.set $hi (local.get $n))))
+        (local.set $i (local.get $lo)) (local.set $j (local.get $mid)) (local.set $out (local.get $lo))
+        (block $merged (loop $merge
+          (br_if $merged (i32.ge_u (local.get $out) (local.get $hi)))
+          (if (if (result i32) (i32.ge_u (local.get $j) (local.get $hi)) (then (i32.const 0))
+                (else (if (result i32) (i32.ge_u (local.get $i) (local.get $mid)) (then (i32.const 1))
+                  (else {choose_right}))))
+            (then (array.set {A} (local.get $dst) (local.get $out) {right})
+              (local.set $j (i32.add (local.get $j) (i32.const 1))))
+            (else (array.set {A} (local.get $dst) (local.get $out) {left})
+              (local.set $i (i32.add (local.get $i) (i32.const 1)))))
+          (local.set $out (i32.add (local.get $out) (i32.const 1))) (br $merge)))
+        (local.set $lo (local.get $hi)) (br $runs)))
+      (local.set $swap (local.get $src)) (local.set $src (local.get $dst)) (local.set $dst (local.get $swap))
+      (local.set $width (i32.shl (local.get $width) (i32.const 1))) (br $pass)))
+    (struct.new {L} (local.get $n) (local.get $src)))'''
 
 def emit_keyed_builtin(emitter: SourceEmitter, name: str, elem: DeclType, key: DeclType, op: str, result: DeclType) -> str:
     L = emitter.types.heap(DeclType('list').add(elem))
@@ -404,13 +548,111 @@ def emit_keyed_builtin(emitter: SourceEmitter, name: str, elem: DeclType, key: D
     lk = key_at('$keys', '(local.get $i)')
     rk = key_at('$keys', '(local.get $j)')
     choose_right = f'(if (result i32) (local.get $reverse) (then {less(lk, rk)}) (else {less(rk, lk)}))'
-    return head + f' (param $reverse i32) (result (ref {L}))\n    (local $n i32) (local $src (ref {A})) (local $dst (ref {A})) (local $swap (ref {A}))\n    (local $keys (ref {KA})) (local $scratch (ref {KA})) (local $key_swap (ref {KA}))\n    (local $width i32) (local $lo i32) (local $mid i32) (local $hi i32) (local $i i32) (local $j i32) (local $out i32)\n    (local.set $n (struct.get {L} $len (local.get $xs)))\n    (local.set $src (array.new_default {A} (local.get $n)))\n    (array.copy {A} {A} (local.get $src) (i32.const 0) (struct.get {L} $data (local.get $xs)) (i32.const 0) (local.get $n))\n    (local.set $keys (array.new_default {KA} (local.get $n)))\n    (block $keyed (loop $key_next\n      (br_if $keyed (i32.ge_u (local.get $i) (local.get $n)))\n      (array.set {KA} (local.get $keys) (local.get $i) {call_key(left)})\n      (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $key_next)))\n    (if (i32.lt_u (local.get $n) (i32.const 2)) (then (return (struct.new {L} (local.get $n) (local.get $src)))))\n    (local.set $dst (array.new_default {A} (local.get $n)))\n    (local.set $scratch (array.new_default {KA} (local.get $n)))\n    (local.set $width (i32.const 1))\n    (block $done (loop $pass\n      (br_if $done (i32.ge_u (local.get $width) (local.get $n)))\n      (local.set $lo (i32.const 0))\n      (block $pass_done (loop $runs\n        (br_if $pass_done (i32.ge_u (local.get $lo) (local.get $n)))\n        (local.set $mid (i32.add (local.get $lo) (local.get $width)))\n        (if (i32.gt_u (local.get $mid) (local.get $n)) (then (local.set $mid (local.get $n))))\n        (local.set $hi (i32.add (local.get $mid) (local.get $width)))\n        (if (i32.gt_u (local.get $hi) (local.get $n)) (then (local.set $hi (local.get $n))))\n        (local.set $i (local.get $lo)) (local.set $j (local.get $mid)) (local.set $out (local.get $lo))\n        (block $merged (loop $merge\n          (br_if $merged (i32.ge_u (local.get $out) (local.get $hi)))\n          (if (if (result i32) (i32.ge_u (local.get $j) (local.get $hi)) (then (i32.const 0))\n                (else (if (result i32) (i32.ge_u (local.get $i) (local.get $mid)) (then (i32.const 1))\n                  (else {choose_right}))))\n            (then (array.set {A} (local.get $dst) (local.get $out) {right})\n              (array.set {KA} (local.get $scratch) (local.get $out) {rk})\n              (local.set $j (i32.add (local.get $j) (i32.const 1))))\n            (else (array.set {A} (local.get $dst) (local.get $out) {left})\n              (array.set {KA} (local.get $scratch) (local.get $out) {lk})\n              (local.set $i (i32.add (local.get $i) (i32.const 1)))))\n          (local.set $out (i32.add (local.get $out) (i32.const 1))) (br $merge)))\n        (local.set $lo (local.get $hi)) (br $runs)))\n      (local.set $swap (local.get $src)) (local.set $src (local.get $dst)) (local.set $dst (local.get $swap))\n      (local.set $key_swap (local.get $keys)) (local.set $keys (local.get $scratch)) (local.set $scratch (local.get $key_swap))\n      (local.set $width (i32.shl (local.get $width) (i32.const 1))) (br $pass)))\n    (struct.new {L} (local.get $n) (local.get $src)))'
+    return head + f''' (param $reverse i32) (result (ref {L}))
+    (local $n i32) (local $src (ref {A})) (local $dst (ref {A})) (local $swap (ref {A}))
+    (local $keys (ref {KA})) (local $scratch (ref {KA})) (local $key_swap (ref {KA}))
+    (local $width i32) (local $lo i32) (local $mid i32) (local $hi i32) (local $i i32) (local $j i32) (local $out i32)
+    (local.set $n (struct.get {L} $len (local.get $xs)))
+    (local.set $src (array.new_default {A} (local.get $n)))
+    (array.copy {A} {A} (local.get $src) (i32.const 0) (struct.get {L} $data (local.get $xs)) (i32.const 0) (local.get $n))
+    (local.set $keys (array.new_default {KA} (local.get $n)))
+    (block $keyed (loop $key_next
+      (br_if $keyed (i32.ge_u (local.get $i) (local.get $n)))
+      (array.set {KA} (local.get $keys) (local.get $i) {call_key(left)})
+      (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $key_next)))
+    (if (i32.lt_u (local.get $n) (i32.const 2)) (then (return (struct.new {L} (local.get $n) (local.get $src)))))
+    (local.set $dst (array.new_default {A} (local.get $n)))
+    (local.set $scratch (array.new_default {KA} (local.get $n)))
+    (local.set $width (i32.const 1))
+    (block $done (loop $pass
+      (br_if $done (i32.ge_u (local.get $width) (local.get $n)))
+      (local.set $lo (i32.const 0))
+      (block $pass_done (loop $runs
+        (br_if $pass_done (i32.ge_u (local.get $lo) (local.get $n)))
+        (local.set $mid (i32.add (local.get $lo) (local.get $width)))
+        (if (i32.gt_u (local.get $mid) (local.get $n)) (then (local.set $mid (local.get $n))))
+        (local.set $hi (i32.add (local.get $mid) (local.get $width)))
+        (if (i32.gt_u (local.get $hi) (local.get $n)) (then (local.set $hi (local.get $n))))
+        (local.set $i (local.get $lo)) (local.set $j (local.get $mid)) (local.set $out (local.get $lo))
+        (block $merged (loop $merge
+          (br_if $merged (i32.ge_u (local.get $out) (local.get $hi)))
+          (if (if (result i32) (i32.ge_u (local.get $j) (local.get $hi)) (then (i32.const 0))
+                (else (if (result i32) (i32.ge_u (local.get $i) (local.get $mid)) (then (i32.const 1))
+                  (else {choose_right}))))
+            (then (array.set {A} (local.get $dst) (local.get $out) {right})
+              (array.set {KA} (local.get $scratch) (local.get $out) {rk})
+              (local.set $j (i32.add (local.get $j) (i32.const 1))))
+            (else (array.set {A} (local.get $dst) (local.get $out) {left})
+              (array.set {KA} (local.get $scratch) (local.get $out) {lk})
+              (local.set $i (i32.add (local.get $i) (i32.const 1)))))
+          (local.set $out (i32.add (local.get $out) (i32.const 1))) (br $merge)))
+        (local.set $lo (local.get $hi)) (br $runs)))
+      (local.set $swap (local.get $src)) (local.set $src (local.get $dst)) (local.set $dst (local.get $swap))
+      (local.set $key_swap (local.get $keys)) (local.set $keys (local.get $scratch)) (local.set $scratch (local.get $key_swap))
+      (local.set $width (i32.shl (local.get $width) (i32.const 1))) (br $pass)))
+    (struct.new {L} (local.get $n) (local.get $src)))'''
 
 def emit_read_helper(emitter: SourceEmitter, name: str='snek.read_bytes', error_class: str='RuntimeError') -> str:
     read_error = emitter.error(error_class, 'stdin read failed')
-    return f'\n  (func ${name} (result (ref $list.i32))\n    (local $out (ref $list.i32)) (local $n i32) (local $i i32)\n    ;; Input and output share the fixed WASI scratch page; flush before reusing it.\n    (call $rt.flush)\n    (local.set $out (struct.new $list.i32 (i32.const 0) (array.new_default $arr.i32 (i32.const 0))))\n    (block $done (loop $read\n      (i32.store (i32.const 0) (i32.const 1024))\n      (i32.store (i32.const 4) (i32.const 64512))\n      (if (call $wasi.fd_read (i32.const 0) (i32.const 0) (i32.const 1) (i32.const 8))\n        (then {read_error}))\n      (local.set $n (i32.load (i32.const 8)))\n      (if (i32.gt_u (local.get $n) (i32.const 64512)) (then {read_error}))\n      (br_if $done (i32.eqz (local.get $n)))\n      (local.set $i (i32.const 0))\n      (loop $copy\n        (call $list.i32.append (local.get $out) (i32.load8_u offset=1024 (local.get $i)))\n        (local.set $i (i32.add (local.get $i) (i32.const 1)))\n        (br_if $copy (i32.lt_u (local.get $i) (local.get $n))))\n      (br $read)))\n    (local.get $out))\n'
+    return f'''
+  (func ${name} (result (ref $list.i32))
+    (local $out (ref $list.i32)) (local $n i32) (local $i i32)
+    ;; Input and output share the fixed WASI scratch page; flush before reusing it.
+    (call $rt.flush)
+    (local.set $out (struct.new $list.i32 (i32.const 0) (array.new_default $arr.i32 (i32.const 0))))
+    (block $done (loop $read
+      (i32.store (i32.const 0) (i32.const 1024))
+      (i32.store (i32.const 4) (i32.const 64512))
+      (if (call $wasi.fd_read (i32.const 0) (i32.const 0) (i32.const 1) (i32.const 8))
+        (then {read_error}))
+      (local.set $n (i32.load (i32.const 8)))
+      (if (i32.gt_u (local.get $n) (i32.const 64512)) (then {read_error}))
+      (br_if $done (i32.eqz (local.get $n)))
+      (local.set $i (i32.const 0))
+      (loop $copy
+        (call $list.i32.append (local.get $out) (i32.load8_u offset=1024 (local.get $i)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (br_if $copy (i32.lt_u (local.get $i) (local.get $n))))
+      (br $read)))
+    (local.get $out))
+'''
 
 def emit_byte_io(emitter: SourceEmitter) -> str:
     bad_byte = emitter.error('ValueError', 'byte values must be in range 0..255')
     write_error = emitter.error('RuntimeError', 'stdout write failed')
-    return emit_read_helper(emitter) + f'\n  (func $snek.write_bytes (param $values (ref $list.i32))\n    (local $data (ref $arr.i32)) (local $len i32) (local $i i32)\n    (local $n i32) (local $ptr i32) (local $written i32)\n    (local.set $data (struct.get $list.i32 $data (local.get $values)))\n    (local.set $len (struct.get $list.i32 $len (local.get $values)))\n    ;; Reject all invalid values before writing any bytes from this call.\n    (block $checked (loop $check\n      (br_if $checked (i32.ge_u (local.get $i) (local.get $len)))\n      (if (i32.gt_u (array.get $arr.i32 (local.get $data) (local.get $i)) (i32.const 255))\n        (then {bad_byte}))\n      (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $check)))\n    (call $rt.flush)\n    (local.set $i (i32.const 0))\n    (block $done (loop $chunk\n      (br_if $done (i32.ge_u (local.get $i) (local.get $len)))\n      (local.set $n (i32.const 0))\n      (loop $copy\n        (i32.store8 offset=1024 (local.get $n) (array.get $arr.i32 (local.get $data) (local.get $i)))\n        (local.set $i (i32.add (local.get $i) (i32.const 1)))\n        (local.set $n (i32.add (local.get $n) (i32.const 1)))\n        (br_if $copy (i32.and (i32.lt_u (local.get $i) (local.get $len)) (i32.lt_u (local.get $n) (i32.const 64512)))))\n      (local.set $ptr (i32.const 1024))\n      (loop $write\n        (i32.store (i32.const 0) (local.get $ptr))\n        (i32.store (i32.const 4) (local.get $n))\n        (if (call $wasi.fd_write (i32.const 1) (i32.const 0) (i32.const 1) (i32.const 8))\n          (then {write_error}))\n        (local.set $written (i32.load (i32.const 8)))\n        (if (i32.or (i32.eqz (local.get $written)) (i32.gt_u (local.get $written) (local.get $n)))\n          (then {write_error}))\n        (local.set $ptr (i32.add (local.get $ptr) (local.get $written)))\n        (local.set $n (i32.sub (local.get $n) (local.get $written)))\n        (br_if $write (local.get $n)))\n      (br $chunk))))\n'
+    return emit_read_helper(emitter) + f'''
+  (func $snek.write_bytes (param $values (ref $list.i32))
+    (local $data (ref $arr.i32)) (local $len i32) (local $i i32)
+    (local $n i32) (local $ptr i32) (local $written i32)
+    (local.set $data (struct.get $list.i32 $data (local.get $values)))
+    (local.set $len (struct.get $list.i32 $len (local.get $values)))
+    ;; Reject all invalid values before writing any bytes from this call.
+    (block $checked (loop $check
+      (br_if $checked (i32.ge_u (local.get $i) (local.get $len)))
+      (if (i32.gt_u (array.get $arr.i32 (local.get $data) (local.get $i)) (i32.const 255))
+        (then {bad_byte}))
+      (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $check)))
+    (call $rt.flush)
+    (local.set $i (i32.const 0))
+    (block $done (loop $chunk
+      (br_if $done (i32.ge_u (local.get $i) (local.get $len)))
+      (local.set $n (i32.const 0))
+      (loop $copy
+        (i32.store8 offset=1024 (local.get $n) (array.get $arr.i32 (local.get $data) (local.get $i)))
+        (local.set $i (i32.add (local.get $i) (i32.const 1)))
+        (local.set $n (i32.add (local.get $n) (i32.const 1)))
+        (br_if $copy (i32.and (i32.lt_u (local.get $i) (local.get $len)) (i32.lt_u (local.get $n) (i32.const 64512)))))
+      (local.set $ptr (i32.const 1024))
+      (loop $write
+        (i32.store (i32.const 0) (local.get $ptr))
+        (i32.store (i32.const 4) (local.get $n))
+        (if (call $wasi.fd_write (i32.const 1) (i32.const 0) (i32.const 1) (i32.const 8))
+          (then {write_error}))
+        (local.set $written (i32.load (i32.const 8)))
+        (if (i32.or (i32.eqz (local.get $written)) (i32.gt_u (local.get $written) (local.get $n)))
+          (then {write_error}))
+        (local.set $ptr (i32.add (local.get $ptr) (local.get $written)))
+        (local.set $n (i32.sub (local.get $n) (local.get $written)))
+        (br_if $write (local.get $n)))
+      (br $chunk))))
+'''

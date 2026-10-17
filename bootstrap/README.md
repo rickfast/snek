@@ -94,6 +94,12 @@ its core program. The standalone compiler requires no Python process.
 different compiler binary. Selection fails closed. `--frontend` is a separate
 reference-compiler switch, not a substitute for `--compiler snek`.
 
+Runtime import signatures and operation-to-feature mappings live in the
+Snek-compatible `snekc/runtime_abi.py`. The reference emitter imports that data;
+the bootstrap manifest links it into the standalone compiler. Each table factory
+returns fresh dictionaries, so compilations cannot mutate shared contract state.
+Compiler checking and emission algorithms remain independently implemented.
+
 The owned backend consists of `emit_program.py` (typed expressions/statements),
 `emit_runtime.py` (collections, keyed operations and byte I/O), `emit_host.py`
 (WASI adapters), `emit_module.py` (layouts, protocols and module assembly), and
