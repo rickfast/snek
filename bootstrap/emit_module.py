@@ -2,7 +2,7 @@
 from __future__ import annotations
 from snek import i32
 from bootstrap.declarations import DeclType
-from bootstrap.bodies import BodyChecker, BodyExpr, BodyStmt, inner_type
+from bootstrap.bodies import BodyChecker, BodyExpr, BodyStmt, BodyFunction, inner_type
 from bootstrap.parser import missing
 from bootstrap.emit_data import emit_component_source, emit_input_source
 from bootstrap.emit_program import SourceEmitter
@@ -140,12 +140,17 @@ def emit_source_module(checked: BodyChecker, prelude_source: str, component: boo
     for f in checked.functions:
         if f.name == "snek.main":
             if owned_has_await(f.body):
-                f.sig.ret = DeclType("Coroutine").add(DeclType("None"))
-                f.machine = True
+                # Main's coroutine ABI belongs to this emission, not the
+                # checked program (which can be emitted again in either mode).
+                main = owned_runtime_machine(f.name, f.sig.params, DeclType("None"), f.body)
+                main.locals = f.locals.copy()
+                f = main
                 main_async = True
             elif component:
-                f.name = "snek.main.body"
-                funcs.append(e.function(f))
+                main = BodyFunction("snek.main.body", f.sig)
+                main.locals = f.locals.copy()
+                main.body = f.body
+                funcs.append(e.function(main))
                 f = owned_runtime_machine("snek.main", [], DeclType("None"), [BodyStmt("ExprStmt", missing()).add(BodyExpr("Call", DeclType("None"), missing(), "snek.main.body"))])
         funcs.append(OwnedMachine(e).run(f) if f.machine else e.function(f))
     funcs.extend(owned_runtime_machines(e))
