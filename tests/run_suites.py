@@ -31,7 +31,7 @@ class Check:
 CHECKS = {
     name: Check("check_" + name + ".py") for name in (
         "closures", "keyed_builtins", "lazy_runtime", "compiler_profile",
-        "native_bench", "suites", "tooling", "linker", "emission_pipeline", "cli", "runtime_abi",
+        "native_bench", "suites", "tooling", "linker", "emission_pipeline", "cli", "runtime_abi", "body_context",
     )
 }
 CHECKS.update({
@@ -57,7 +57,7 @@ CHECKS.update({
 })
 
 SUITES = {
-    "fast": ("suites", "closures", "keyed_builtins", "lazy_runtime", "wasm", "benchmarks", "native_bench", "compiler_profile", "tooling", "linker", "emission_pipeline", "cli", "runtime_abi"),
+    "fast": ("suites", "closures", "keyed_builtins", "lazy_runtime", "wasm", "benchmarks", "native_bench", "compiler_profile", "tooling", "linker", "emission_pipeline", "cli", "runtime_abi", "body_context"),
     "tooling": ("suites", "native_bench", "compiler_profile", "lazy_runtime", "tooling"),
     "reference": ("reference-corpus", "byte_io", "formatting", "string_fusion"),
     "bootstrap": ("parser", "frontend", "declarations", "bootstrap", "emitter_support", "machine_lowering"),
