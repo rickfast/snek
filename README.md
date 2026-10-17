@@ -6,6 +6,11 @@
 
 A statically typed subset of Python that compiles to WebAssembly, using WasmGC for objects and Wasm exception handling for `try`/`except`, and targeting WASI.
 
+**[Documentation](https://rickfast.github.io/snek/)** ·
+[Getting started](https://rickfast.github.io/snek/learn/installation/) ·
+[Language reference](https://rickfast.github.io/snek/language/) ·
+[CLI reference](https://rickfast.github.io/snek/reference/cli/)
+
 ```python
 from snek import i32, f64
 

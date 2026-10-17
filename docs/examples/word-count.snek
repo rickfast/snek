@@ -1,0 +1,17 @@
+from snek import i32
+
+
+def count_words(text: str) -> dict[str, i32]:
+    counts: dict[str, i32] = {}
+    for word in text.casefold().split():
+        counts[word] = counts.get(word, 0) + 1
+    return counts
+
+
+def main() -> None:
+    counts = count_words("Hello snek hello Straße STRASSE")
+    for word in sorted(list(counts.keys())):
+        print(f"{word}: {counts[word]}")
+
+
+main()

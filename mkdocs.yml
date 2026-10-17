@@ -1,0 +1,110 @@
+site_name: Snek
+site_url: https://rickfast.github.io/snek/
+site_description: Python syntax. Static types. WebAssembly. Learn the Snek language, build programs, and explore its self-hosted compiler.
+repo_url: https://github.com/rickfast/snek
+repo_name: rickfast/snek
+edit_uri: edit/main/docs/
+strict: true
+docs_dir: docs
+site_dir: site
+exclude_docs: |
+  requirements.in
+  requirements.txt
+  tools/
+  overrides/
+theme:
+  name: material
+  custom_dir: docs/overrides
+  logo: assets/mark.svg
+  favicon: assets/mark.svg
+  font: false
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.indexes
+    - navigation.top
+    - navigation.footer
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+plugins:
+  - search
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+hooks:
+  - docs/tools/hooks.py
+extra_css:
+  - stylesheets/extra.css
+validation:
+  nav:
+    omitted_files: warn
+  links:
+    anchors: warn
+    unrecognized_links: warn
+watch:
+  - README.md
+  - DESIGN.md
+  - bootstrap/README.md
+  - bench/README.md
+  - packaging/README.md
+  - tests/README.md
+nav:
+  - Home: index.md
+  - Learn:
+      - Start here: learn/index.md
+      - Installation: learn/installation.md
+      - Your first program: learn/first-program.md
+      - A small word counter: learn/word-counter.md
+      - Coming from Python: learn/python.md
+      - Examples: learn/examples.md
+  - Language:
+      - Overview: language/index.md
+      - Types and numbers: language/types.md
+      - Functions and closures: language/functions.md
+      - Classes and protocols: language/classes.md
+      - Exceptions and cleanup: language/exceptions.md
+      - Strings and formatting: language/strings.md
+      - Collections: language/collections.md
+      - Generators and async: language/async.md
+  - Build & run:
+      - CLI reference: reference/cli.md
+      - WebAssembly targets: reference/targets.md
+      - Standard library: reference/stdlib.md
+      - Runtime compatibility: reference/compatibility.md
+      - Troubleshooting: reference/troubleshooting.md
+      - Native packages: reference/distribution.md
+  - Internals:
+      - Architecture: internals/index.md
+      - Self-hosting: internals/self-hosting.md
+      - Pass-level proofs: internals/pass-proofs.md
+      - Testing: internals/testing.md
+      - Benchmarks: internals/benchmarks.md
+      - Roadmap: internals/roadmap.md
+      - Contributing & docs: internals/contributing.md

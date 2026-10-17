@@ -1,0 +1,13 @@
+from snek import run, sys
+
+
+async def main() -> None:
+    while True:
+        chunk = await sys.stdin.buffer.read(4096)
+        if len(chunk) == 0:
+            break
+        sys.stdout.buffer.write(chunk)
+        await sys.stdout.drain()
+
+
+run(main())

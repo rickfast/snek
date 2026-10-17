@@ -11,3 +11,5 @@ bench/work/
 bootstrap/build/
 native/target/
 dist/
+site/
+.venv-docs/
