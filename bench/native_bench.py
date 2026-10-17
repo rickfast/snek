@@ -9,14 +9,11 @@ from __future__ import annotations
 
 import argparse
 import datetime
-import hashlib
 import json
-import math
 import os
 from pathlib import Path
 import platform
 import shutil
-import statistics
 import subprocess
 import sys
 import tempfile
@@ -24,22 +21,11 @@ import time
 import zipfile
 
 import bench
+from common import sha, stats, source_identity as source_hash
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from snekc import driver
-
-
-def sha(data):
-    return hashlib.sha256(data).hexdigest()
-
-
-def stats(values):
-    if not values or any(not math.isfinite(v) or v < 0 for v in values):
-        raise ValueError("invalid measurement")
-    median = statistics.median(values)
-    return {"median": median, "mad": statistics.median(abs(v - median) for v in values),
-            "min": min(values), "max": max(values), "samples": values}
 
 
 def process(command, *, cwd=ROOT, env=None):
@@ -103,15 +89,7 @@ def interleaved(routes, reps):
 
 
 def source_identity():
-    paths = subprocess.check_output(["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd=ROOT).split(b"\0")
-    digest = hashlib.sha256()
-    for name in sorted(set(paths)):
-        if not name or name.startswith(b"bench/results/"):
-            continue
-        path = ROOT / os.fsdecode(name)
-        if path.is_file() and path.suffix in (".py", ".rs", ".toml", ".lock", ".cjs", ".mjs", ".wat", ".wit"):
-            digest.update(name + b"\0" + path.read_bytes() + b"\0")
-    return digest.hexdigest()
+    return source_hash(ROOT)
 
 
 def generated_source(count):

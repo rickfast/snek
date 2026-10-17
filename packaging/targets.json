@@ -1,0 +1,7 @@
+[
+  {"target": "aarch64-apple-darwin", "os": "macos-15", "npm_platform": "darwin", "npm_arch": "arm64", "wheel_tag": "macosx_11_0_arm64"},
+  {"target": "x86_64-apple-darwin", "os": "macos-15-intel", "npm_platform": "darwin", "npm_arch": "x64", "wheel_tag": "macosx_11_0_x86_64"},
+  {"target": "x86_64-unknown-linux-gnu", "os": "ubuntu-22.04", "npm_platform": "linux", "npm_arch": "x64", "wheel_tag": "manylinux_2_35_x86_64"},
+  {"target": "aarch64-unknown-linux-gnu", "os": "ubuntu-24.04-arm", "npm_platform": "linux", "npm_arch": "arm64", "wheel_tag": "manylinux_2_39_aarch64"},
+  {"target": "x86_64-pc-windows-msvc", "os": "windows-2022", "npm_platform": "win32", "npm_arch": "x64", "wheel_tag": "win_amd64"}
+]
