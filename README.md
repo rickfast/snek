@@ -105,7 +105,7 @@ optimization and `wasm-tools` component linking remain optional external tools.
 ```
 prog.py
   → frontend.py                        CPython parser (default), or Snek parser + AST adapter
-  → check.py   declare pass            builtins.py exceptions, then classes, fields, vtable slots,
+  → check.py   declare pass            runtime/exceptions.snek, then classes, fields, vtable slots,
                                        signatures
                check/elaborate pass    inference, narrowing, definite assignment, argument binding
   → ir.py      typed IR                every type resolved, every conversion explicit; for-loops,
@@ -129,13 +129,13 @@ The IR is the language/backend seam. WAT remains the shared instruction represen
 | `snekc/ir.py` | The typed IR |
 | `snekc/types.py` | Type representations, widening and assignability rules |
 | `snekc/closures.py`, `closures_wat.py` | Lexical scopes, shared capture cells, typed callable objects and indirect calls |
-| `snekc/builtins.py` | The exception hierarchy, written in snek |
+| `snekc/runtime/*.snek`, `runtime_sources.py`, `builtins.py` | Authored exception/string/formatting runtime sources and their validated resource loader |
 | `snekc/emit_wat.py` | IR to WAT: type section, vtables, per-element-type list runtime, `try_table` and `finally` lowering |
 | `snekc/collections_wat.py` | Monomorphized tuple and dictionary runtime, insertion order, hashing and dictionary views |
 | `snekc/list_builtins.py` | List reductions and stable merge sort |
 | `snekc/ordered_builtins.py`, `keyed_builtins.py` | Typed key callbacks, ordered argument binding, cached-key sorting and live-list extrema |
 | `snekc/protocols_wat.py` | Class equality and string dispatch, including subclass priority |
-| `snekc/formatting.py` | Static format-spec validation and formatting helpers written in snek |
+| `snekc/formatting.py` | Static format-spec validation; loads helpers from `runtime/formatting.snek` |
 | `snekc/machines.py` | Stackless generator/coroutine frames, resume functions, exception and cleanup edges |
 | `snekc/component.py`, `component_runtime.wat`, `wit/` | WASI 0.3 command world, canonical ABI wiring and callback-driven stream/future output |
 | `snekc/stdlib.py`, `stdlib_io.py`, `component_input.wat`, `snek/sys.py`, `snek/io.py` | Standard-library namespaces, typed CLI stream views, native async stdin, and CPython equivalents |

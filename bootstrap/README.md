@@ -297,7 +297,7 @@ Python still produces that WAT; this is not a full compiler fixed point.
 
 ### Reproduce Unicode-name data
 
-The marked block at the end of `parser.py` is generated data, embedded as a
+The marked block in `unicode_names.py` is generated data, embedded as a
 single raw string so the standalone parser needs no filesystem or host lookup.
 Sorted explicit names and aliases use binary search; CJK ranges and Hangul
 syllables use algorithmic lookup. The table and alias input have SHA-256 checks.

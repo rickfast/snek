@@ -152,7 +152,7 @@ def __exit__(self, exc_type: type[BaseException] | None,
 
 ## Exceptions
 
-- **The hierarchy is written in snek** (`snekc/builtins.py`) and declared ahead of every program:
+- **The hierarchy is written in snek** (`snekc/runtime/exceptions.snek`) and declared ahead of every program:
   - `BaseException` → `Exception`, which has these subclasses:
     - `ArithmeticError` (`ZeroDivisionError`, `OverflowError`)
     - `AssertionError`
@@ -200,7 +200,7 @@ def __exit__(self, exc_type: type[BaseException] | None,
 - **Literals** each get a passive data segment and a function that builds the string with `array.new_data` on first use and caches it in a global, so `wasm-opt` drops unused literals with their functions. The code point count is known at compile time.
 - **Concatenation and integer f-strings.** Concatenation trees are flattened to avoid repeatedly copying a growing prefix. When a part is a plain `i32`/`i64` decimal conversion, the emitter specializes a helper for the string/integer argument pattern: count byte lengths, allocate the final buffer, then write integer digits directly into it and copy string parts. This avoids intermediate number strings and the array of parts; the common integer f-string allocates only the result byte array and string header (plus one-time cached literals). Expressions and custom `__str__` conversions still run once, left to right; only side-effect-free primitive integer rendering is deferred. Nonempty format specs, floats, booleans and custom conversions retain their existing paths. The shared decimal size/writer helpers cover the full signed i64 range and preserve UTF-8 code-point-length metadata.
 - **One-character strings** for ASCII are cached, so `for ch in s` and `s[i]` over ASCII text allocate nothing after the first use of each character.
-- **The methods are written in snek** (`STR_METHODS_TEMPLATE` in `builtins.py`), on top of byte-level intrinsics (`__dec`, `__bfind`, a string builder, Unicode lookups) that only that code can call. `s.split(",")` compiles to a call of `__str_split(s, ",")`. A method is checked and emitted only if the program uses it.
+- **The methods are written in snek** (`snekc/runtime/strings.snek`), on top of byte-level intrinsics (`__dec`, `__bfind`, a string builder, Unicode lookups) that only that code can call. `s.split(",")` compiles to a call of `__str_split(s, ",")`. A method is checked and emitted only if the program uses it. The resource loader resolves private `__unicode_*` identifiers against the Unicode flag ABI without changing comments, string contents, or source line positions.
 - **Unicode properties come from a per-program table.** A snek program reads no input, so every code point its strings can hold comes from its own literals, unless it calls `chr()` on a computed value.
   - The compiler embeds the properties of just those code points (closed under the case mappings the program uses), read from the CPython that runs the compiler. For most programs that's a handful of entries.
   - A program that calls `chr(n)` on a computed `n` gets tables covering all of Unicode instead: about 40 KB with every method in use, and a few seconds more compile time.
@@ -212,7 +212,7 @@ def __exit__(self, exc_type: type[BaseException] | None,
 ### F-string format specs
 
 - Literal specs support string truncation, code-point width and fill, `<`/`>`/`^`/`=` alignment, signs, zero padding, `#`, comma/underscore grouping, integer `b`/`c`/`d`/`o`/`x`/`X`, and float `e`/`E`/`f`/`F`/`g`/`G`/`%`. `z` suppresses negative zero after rounding. `!s` and `!r` convert before formatting.
-- The compiler parses and validates each spec. Helpers in `snekc/formatting.py` are written in snek and checked/emitted on demand, like string methods. Values are evaluated once, left to right.
+- The compiler parses and validates each spec in `snekc/formatting.py`. Helpers in `snekc/runtime/formatting.snek` are checked/emitted on demand, like string methods. Values are evaluated once, left to right.
 - Explicit float precision uses the exact binary mantissa and exponent, expanded into decimal digits with base-10⁹ chunks. Decimal rounding is ties-to-even, including carry across the decimal point, subnormals and the largest finite f64. Integer formatting handles the full i64 range without taking the positive magnitude of `INT64_MIN`.
 - Empty specs retain `str()` behavior. Float specs without a presentation type or precision also use the existing approximate shortest representation; explicit precision does not share that limitation.
 - Dynamic nested specs, locale-aware `n`, `!a`, `str.format()`, and non-empty specs on collections/objects without `!s` or `!r` are not supported. Width and precision must fit in i32; output is still subject to runtime memory limits. `c` shares `chr()`'s surrogate restriction.
