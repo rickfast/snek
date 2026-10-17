@@ -15,11 +15,11 @@ python tests/run_suites.py reference bootstrap
 
 | Suite | Coverage | Preparation |
 | --- | --- | --- |
-| `fast` | Pure compiler/encoding invariants, benchmark/tooling regressions, suite policy | Node 24+, wasm-tools oracle |
+| `fast` | Pure compiler/encoding invariants, benchmark/tooling regressions, suite policy | Node 24+, Python Wasmtime, wasm-tools oracle |
 | `tooling` | Portable benchmark, profile, lazy runtime and runner regressions | Python |
 | `reference` | Full raw/O3 example and negative corpus, byte I/O, formatting, string fusion | Runtime, Binaryen, Python Wasmtime |
-| `bootstrap` | Parser, frontend, declarations, encoder fixed point, emitter and machine-pass proofs | Runtime, Binaryen |
-| `checkers` | Explicit scalar/aggregate/runtime/ordered seed variants, rebuilt checker and full language cases | Runtime, Binaryen; fixtures build their own temporary checkers |
+| `bootstrap` | Parser, frontend, declarations, encoder fixed point, emitter and machine-pass proofs | Runtime, Binaryen, `bootstrap/bootstrap_checker.py` output for emitter/machine proofs |
+| `checkers` | Explicit scalar/aggregate/runtime/ordered seed variants, rebuilt checker and full language cases | Runtime, Binaryen, wasm-tools, Python Wasmtime; fixtures build their own temporary checkers |
 | `compiler` | Published full-compiler fixed point and no-host-fallback guards | Fresh `bootstrap/bootstrap_compiler.py` output, runtime |
 | `selfhost` | `compiler`, lazy helpers, full raw/O3 corpus with compiler=snek | Full compiler proof, runtime, Binaryen |
 | `components` | Reference component corpus, streams, host library and lifecycle | Wasmtime CLI 49+, wasm-tools 1.250+, Binaryen, Python Wasmtime, Node 24+ |

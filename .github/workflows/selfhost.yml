@@ -120,8 +120,8 @@ jobs:
           tar -xf wasm-tools.tar.gz
           echo "$PWD/wasmtime-v49.0.2-x86_64-linux" >> "$GITHUB_PATH"
           echo "$PWD/wasm-tools-1.250.0-x86_64-linux" >> "$GITHUB_PATH"
-      - name: Prepare historical rebuilt-checker component variant
-        if: matrix.suite == 'checker-components'
+      - name: Prepare rebuilt checker for pass proofs and historical components
+        if: matrix.suite == 'bootstrap' || matrix.suite == 'checker-components'
         run: python bootstrap/bootstrap_checker.py
       - name: Run explicit suite without skips
         run: python tests/run_suites.py '${{ matrix.suite }}'

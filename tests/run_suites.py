@@ -35,13 +35,18 @@ CHECKS = {
     )
 }
 CHECKS.update({
-    "benchmarks": Check("check_benchmarks.py", ("node",)),
+    "benchmarks": Check("check_benchmarks.py", ("node", "wasmtime-py")),
     "wasm": Check("check_wasm.py", ("wasm-tools",)),
     **{name: Check("check_" + name + ".py", ("runtime", "optimizer")) for name in (
-        "parser", "frontend", "declarations", "bootstrap", "emitter_support", "machine_lowering",
-        "bodies", "aggregate_bodies", "runtime_bodies", "ordered_bodies", "selfhost_bodies", "language_bodies",
+        "parser", "frontend", "declarations", "bootstrap",
         "byte_io", "formatting", "string_fusion",
     )},
+    **{name: Check("check_" + name + ".py", ("runtime", "optimizer", "checker"))
+       for name in ("emitter_support", "machine_lowering")},
+    **{name: Check("check_" + name + ".py", ("runtime", "optimizer", "wasm-tools"))
+       for name in ("bodies", "aggregate_bodies", "runtime_bodies", "ordered_bodies")},
+    **{name: Check("check_" + name + ".py", ("runtime", "optimizer", "wasm-tools", "wasmtime-py"))
+       for name in ("selfhost_bodies", "language_bodies")},
     "byte_io": Check("check_byte_io.py", ("runtime", "wasmtime-py")),
     "reference-corpus": Check("run_tests.py", ("runtime", "optimizer")),
     "selfhost_compiler": Check("check_selfhost_compiler.py", ("runtime", "compiler"), "snek"),
@@ -133,7 +138,7 @@ def prerequisites(requirements):
         elif requirement in ("wasmtime", "wasm-tools"):
             command(requirement)
         elif requirement == "compiler":
-            for name in ("compiler.wasm", "compiler.stage1.wasm", "compiler.stage2.wasm", "compiler.stage3.wasm", "compiler-manifest.json"):
+            for name in ("compiler.wasm", "compiler.stage1.wasm", "compiler.stage2.wasm", "compiler.stage3.wasm", "compiler-manifest.json", "compiler.bundle.py"):
                 if not (ROOT / "bootstrap/build" / name).is_file():
                     raise RuntimeError("run python bootstrap/bootstrap_compiler.py first (missing " + name + ")")
         elif requirement == "checker":
@@ -143,7 +148,7 @@ def prerequisites(requirements):
             if not (ROOT / "native/target/release" / ("snek.exe" if os.name == "nt" else "snek")).is_file():
                 raise RuntimeError("build the release native executable first")
         elif requirement == "packages":
-            for name in ("npm", "bun", "uv"):
+            for name in ("npm", "npx", "bun", "uv"):
                 command(name)
             if not list((ROOT / "dist").glob("*.whl")) or not list((ROOT / "dist").glob("*.tgz")):
                 raise RuntimeError("run packaging/build_packages.py for this platform first")

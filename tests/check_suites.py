@@ -36,6 +36,27 @@ class SuiteTests(unittest.TestCase):
         self.assertEqual(suites.selection(["fast", "tooling"]), suites.selection(["fast"]))
         self.assertEqual(suites.selection(["compiler", "selfhost"]).count("selfhost_compiler"), 1)
 
+    def test_pass_proofs_and_custom_hosts_have_explicit_prerequisites(self):
+        for name in ("emitter_support", "machine_lowering", "language_components"):
+            self.assertIn("checker", suites.CHECKS[name].requirements)
+        for name in ("selfhost_bodies", "language_bodies", "benchmarks"):
+            self.assertIn("wasmtime-py", suites.CHECKS[name].requirements)
+        for name in ("bodies", "aggregate_bodies", "runtime_bodies", "ordered_bodies", "selfhost_bodies", "language_bodies"):
+            self.assertIn("wasm-tools", suites.CHECKS[name].requirements)
+
+    def test_compiler_preflight_requires_source_bundle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            build = root / "bootstrap/build"
+            build.mkdir(parents=True)
+            for name in ("compiler.wasm", "compiler.stage1.wasm", "compiler.stage2.wasm", "compiler.stage3.wasm", "compiler-manifest.json"):
+                (build / name).touch()
+            with patch.object(suites, "ROOT", root):
+                with self.assertRaisesRegex(RuntimeError, "missing compiler.bundle.py"):
+                    suites.prerequisites(("compiler",))
+                (build / "compiler.bundle.py").touch()
+                suites.prerequisites(("compiler",))
+
     def test_unknown_suite_is_an_error(self):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
             suites.main(["typo"])
