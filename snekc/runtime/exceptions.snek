@@ -1,0 +1,83 @@
+
+class BaseException:
+    __message: Final[str | None]
+    __keyrepr: Final[str | None] = None
+
+    def __init__(self, __msg: str | None = None) -> None:
+        self.__message = __msg
+
+
+class Exception(BaseException):
+    pass
+
+
+class GeneratorExit(BaseException):
+    pass
+
+
+class StopIteration(Exception):
+    pass
+
+
+class ArithmeticError(Exception):
+    pass
+
+
+class ZeroDivisionError(ArithmeticError):
+    pass
+
+
+class OverflowError(ArithmeticError):
+    pass
+
+
+class AssertionError(Exception):
+    pass
+
+
+class LookupError(Exception):
+    pass
+
+
+class IndexError(LookupError):
+    pass
+
+
+class KeyError(LookupError):
+    pass
+
+
+class RuntimeError(Exception):
+    pass
+
+
+class OSError(Exception):
+    pass
+
+
+class BrokenPipeError(OSError):
+    pass
+
+
+class NotImplementedError(RuntimeError):
+    pass
+
+
+class ValueError(Exception):
+    pass
+
+
+class TypeError(Exception):
+    pass
+
+
+class NameError(Exception):
+    pass
+
+
+class UnboundLocalError(NameError):
+    pass
+
+
+class MemoryError(Exception):
+    pass

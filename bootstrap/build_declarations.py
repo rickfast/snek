@@ -9,7 +9,6 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-import re
 import shutil
 import sys
 import tempfile
@@ -19,13 +18,14 @@ sys.path.insert(0, str(ROOT))
 
 from bootstrap.declarations import Declarations
 from bootstrap.parser import parse
-from snekc.builtins import BUILTINS_SOURCE, STR_METHODS_TEMPLATE
+from bootstrap.linker import NUMERIC_HELPERS, module_source, parser_source
+from snekc.builtins import BUILTINS_SOURCE, STR_METHODS_SOURCE
 from snekc.formatting import FORMAT_SOURCE
 from snekc.stdlib import MODULE_EXPORTS
 
 
 def configuration() -> tuple[list[str], dict[str, list[str]]]:
-    helpers = re.findall(r"^def ([A-Za-z_][A-Za-z_0-9]*)\(", STR_METHODS_TEMPLATE + FORMAT_SOURCE, re.M)
+    helpers = [node.get("name").text for node in parse(STR_METHODS_SOURCE + FORMAT_SOURCE).get("body").items]
     return helpers, {name: sorted(exports) for name, exports in MODULE_EXPORTS.items()}
 
 
@@ -35,50 +35,15 @@ def declare(source: str) -> Declarations:
     return result
 
 
-def remove_once(source: str, text: str) -> str:
-    if source.count(text) != 1:
-        raise ValueError(f"bootstrap linker expected exactly one {text!r}")
-    return source.replace(text, "", 1)
-
-
 def numeric_helpers() -> str:
-    source = (ROOT / "bootstrap/encode.py").read_text()
-    names = ["need", "digit", "big_trim", "big_mul", "big_shift", "big_cmp", "big_sub",
-             "big_bits", "big_parse", "rounded_ratio", "float_bytes"]
-    parts = []
-    for name in names:
-        # These are undecorated top-level functions in a controlled source file.
-        # Stop at the next unindented line; no AST parsing/rewrite is involved.
-        matches = list(re.finditer(rf"^def {name}\(.*(?:\n(?:[ \t]+[^\n]*|))*", source, re.M))
-        if len(matches) != 1:
-            raise ValueError(f"bootstrap linker cannot find numeric helper {name}")
-        parts.append(matches[0].group())
-    # The source parser already owns digit(). Both occurrences here are code,
-    # not string data; fail closed if the encoder's helper shape changes.
-    result = "\n\n".join(parts)
-    for old, new in (("def digit(", "def numeric_digit("), ("d = digit(char)", "d = numeric_digit(char)")):
-        if result.count(old) != 1:
-            raise ValueError(f"bootstrap numeric helper contract changed: {old}")
-        result = result.replace(old, new, 1)
-    return result
+    return module_source("encode", select=NUMERIC_HELPERS, rename={"digit": "numeric_digit"})
 
 
-def bundle_source() -> str:
-    parser = (ROOT / "bootstrap/parser.py").read_text()
-    parser = remove_once(parser, 'if __name__ == "__main__":\n    print(parse(utf8(read_bytes())).json())\n')
-    declarations = (ROOT / "bootstrap/declarations.py").read_text()
-    for line in (
-        "from __future__ import annotations\n",
-        "from snek import i32, i64\n",
-        "from bootstrap.parser import Node, fail, missing, parse_expression, scalar, sequence, string\n",
-        "from bootstrap.encode import float_bytes\n",
-    ):
-        declarations = remove_once(declarations, line)
-    parser = remove_once(parser, "from snek import i32, read_bytes\n")
-    parser = parser.replace("from __future__ import annotations\n",
-                            "from __future__ import annotations\nfrom snek import i32, i64, read_bytes\n", 1)
+def bundle_source(*, entry: bool = True) -> str:
+    parser = parser_source(entry=False)
+    declarations = module_source("declarations")
     helpers, libraries = configuration()
-    entry = f'''
+    data = f'''
 def declaration_builtin_source() -> str:
     return {BUILTINS_SOURCE!r}
 
@@ -97,10 +62,8 @@ def declaration_command() -> None:
     print(result.tree().json())
 
 
-if __name__ == "__main__":
-    declaration_command()
 '''
-    return parser + "\n" + numeric_helpers() + "\n" + declarations + entry
+    return parser + "\n" + numeric_helpers() + "\n" + declarations + data + ('\nif __name__ == "__main__":\n    declaration_command()\n' if entry else "")
 
 
 def build(directory: Path) -> dict:

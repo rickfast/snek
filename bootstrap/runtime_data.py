@@ -8,12 +8,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-from string import Template
 
-from snekc.builtins import STR_METHODS_TEMPLATE
+from snekc.builtins import STR_METHODS_SOURCE
 from snekc.check import INTRINSICS
 from snekc.formatting import FORMAT_SOURCE
-from snekc.unicode import ALL_FLAGS, CASE_KINDS, FLAG_NAMES, NONPRINT
+from snekc.unicode import ALL_FLAGS, CASE_KINDS, NONPRINT
 from bootstrap.parser import Node, parse, sequence, string
 
 
@@ -48,7 +47,7 @@ def indexed_runtime(source: str, contract: str) -> Node:
 
 
 def configuration() -> tuple[str, dict[str, list[str]], str]:
-    source = Template(STR_METHODS_TEMPLATE).substitute(FLAG_NAMES) + FORMAT_SOURCE
+    source = STR_METHODS_SOURCE + FORMAT_SOURCE
     intrinsics = {name: [function, str(ret), *(str(param) for param in params)]
                   for name, (params, ret, function) in INTRINSICS.items()}
     # Also binds Unicode-use metadata to the emitter's current flag/case ABI.

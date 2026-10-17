@@ -22,12 +22,11 @@ from __future__ import annotations
 
 import ast
 import copy
-import string
 from dataclasses import dataclass, field
 from functools import reduce
 
 from . import ir, unicode
-from .builtins import BUILTINS_SOURCE, STR_METHODS_TEMPLATE
+from .builtins import BUILTINS_SOURCE, STR_METHODS_SOURCE
 from .errors import CompileError
 from .formatting import FORMAT_SOURCE, parse_spec
 from .closures import ClosureChecker, callable_type, scope_walk, body_nodes
@@ -365,7 +364,7 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
         self.ctor_sigs: dict[ClassInfo, FuncSig] = {}
         self.ctx: FuncCtx = FuncCtx("<module>", NONE)
         # Built-in functions (the str methods): checked and emitted only when used.
-        methods_src = string.Template(STR_METHODS_TEMPLATE).substitute(unicode.FLAG_NAMES) + FORMAT_SOURCE
+        methods_src = STR_METHODS_SOURCE + FORMAT_SOURCE
         self.bnodes: dict[str, ast.FunctionDef] = {
             n.name: n for n in parse_source(methods_src, "<snek str methods>", frontend=frontend).body
             if isinstance(n, ast.FunctionDef)}

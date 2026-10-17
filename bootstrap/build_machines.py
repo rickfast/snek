@@ -9,25 +9,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from bootstrap.body_bridge import compile_source
-from bootstrap.build_declarations import remove_once
+from bootstrap.linker import HEADER, PARSER_PRIMITIVES, module_source
 from snekc.wasm import encode
 
 
 def bundle_source() -> str:
-    # Reuse the parser's UTF-8 and tree primitives, not its source grammar.
-    parser = (ROOT / "bootstrap/parser.py").read_text()
-    marker = "\n\nclass Token:\n"
-    if parser.count(marker) != 1:
-        raise ValueError("machine linker cannot locate tree primitives")
-    support = (ROOT / "bootstrap/machine_lower.py").read_text()
-    for line in ("from __future__ import annotations\n", "from snek import i32\n",
-                 "from bootstrap.parser import Node, missing, scalar, sequence, string\n"):
-        support = remove_once(support, line)
-    emitter = (ROOT / "bootstrap/machine_emit.py").read_text()
-    for line in ("from __future__ import annotations\n", "from snek import i32\n",
-                 "from bootstrap.parser import Node\n"):
-        emitter = remove_once(emitter, line)
-    return parser.split(marker)[0] + "\n" + support + "\n" + emitter + '''
+    # Reuse only the parser's explicitly selected UTF-8 and tree primitives.
+    source = HEADER + module_source("parser", select=PARSER_PRIMITIVES)
+    source += "\n" + module_source("machine_lower") + "\n" + module_source("machine_emit")
+    return source + '''
 
 def machine_command() -> None:
     request = MachineJSON(utf8(read_bytes())).read()

@@ -21,43 +21,23 @@ import tempfile
 import native_bench as nb
 
 ROOT = nb.ROOT
-from bootstrap.build_emitter import compiler_source
+from bootstrap.build_emitter import COMPILER_STEPS, ENCODE_STEPS, compiler_entry, compiler_source
+from bootstrap.linker import statements
 
 
-STEPS = [
-    ("read", "data = read_bytes()"),
-    ("decode_source", "source = utf8(data)"),
-    ("declaration_setup", "decl = Declarations(declaration_helpers(), declaration_libraries())"),
-    ("parse_source", "module = parse(source)"),
-    ("parse_builtins", "builtins = parse(declaration_builtin_source())"),
-    ("declarations", "decl.run(module, builtins)"),
-    ("runtime_index", 'runtime = body_runtime_tree()'),
-    ("body_setup", "checked = BodyChecker(decl, runtime, body_runtime_intrinsics())"),
-    ("check_bodies", "checked.run()"),
-    ("emit_wat", "wat = emit_source_module(checked, emit_prelude_source(), False)"),
-    ("encode_wat_utf8", "wat_bytes = emit_utf8(wat)"),
-    ("encode_wasm", "output = wasm_encode(wat_bytes)"),
-    ("write", "write_bytes(output)"),
-]
+STEPS = COMPILER_STEPS + ENCODE_STEPS
 
 
 def instrument(source):
-    marker = "\ndef emitter_command() -> None:\n"
-    if source.count(marker) != 1 or not source.endswith("emitter_command()\n"):
-        raise ValueError("compiler entry point changed; review profiling instrumentation")
-    prefix, entry = source.split(marker)
-    # Fail closed if the production pipeline changes without updating this probe.
-    expected = [
-        "    decl = Declarations(declaration_helpers(), declaration_libraries())\n",
-        "    decl.run(parse(utf8(data)), parse(declaration_builtin_source()))\n",
-        '    checked = BodyChecker(decl, body_runtime_tree(), body_runtime_intrinsics())\n',
-        "    checked.run()\n",
-        "    wat = emit_source_module(checked, emit_prelude_source(), component)\n",
-        '    if text: print(wat, end="")\n    else: write_bytes(wasm_encode(emit_utf8(wat)))\n',
-    ]
-    if not entry.endswith("".join(expected) + "emitter_command()\n"):
+    parts = statements(source)
+    entries = [part for part in parts if part.words[:2] == ["def", "emitter_command"]]
+    expected = statements(compiler_entry())
+    if (len(entries) != 1 or entries[0].words != expected[0].words
+            or parts[-1].words != ["emitter_command", "(", ")"]):
         raise ValueError("compiler pipeline changed; review profiling instrumentation")
+    prefix = "".join(part.source for part in parts[:-1] if part is not entries[0])
     result = prefix + "\nfrom snek import time, f64\n\ndef profile_command() -> None:\n"
+    result += "    component = False\n"
     result += "    marks: list[f64] = [time.monotonic()]\n"
     for _, statement in STEPS:
         result += "    " + statement + "\n    marks.append(time.monotonic())\n"

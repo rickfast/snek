@@ -3,7 +3,7 @@
 Requires a Python whose unicodedata.unidata_version is exactly 15.1.0. Normal
 compiler builds do not run this generator or import unicodedata for name lookup.
 The vendored NameAliases input is hash-checked before use. --check is read-only;
---write replaces only the marked generated block in parser.py.
+--write replaces only the marked generated block in unicode_names.py.
 """
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ def main() -> None:
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--write", action="store_true")
     args = cli.parse_args()
-    path = ROOT / "parser.py"
+    path = ROOT / "unicode_names.py"
     source = path.read_text()
     before, remainder = source.split(BEGIN, 1)
     old, after = remainder.split(END, 1)

@@ -1,8 +1,9 @@
-"""Temporary owned typed IR -> Python emitter bridge for the bootstrap checker.
+"""Seed-construction owned typed IR -> Python emitter bridge.
 
 This decodes resolved IR, never checks user source or falls back to check.py.
 The existing emitter, encoder, Unicode tables and built-in exception allocation
-ABI remain Python-owned. This experimental command does not change snekc.
+ABI remain Python-owned for the seed only. This bridge is deliberately retained:
+bootstrap_compiler.py uses it before stage 1; later stages forbid host passes.
 """
 from __future__ import annotations
 

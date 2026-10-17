@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT))
 
 from bootstrap import declarations as port
 from bootstrap.build_declarations import bundle_source, declare
+from bootstrap.linker import parser_source
 from snekc import driver, runner
 from snekc.check import Checker
 from snekc.errors import CompileError
@@ -34,6 +35,8 @@ def type_tree(ty):
         kind = "str"
     elif ty == t.TRACEBACK:
         kind = "TracebackType"
+    elif isinstance(ty, t.StreamT):
+        kind, name = "Stream", ty.kind
     elif isinstance(ty, t.ClassT):
         kind, name = "class", ty.info.name
     elif isinstance(ty, t.TypeT):
@@ -243,7 +246,7 @@ class DeclarationTests(unittest.TestCase):
                  ROOT / "bootstrap/parser.py", ROOT / "bootstrap/encode.py"]
         for path in paths:
             with self.subTest(path=path.name):
-                self.compare(path.read_text())
+                self.compare(parser_source() if path == ROOT / "bootstrap/parser.py" else path.read_text())
 
     def test_own_source(self):
         self.compare(self.source)

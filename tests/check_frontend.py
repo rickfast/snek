@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from bootstrap import parser
+from bootstrap.linker import parser_source
 from bootstrap.generate_unicode_names import BEGIN, END, VERSION, aliases, generate
 from snekc import CompileError, driver, runner
 from snekc.check import check_module
@@ -32,14 +33,16 @@ class FrontendTests(unittest.TestCase):
         cls.addClassCleanup(cls.temp.cleanup)
         cls.directory = Path(cls.temp.name)
         cls.parser_wasm = cls.directory / "parser.wasm"
-        driver.build(ROOT / "bootstrap/parser.py", cls.parser_wasm, optimize=False, frontend="cpython")
+        cls.parser_bundle = cls.directory / "parser.bundle.py"
+        cls.parser_bundle.write_text(parser_source())
+        driver.build(cls.parser_bundle, cls.parser_wasm, optimize=False, frontend="cpython")
 
     def test_wat_parity(self):
         paths = [*sorted((ROOT / "examples").glob("*.py")),
                  *sorted((ROOT / "bench/programs").glob("*.py")),
                  ROOT / "bootstrap/parser.py", ROOT / "bootstrap/encode.py"]
         for path in paths:
-            source = path.read_text()
+            source = parser_source() if path == ROOT / "bootstrap/parser.py" else path.read_text()
             for component in (False, True):
                 if path.parent.name == "bootstrap" and component:
                     continue  # Binary stdin is currently core-only.
@@ -157,7 +160,7 @@ async for a in xs:
         self.assertNotIn("Traceback", failed.stderr)
 
     def test_unicode_data(self):
-        source = (ROOT / "bootstrap/parser.py").read_text()
+        source = (ROOT / "bootstrap/unicode_names.py").read_text()
         block = BEGIN + source.split(BEGIN)[1].split(END)[0] + END
         if unicodedata.unidata_version == VERSION:
             self.assertEqual(block, generate())
