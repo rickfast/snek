@@ -66,24 +66,11 @@ jobs:
           python bootstrap/bootstrap_compiler.py
           cmp bootstrap/build/compiler.stage2.wasm bootstrap/build/compiler.stage3.wasm
           cmp bootstrap/build/compiler.stage3.wasm bootstrap/build/compiler.wasm
-      - name: Compiler isolation and fixed-point tests
-        run: |
-          python tests/check_selfhost_compiler.py
-          python tests/check_lazy_runtime.py
-      - name: Core examples and negative fixtures (raw and optimized)
-        run: python tests/run_tests.py
-      - name: Component examples (raw and optimized)
+      - name: Compiler isolation, fixed point, and full raw/optimized corpus
+        run: python tests/run_suites.py selfhost
+      - name: Independent components, host I/O, cancellation and repeated invocation
         if: matrix.runtime == 'wasmtime-py'
-        run: |
-          wasmtime --version
-          wasm-tools --version
-          python tests/check_components.py
-      - name: Independent component and host-I/O regression tests
-        if: matrix.runtime == 'wasmtime-py'
-        run: python tests/check_selfhost_components.py --require-no-skips
-      - name: Component cancellation and repeated invocation
-        if: matrix.runtime == 'wasmtime-py'
-        run: python tests/check_component_lifecycle.py
+        run: python tests/run_suites.py selfhost-components
       - name: Preserve bootstrap proof
         if: always()
         uses: actions/upload-artifact@v4
@@ -96,3 +83,45 @@ jobs:
             bootstrap/build/compiler.wasm
           if-no-files-found: warn
           retention-days: 14
+
+  regression:
+    name: Regression suite (${{ matrix.suite }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [fast, reference, bootstrap, checkers, components, checker-components]
+    env:
+      PYTHONUNBUFFERED: '1'
+      SNEK_RUNTIME: wasmtime-py
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13.14'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '25.9.0'
+      - name: Install pinned dependencies
+        run: |
+          python -m pip install wasmtime==49.0.0
+          npm install --prefix "$RUNNER_TEMP/snek-tools" --no-audit --no-fund binaryen@132.0.0
+          echo "SNEK_WASM_OPT=$RUNNER_TEMP/snek-tools/node_modules/.bin/wasm-opt" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/snek-component-tools"
+          cd "$RUNNER_TEMP/snek-component-tools"
+          curl --fail --location --retry 3 -o wasmtime.tar.xz https://github.com/bytecodealliance/wasmtime/releases/download/v49.0.2/wasmtime-v49.0.2-x86_64-linux.tar.xz
+          echo 'a4d6e9e3a5a60f527cf7793d674c48930c80c2e8977995b8a275cad3254b9322  wasmtime.tar.xz' | sha256sum --check
+          tar -xf wasmtime.tar.xz
+          curl --fail --location --retry 3 -o wasm-tools.tar.gz https://github.com/bytecodealliance/wasm-tools/releases/download/v1.250.0/wasm-tools-1.250.0-x86_64-linux.tar.gz
+          echo 'b746c34e7c4162b8812eb29397ebe076834e496a8c46fe68d793379a2741eb50  wasm-tools.tar.gz' | sha256sum --check
+          tar -xf wasm-tools.tar.gz
+          echo "$PWD/wasmtime-v49.0.2-x86_64-linux" >> "$GITHUB_PATH"
+          echo "$PWD/wasm-tools-1.250.0-x86_64-linux" >> "$GITHUB_PATH"
+      - name: Prepare historical rebuilt-checker component variant
+        if: matrix.suite == 'checker-components'
+        run: python bootstrap/bootstrap_checker.py
+      - name: Run explicit suite without skips
+        run: python tests/run_suites.py '${{ matrix.suite }}'

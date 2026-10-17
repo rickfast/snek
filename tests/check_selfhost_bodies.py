@@ -35,7 +35,7 @@ ERRORS = [
 ]
 
 
-class SelfCheckTests(ordered.OrderedTests):
+class RebuiltCheckerFixture(base.BodyFixture):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
@@ -48,7 +48,7 @@ class SelfCheckTests(ordered.OrderedTests):
             cls.manifest = rebuild(cls.source, cls.seed, cls.directory)
         cls.stage2 = cls.directory / "checker.stage2.wasm"
         cls.stage3 = cls.directory / "checker.stage3.wasm"
-        # All inherited semantic/IR/error tests exercise the rebuilt stage 3,
+        # All explicitly selected semantic/IR/error cases exercise stage 3,
         # not just the original Python-checked seed.
         cls.wasm = cls.stage3
 
@@ -59,6 +59,8 @@ class SelfCheckTests(ordered.OrderedTests):
         base.driver.assemble(wat, binary, optimize=optimize)
         return binary
 
+
+class SelfCheckCases:
     def test_self_rebuild_fixed_point(self):
         self.assertEqual(self.stage2.read_bytes(), self.stage3.read_bytes())
         self.assertEqual(self.manifest["source_sha256"], hashlib.sha256(self.source.encode()).hexdigest())
@@ -165,6 +167,10 @@ class SelfCheckTests(ordered.OrderedTests):
             with self.assertRaisesRegex(RuntimeError, "proof failed"):
                 bootstrap(directory)
         self.assertEqual({p.name: p.read_bytes() for p in directory.iterdir()}, files)
+
+
+CASES = (*ordered.CASES, SelfCheckCases)
+SelfCheckTests = base.checker_variant("SelfCheckTests", CASES, RebuiltCheckerFixture)
 
 
 if __name__ == "__main__":

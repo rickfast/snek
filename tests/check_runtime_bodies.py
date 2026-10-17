@@ -152,7 +152,7 @@ ERRORS = [
 ]
 
 
-class RuntimeTests(aggregates.AggregateTests):
+class RuntimeCases:
     def test_runtime_fixture(self):
         self.compare((base.ROOT / "examples/runtime_checker.py").read_text())
         self.compare((base.ROOT / "examples/str_methods.py").read_text())
@@ -230,6 +230,10 @@ class RuntimeTests(aggregates.AggregateTests):
         if base.shutil.which("wasm-tools"):
             result = base.subprocess.run(["wasm-tools", "validate", str(binary)], capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
+
+
+CASES = (*aggregates.CASES, RuntimeCases)
+RuntimeTests = base.checker_variant("RuntimeTests", CASES)
 
 
 if __name__ == "__main__":
