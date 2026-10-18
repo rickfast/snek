@@ -418,8 +418,8 @@ provide transaction isolation.
 Create lists in Snek, then pass their handles back. JavaScript arrays, lookalike
 objects, handles for different element types, and handles from another instance
 are rejected. Handles are not transferable between workers; send `toArray()` data
-instead. Dictionary/tuple handles, callback list elements, and
-optional lists are not supported yet. Supported lists can also be parameters and
+instead. Dictionary/tuple handles and optional lists are not supported yet.
+Supported lists can also be parameters and
 results of [typed callbacks](#typed-callbacks).
 
 ### Nested lists
@@ -448,6 +448,37 @@ Nested handles also work in host callbacks, async returns, and `gather()` result
 There is no automatic recursive array conversion: choose explicitly which levels
 to copy, as above. Nullability is supported for `HostObject` and Snek class
 elements, not for child lists themselves.
+
+### Lists of callbacks
+
+Lists may contain synchronous or async typed callbacks, including inside nested
+lists. Functions retain identity and captured values when read, replaced, or
+removed from the list:
+
+```python
+from typing import Callable
+
+def listeners(prefix: str) -> list[Callable[[str], str]]:
+    def greet(text: str) -> str:
+        return prefix + text
+    return [greet, greet]
+```
+
+```javascript
+const listeners = lib.listeners("Hello, ");
+const greet = listeners.pop();
+console.log(greet === listeners.get(0)); // true
+listeners.set(0, text => text.toUpperCase());
+console.log(greet("browser")); // Hello, browser
+```
+
+Async elements use `Callable[[...], Coroutine[None, None, T]]` and require
+JavaScript functions returning `PromiseLike<T>`. Generated TypeScript checks
+parameter and result types, including `undefined` for synchronous `None` results.
+Host functions may inspect and mutate callback lists during a Snek call, but must
+defer invoking Snek callbacks until the synchronous step returns. Callback values
+cannot be nullable, and direct callback parameters/results that are themselves
+callbacks remain unsupported.
 
 ## Snek-owned class handles
 
@@ -615,7 +646,8 @@ greet("browser"); // Hello, browser
 Callback arguments and results can be numbers, booleans, strings, `HostObject`,
 or `HostObject | None`, Snek class/nullable class handles, plus supported `list[T]`
 handles (including nested lists);
-results can also be `None`. Nested callbacks, collections other than supported
+results can also be `None`. Lists can contain callbacks, but direct callback-valued
+callback parameters/results, collections other than supported
 lists, and optional callbacks are not supported. Callbacks with these result types
 are synchronous: returning a Promise is an error, including for `None` results.
 The generated TypeScript uses `undefined` for a `None` callback result to catch

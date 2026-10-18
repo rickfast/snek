@@ -20,6 +20,7 @@ from check_library import LIST_SOURCE, LIST_EXPORTS
 from check_library import NESTED_LIST_SOURCE, NESTED_LIST_EXPORTS
 from check_library import LIST_CALLBACK_SOURCE, LIST_CALLBACK_EXPORTS
 from check_library import CLASS_VALUE_SOURCE, CLASS_VALUE_EXPORTS
+from check_library import CALLBACK_LIST_SOURCE, CALLBACK_LIST_EXPORTS
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -79,6 +80,10 @@ class BrowserTests(unittest.TestCase):
         for name, optimize in (("list-callbacks", False), ("list-callbacks-optimized", True)):
             driver.build(source, root / (name + ".wasm"), optimize=optimize,
                          compiler=compiler, library=True, exports=LIST_CALLBACK_EXPORTS)
+        source.write_text(CALLBACK_LIST_SOURCE)
+        for name, optimize in (("callback-lists", False), ("callback-lists-optimized", True)):
+            driver.build(source, root / (name + ".wasm"), optimize=optimize,
+                         compiler=compiler, library=True, exports=CALLBACK_LIST_EXPORTS)
         source.write_text(CLASS_VALUE_SOURCE)
         for name, optimize in (("classes", False), ("classes-optimized", True)):
             driver.build(source, root / (name + ".wasm"), optimize=optimize,
@@ -113,6 +118,38 @@ class BrowserTests(unittest.TestCase):
         self.page = context.new_page()
         self.page.set_default_timeout(15000)
         self.page.goto(self.url)
+
+    def test_callback_list_elements(self):
+        for target in ("callback-lists", "callback-lists-optimized"):
+            with self.subTest(target=target):
+                result = self.page.evaluate('''async target => {
+                  const {instantiate, SnekError} = await import(`/${target}.js`);
+                  let saved, guarded = false;
+                  const lib = await instantiate(`/${target}.wasm`, {imports: {register: items => {
+                    saved = items.get(0);
+                    try {saved("inline");} catch (e) {guarded = e instanceof Error;}
+                    items.append(text => "JS:" + text);
+                    return items;
+                  }}});
+                  const items = lib.sync_list("Snek:"), fn = items.pop();
+                  const same = fn === items.pop();
+                  items.append(text => "JS:" + text);
+                  const fromHost = lib.from_host("host:");
+                  const asyncItems = lib.async_list("async:");
+                  const captured = await asyncItems.get(0)("one");
+                  asyncItems.set(0, async text => "JS:" + text);
+                  const values = await Promise.all([lib.use_async(asyncItems, "two"), lib.use_async(asyncItems, "three")]);
+                  asyncItems.set(0, text => text);
+                  let invalid = false;
+                  try {await lib.use_async(asyncItems, "bad");} catch (e) {invalid = e instanceof SnekError;}
+                  return {same, guarded, invalid, retained: fn("kept"), saved: saved("later"),
+                    host: fromHost.get(-1)("host"), called: lib.use(items, "value"), captured, values,
+                    unicode: lib.upper_callbacks().get(0)("straße 🐍")};
+                }''', target)
+                self.assertEqual(result, {"same": True, "guarded": True, "invalid": True,
+                    "retained": "Snek:kept", "saved": "host:later", "host": "JS:host",
+                    "called": "JS:value", "captured": "async:one", "values": ["JS:two", "JS:three"],
+                    "unicode": "STRASSE 🐍"})
 
     def test_class_values_in_lists_and_callbacks(self):
         for target in ("classes", "classes-optimized"):

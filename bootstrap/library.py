@@ -176,16 +176,19 @@ def library_list_element(ty: str) -> str:
         raise ValueError("invalid library list type: " + ty)
     if elem.startswith("list["):
         library_list_element(elem)
+    elif elem.startswith("Callable["):
+        library_callback_types(elem)
     elif elem.startswith("class:"):
         if library_class_name(elem) == "": raise ValueError("invalid library class element: " + ty)
     elif elem not in ("i32", "i64", "f32", "f64", "bool", "str", "HostObject", "HostObject | None"):
-        raise ValueError("library list elements must be scalar, string, object handles, or supported lists; got " + ty)
+        raise ValueError("library list elements must be scalar, string, object handles, supported callbacks or lists; got " + ty)
     return elem
 
 
 def library_mangle(ty: str) -> str:
     if ty.startswith("class:"): return library_class_name(ty) + ("?" if ty.endswith(" | None") else "")
     if ty.startswith("list["): return "list<" + library_mangle(library_list_element(ty)) + ">"
+    if ty.startswith("Callable["): return library_callback_heap(ty)[1:]
     return "none" if ty == "None" else ty.replace(" | None", "?")
 
 
@@ -256,11 +259,8 @@ def library_nullable(ty: str) -> str:
 
 def library_callbacks(exports: list[LibraryExport], hosts: list[LibraryExport]) -> list[str]:
     callbacks: list[str] = []
-    for item in exports + hosts:
-        for ty in item.params + [item.ret]:
-            if ty.startswith("Callable[") and ty not in callbacks:
-                library_callback_types(ty)
-                callbacks.append(ty)
+    for ty in library_boundary_types(exports, hosts):
+        if ty.startswith("Callable["): callbacks.append(ty)
     return callbacks
 
 

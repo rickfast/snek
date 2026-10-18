@@ -85,7 +85,13 @@ call they use the normal entry guard. `toArray()` copies values one at a time;
 ordinary handle passing does not copy list storage. List boundary metadata closes
 recursively over child list types, reusing the same wrappers and preserving aliases
 at every depth. `toArray()` is shallow and returns child handles for nested lists.
-Callback list elements and optional lists are not yet part of this boundary.
+Sync and async callbacks can be list elements. Signature discovery closes over
+both lists and callbacks, including callbacks reachable only through a list.
+Element access reuses callback identity maps; retained functions keep their
+captured state after removal. Inserting a JavaScript function creates a closure
+without executing user code, so hosts may register callbacks during a Snek call.
+Invoking a Snek callback still requires leaving the active synchronous step.
+Optional lists and optional callbacks are not yet part of this boundary.
 
 Class boundaries use opaque `SnekObject` handles. A per-instance JavaScript
 private brand validates ownership; the private field strongly roots the WasmGC

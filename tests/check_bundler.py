@@ -17,6 +17,7 @@ from snekc import driver
 from check_library import LIST_SOURCE, LIST_EXPORTS, NESTED_LIST_SOURCE, NESTED_LIST_EXPORTS
 from check_library import LIST_CALLBACK_SOURCE, LIST_CALLBACK_EXPORTS
 from check_library import CLASS_VALUE_SOURCE, CLASS_VALUE_EXPORTS
+from check_library import CALLBACK_LIST_SOURCE, CALLBACK_LIST_EXPORTS
 
 EXAMPLE = ROOT / "examples/vite"
 SERVER = '''
@@ -29,6 +30,25 @@ console.log(JSON.stringify({url: server.resolvedUrls.local[0]}));
 '''
 
 TYPES = '''
+import {type SnekLibrary as CallbackListLibrary} from "./generated/callback-lists.js";
+declare const callbackLists: CallbackListLibrary;
+const functions = callbackLists.sync_list("prefix");
+const called: string = functions.get(0)("text");
+functions.append(text => text);
+const asyncFunctions = callbackLists.async_list("prefix");
+asyncFunctions.append(async text => text);
+const asyncCalled: PromiseLike<string> = asyncFunctions.get(0)("text");
+const voidCalled: undefined = callbackLists.void_list().get(0)("text");
+// @ts-expect-error callback elements must be functions
+functions.append("text");
+// @ts-expect-error callback results are typed
+functions.set(0, text => 42);
+// @ts-expect-error async callbacks must return a PromiseLike
+asyncFunctions.append(text => text);
+// @ts-expect-error sync callbacks cannot return Promises
+functions.append(async text => text);
+// @ts-expect-error None callbacks must not return Promises
+callbackLists.void_list().append(async text => {});
 import {type SnekLibrary as ClassLibrary, type SnekObject} from "./generated/classes.js";
 declare const classes: ClassLibrary;
 const base = classes.make(1), derived = classes.derived(2);
@@ -161,6 +181,10 @@ class BundlerTests(unittest.TestCase):
         print(f"Bundler browser: {engine} {cls.browser.version}; compiler: {cls.compiler}", flush=True)
 
     def compile(self, optimize):
+        source = self.root / "callback_lists.py"
+        source.write_text(CALLBACK_LIST_SOURCE)
+        driver.build(source, self.root / "src/generated/callback-lists.wasm", optimize=optimize,
+                     compiler=self.compiler, library=True, exports=CALLBACK_LIST_EXPORTS)
         source = self.root / "classes.py"
         source.write_text(CLASS_VALUE_SOURCE)
         driver.build(source, self.root / "src/generated/classes.wasm", optimize=optimize,

@@ -261,6 +261,43 @@ def roundtrip(fn: Callable[[Counter], Counter]) -> Callable[[Counter], Counter]:
 '''
 CLASS_VALUE_EXPORTS = CLASS_EXPORTS + ["list_base", "list_derived", "list_optional", "nested", "callback", "async_callback", "apply", "apply_optional", "apply_async", "apply_rows", "roundtrip"]
 
+CALLBACK_LIST_SOURCE = '''from typing import Callable, Coroutine
+from snek import host, checkpoint
+@host("register")
+def register(items: list[Callable[[str], str]]) -> list[Callable[[str], str]]:
+    pass
+def sync_list(prefix: str) -> list[Callable[[str], str]]:
+    def fn(text: str) -> str:
+        return prefix + text
+    return [fn, fn]
+def async_list(prefix: str) -> list[Callable[[str], Coroutine[None, None, str]]]:
+    async def fn(text: str) -> str:
+        await checkpoint()
+        return prefix + text
+    return [fn, fn]
+def upper_callbacks() -> list[Callable[[str], str]]:
+    def upper(text: str) -> str:
+        return text.upper()
+    return [upper]
+def void_list() -> list[Callable[[str], None]]:
+    def show(text: str) -> None:
+        print(text)
+    return [show]
+def nested(prefix: str) -> list[list[Callable[[str], str]]]:
+    return [sync_list(prefix)]
+def echo(items: list[Callable[[str], str]]) -> list[Callable[[str], str]]:
+    return items
+def use(items: list[Callable[[str], str]], text: str) -> str:
+    return items[0](text)
+async def use_async(items: list[Callable[[str], Coroutine[None, None, str]]], text: str) -> str:
+    return await items[0](text)
+def from_host(prefix: str) -> list[Callable[[str], str]]:
+    return register(sync_list(prefix))
+def observe(fn: Callable[[list[Callable[[str], str]]], str], items: list[Callable[[str], str]]) -> str:
+    return fn(items)
+'''
+CALLBACK_LIST_EXPORTS = ["sync_list", "async_list", "upper_callbacks", "void_list", "nested", "echo", "use", "use_async", "from_host", "observe"]
+
 OBJECT_SOURCE = '''from snek import HostObject, host, checkpoint
 from typing import Callable, Iterator
 @host("lookup")
@@ -628,6 +665,70 @@ const second = await instantiate(await WebAssembly.compile(bytes));
 assert.equal(second.add(2, 3), 5);
 ''')
 
+    def test_callback_list_identity_mutation_and_deferred_host_use(self):
+        self.src.write_text(CALLBACK_LIST_SOURCE)
+        self.build(CALLBACK_LIST_EXPORTS)
+        self.node('''
+let saved, registered, output = "";
+const js = text => "JS:" + text;
+const lib = await instantiate(bytes, {stdout: text => {output += text;}, imports: {
+  register(items) {
+    registered = items; saved = items.get(0);
+    assert.throws(() => saved("inline"), /not reentrant/);
+    items.append(js); return items;
+  },
+}});
+const list = lib.sync_list("Snek:");
+assert.equal(list.get(0), list.get(1));
+assert.equal(list.get(0)("🐍"), "Snek:🐍");
+assert.equal(lib.echo(list), list);
+assert.equal(lib.use(list, "call"), "Snek:call");
+list.append(js); assert.equal(list.pop(), js);
+const retained = list.pop(); list.pop();
+assert.equal(retained("alive"), "Snek:alive");
+list.append(retained); list.set(0, js);
+assert.equal(list.get(0), js);
+assert.equal(lib.use(list, "call"), "JS:call");
+assert.throws(() => list.append(42), /expected function/);
+const hostList = lib.from_host("host:");
+assert.equal(hostList, registered); assert.equal(hostList.get(0), saved);
+assert.equal(saved("later"), "host:later");
+assert.equal(hostList.get(-1), js);
+assert.equal(lib.observe(items => typeof items.get(0), hostList), "function");
+assert.equal(lib.nested("nested:").get(0).get(0)("call"), "nested:call");
+assert.equal(lib.void_list().get(0)("printed"), undefined);
+assert.equal(output, "printed\\n");
+''')
+
+    def test_async_callbacks_in_lists(self):
+        self.src.write_text(CALLBACK_LIST_SOURCE)
+        self.build(CALLBACK_LIST_EXPORTS)
+        self.node('''
+const lib = await instantiate(bytes, {imports: {register: x => x}});
+const list = lib.async_list("Snek:");
+assert.equal(list.get(0), list.get(1));
+assert.equal(await list.get(0)("call"), "Snek:call");
+assert.equal(await lib.use_async(list, "call"), "Snek:call");
+const js = async text => "JS:" + text;
+list.append(js); assert.equal(list.pop(), js);
+list.set(0, js);
+assert.deepEqual(await Promise.all([lib.use_async(list, "a"), lib.use_async(list, "b")]), ["JS:a", "JS:b"]);
+list.set(0, () => "bare");
+await assert.rejects(lib.use_async(list, "bad"), SnekError);
+list.set(0, async () => {throw new Error("rejected");});
+await assert.rejects(lib.use_async(list, "bad"), /rejected/);
+list.set(0, js); assert.equal(await lib.use_async(list, "again"), "JS:again");
+''')
+
+    def test_callbacks_only_reachable_through_list_signatures(self):
+        self.src.write_text(CALLBACK_LIST_SOURCE)
+        self.build(["upper_callbacks"])
+        self.node('''
+const lib = await instantiate(bytes, {imports: {register: x => x}});
+const upper = lib.upper_callbacks().get(0);
+assert.equal(upper("straße 🐍"), "STRASSE 🐍");
+''')
+
     def test_class_values_in_lists_and_callbacks(self):
         self.src.write_text(CLASS_VALUE_SOURCE)
         self.build(CLASS_VALUE_EXPORTS)
@@ -817,7 +918,7 @@ assert.equal(lib.echo(value), value); assert.equal(lib.read(value), 42);
 
     def test_class_handles_reject_unsupported_boundary_shapes(self):
         base = 'from typing import Callable\nfrom snek import host\nclass Box:\n    pass\n'
-        for ty in ("dict[str, Box]", "list[Callable[[], Box]]", "Callable[[Callable[[], Box]], Box]", "list[Box] | None"):
+        for ty in ("dict[str, Box]", "list[Callable[[], Box] | None]", "Callable[[Callable[[], Box]], Box]", "list[Box] | None"):
             for host in (False, True):
                 self.src.write_text(base + ('@host("f")\n' if host else '') + f'def f(value: {ty}) -> None:\n    pass\n')
                 with self.subTest(ty=ty, host=host), self.assertRaises(Exception):
@@ -1314,7 +1415,7 @@ await assert.rejects(lib.apply_bool(async () => 1, true), /expected boolean/);
         for signature in ("Callable[[tuple[str, str]], str]", "Callable[[str], tuple[str, str]]",
                           "Callable[[Callable[[], str]], str]", "Callable[[], Coroutine[str]]",
                           "Callable[[], Coroutine[None, None, tuple[str, str]]]",
-                          "Callable[[list[Callable[[], str]]], str]",
+                          "Callable[[list[Callable[[None], str]]], str]",
                           "Callable[[Coroutine[None, None, str]], str]",
                           "Callable[[None], str]", "Callable[[str], str] | None"):
             for host in (False, True):
