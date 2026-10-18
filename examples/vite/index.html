@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Snek + Vite</title>
+  </head>
+  <body>
+    <h1>Snek + Vite</h1>
+    <p>Typed Python functions, compiled to Wasm and bundled with TypeScript.</p>
+    <p id="greeting" role="status">Loading…</p>
+    <p>Exact i64 result: <output id="integer"></output></p>
+    <button id="load" disabled>Fetch through Snek</button>
+    <output id="result" aria-live="polite"></output>
+    <button id="worker" disabled>Call Snek in a worker</button>
+    <output id="worker-result" aria-live="polite"></output>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

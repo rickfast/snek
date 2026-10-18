@@ -1,0 +1,1 @@
+Hello from bundled async Snek, Straße 🐍!

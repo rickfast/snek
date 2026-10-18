@@ -57,6 +57,18 @@ class SuiteTests(unittest.TestCase):
                 (build / "compiler.bundle.py").touch()
                 suites.prerequisites(("compiler",))
 
+    def test_bundler_preflight_requires_installed_packages(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch.object(suites, "ROOT", root):
+                with self.assertRaisesRegex(RuntimeError, "npm ci --prefix examples/vite"):
+                    suites.prerequisites(("bundler",))
+                for name in ("vite", "typescript"):
+                    package = root / "examples/vite/node_modules" / name / "package.json"
+                    package.parent.mkdir(parents=True)
+                    package.write_text("{}")
+                suites.prerequisites(("bundler",))
+
     def test_unknown_suite_is_an_error(self):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
             suites.main(["typo"])

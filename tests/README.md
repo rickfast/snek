@@ -8,6 +8,13 @@ a fresh local HTTP server and isolated browser contexts. Missing browsers and
 unsupported Wasm features fail; there are no engine skips. See the
 [browser guide](../docs/reference/browsers.md) for setup.
 
+The `bundler` suite additionally requires `npm ci --prefix examples/vite`. It
+copies that example to a temporary workspace, type-checks generated declarations
+(including expected type errors), and runs Vite dev and production servers.
+Both compilers, raw/optimized output, subdirectory and relative deployment bases,
+async fetch, Unicode, bigint and bundled workers run in the selected browser.
+The browser CI matrix runs this suite in Chromium, Firefox and WebKit as well.
+
 `check_library.py` executes generated JavaScript bindings in Node against the
 reference and self-hosted compilers, raw and optimized (the `reference` and
 `selfhost` suites). The `native` suite also runs it against the standalone CLI.
@@ -34,6 +41,8 @@ python tests/run_suites.py reference bootstrap
 
 | Suite | Coverage | Preparation |
 | --- | --- | --- |
+| `browser` | Both compilers' raw/optimized libraries, host interop and workers | Playwright engine, Binaryen, full compiler proof |
+| `bundler` | Vite dev/production, TypeScript, asset bases and worker chunks | Browser prerequisites, Node 25.9, `npm ci --prefix examples/vite` |
 | `fast` | Pure compiler/encoding invariants, benchmark/tooling regressions, suite policy | Node 24+, Python Wasmtime, wasm-tools oracle |
 | `tooling` | Portable benchmark, profile, lazy runtime and runner regressions | Python |
 | `reference` | Full raw/O3 example and negative corpus, byte I/O, formatting, string fusion | Runtime, Binaryen, Python Wasmtime |

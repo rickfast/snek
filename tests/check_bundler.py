@@ -1,0 +1,157 @@
+"""Execute the checked-in Vite example in dev and production, with both compilers."""
+from contextlib import contextmanager
+import json
+import os
+from pathlib import Path
+from queue import Queue, Empty
+import shutil
+import subprocess
+import sys
+import tempfile
+import threading
+import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from snekc import driver
+
+EXAMPLE = ROOT / "examples/vite"
+SERVER = '''
+import {createServer, preview} from "vite";
+const config = {base: process.env.TEST_BASE, logLevel: "error", cacheDir: ".vite-test",
+  server: {host: "127.0.0.1", port: 0}, preview: {host: "127.0.0.1", port: 0}};
+const server = process.env.TEST_DEV === "1" ? await createServer(config) : await preview(config);
+if (process.env.TEST_DEV === "1") await server.listen();
+console.log(JSON.stringify({url: server.resolvedUrls.local[0]}));
+'''
+
+TYPES = '''
+import {instantiate, type SnekLibrary} from "./generated/program.js";
+declare const library: SnekLibrary;
+const result: Promise<string> = library.load("url");
+const exact: bigint = library.twice(1n);
+// @ts-expect-error i64 is bigint, not number
+library.twice(1);
+// @ts-expect-error async exports do not return a bare string
+const wrong: string = library.load("url");
+// @ts-expect-error required host imports cannot be omitted
+instantiate("url");
+// @ts-expect-error async host imports must return a PromiseLike
+instantiate("url", {imports: {fetch_text: () => "bare"}});
+// @ts-expect-error host result must be a string
+instantiate("url", {imports: {fetch_text: async () => 42}});
+'''
+
+
+class BundlerTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from playwright.sync_api import sync_playwright
+        if not (EXAMPLE / "node_modules/vite/package.json").is_file():
+            raise RuntimeError("run npm ci --prefix examples/vite first")
+        directory = tempfile.TemporaryDirectory(prefix="snek-vite-")
+        cls.addClassCleanup(directory.cleanup)
+        cls.root = Path(directory.name) / "app"
+        shutil.copytree(EXAMPLE, cls.root, ignore=shutil.ignore_patterns("node_modules", "dist", "generated"))
+        (cls.root / "node_modules").symlink_to(EXAMPLE / "node_modules", target_is_directory=True)
+        (cls.root / "src/generated").mkdir()
+        (cls.root / "src/typecheck.ts").write_text(TYPES)
+        cls.compiler = os.environ.get("SNEK_COMPILER", "python")
+        cls.node = os.environ.get("SNEK_NODE", "node")
+        playwright = sync_playwright().start()
+        cls.addClassCleanup(playwright.stop)
+        engine = os.environ.get("SNEK_BROWSER", "chromium")
+        if engine not in ("chromium", "firefox", "webkit"):
+            raise ValueError("SNEK_BROWSER must be chromium, firefox, or webkit")
+        cls.browser = getattr(playwright, engine).launch()
+        cls.addClassCleanup(cls.browser.close)
+        print(f"Bundler browser: {engine} {cls.browser.version}; compiler: {cls.compiler}", flush=True)
+
+    def compile(self, optimize):
+        driver.build(self.root / "program.py", self.root / "src/generated/program.wasm",
+                     optimize=optimize, compiler=self.compiler, library=True,
+                     exports=["greet", "twice", "load"])
+        self.run_node("node_modules/typescript/bin/tsc", "--noEmit")
+
+    def run_node(self, *args):
+        result = subprocess.run([self.node, *args], cwd=self.root, capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    @contextmanager
+    def server(self, base, dev):
+        with tempfile.TemporaryFile(mode="w+") as errors:
+            process = subprocess.Popen([self.node, "--input-type=module", "-e", SERVER],
+                                       cwd=self.root, stdout=subprocess.PIPE, stderr=errors, text=True,
+                                       env={**os.environ, "TEST_BASE": base, "TEST_DEV": "1" if dev else "0"})
+            lines = Queue()
+            thread = threading.Thread(target=lambda: lines.put(process.stdout.readline()), daemon=True)
+            thread.start()
+            try:
+                try:
+                    line = lines.get(timeout=30)
+                except Empty:
+                    self.fail("Vite server did not start within 30 seconds")
+                if not line:
+                    errors.seek(0)
+                    self.fail("Vite server failed: " + errors.read())
+                yield json.loads(line)["url"]
+            finally:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=10)
+                thread.join(timeout=5)
+                process.stdout.close()
+
+    def exercise(self, url, base, dev):
+        context = self.browser.new_context()
+        try:
+            page = context.new_page()
+            page.set_default_timeout(15000)
+            errors, responses = [], []
+            page.on("pageerror", lambda error: errors.append(str(error)))
+            context.on("response", lambda response: responses.append((response.url, response.status)))
+            page.goto(url)
+            page.wait_for_function('document.documentElement.dataset.status === "ready"')
+            self.assertEqual(page.locator("#greeting").text_content(), "Hello, Vite 🐍!")
+            self.assertEqual(page.locator("#integer").text_content(), "18014398509481986")
+            for _ in range(2):
+                page.locator("#load").click()
+                page.wait_for_function('!document.querySelector("#load").disabled')
+                self.assertEqual(page.locator("#result").text_content(), "HELLO FROM BUNDLED ASYNC SNEK, STRASSE 🐍!")
+                page.locator("#worker").click()
+                page.wait_for_function('!document.querySelector("#worker").disabled')
+                self.assertEqual(page.locator("#worker-result").text_content(), "Hello, Vite worker 🐍!")
+            self.assertEqual(errors, [])
+            self.assertFalse([item for item in responses if item[1] >= 400], responses)
+            wasm = [url for url, status in responses if ".wasm" in url and status == 200]
+            self.assertTrue(wasm, responses)
+            if not dev:
+                self.assertTrue(all(base + "assets/program-" in url for url in wasm), wasm)
+        finally:
+            context.close()
+
+    def test_development_server(self):
+        self.compile(False)
+        with self.server("/snek-test/", True) as url:
+            self.exercise(url, "/snek-test/", True)
+
+    def test_production_builds(self):
+        for optimize in (False, True):
+            for base in ("/snek-test/", "./"):
+                with self.subTest(optimize=optimize, base=base):
+                    self.compile(optimize)
+                    self.run_node("node_modules/vite/bin/vite.js", "build", "--base", base)
+                    assets = self.root / "dist/assets"
+                    self.assertTrue(list(assets.glob("program-*.wasm")))
+                    self.assertTrue(list(assets.glob("worker-*.js")))
+                    # Relocate the relative build without rebuilding its asset URLs.
+                    served_base = base if base != "./" else "/relocated/deep/"
+                    with self.server(served_base, False) as url:
+                        self.exercise(url, served_base, False)
+
+
+if __name__ == "__main__":
+    unittest.main()

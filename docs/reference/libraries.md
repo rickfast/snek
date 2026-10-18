@@ -41,7 +41,8 @@ uses `fetch`, which does not load local `file:` URLs in Node.
 ## Browser
 
 See [browser support](browsers.md) for compatibility checks, error handling,
-Web Workers, and the browser-engine test matrix.
+Web Workers, [Vite/TypeScript integration](browsers.md#bundlers-vite-and-typescript),
+and the browser-engine test matrix.
 
 ```javascript
 import { instantiate } from "./greetings.js";

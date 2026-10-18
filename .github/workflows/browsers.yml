@@ -42,5 +42,7 @@ jobs:
           echo "SNEK_WASM_OPT=$RUNNER_TEMP/snek-tools/node_modules/.bin/wasm-opt" >> "$GITHUB_ENV"
       - name: Rebuild self-hosted compiler and verify fixed point
         run: python bootstrap/bootstrap_compiler.py
+      - name: Install locked bundler example dependencies
+        run: npm ci --prefix examples/vite --no-audit --no-fund
       - name: Both compilers, raw and optimized, main thread and worker
-        run: python tests/run_suites.py browser
+        run: python tests/run_suites.py browser bundler

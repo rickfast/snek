@@ -12,6 +12,8 @@ examples/library/host_demo.js
 examples/library/host_demo.d.ts
 examples/library/async_demo.js
 examples/library/async_demo.d.ts
+examples/vite/node_modules/
+examples/vite/src/generated/
 .venv/
 bench/node_modules/
 bench/work/

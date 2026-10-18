@@ -35,6 +35,8 @@ CHECKS = {
     )
 }
 CHECKS.update({
+    "bundler": Check("check_bundler.py", ("browser", "bundler", "node", "optimizer")),
+    "selfhost-bundler": Check("check_bundler.py", ("browser", "bundler", "node", "optimizer", "runtime", "compiler"), "snek"),
     "browser": Check("check_browser.py", ("browser", "optimizer")),
     "selfhost-browser": Check("check_browser.py", ("browser", "optimizer", "runtime", "compiler"), "snek"),
     "library": Check("check_library.py", ("node",)),
@@ -73,6 +75,7 @@ CHECKS.update({
 })
 
 SUITES = {
+    "bundler": ("bundler", "selfhost-bundler"),
     "browser": ("browser", "selfhost-browser"),
     "fast": ("suites", "closures", "keyed_builtins", "lazy_runtime", "wasm", "benchmarks", "native_bench", "compiler_profile", "tooling", "linker", "emission_pipeline", "cli", "runtime_abi", "body_context"),
     "tooling": ("suites", "native_bench", "compiler_profile", "lazy_runtime", "tooling"),
@@ -135,6 +138,10 @@ def prerequisites(requirements):
         elif requirement == "browser":
             if importlib.util.find_spec("playwright") is None:
                 raise RuntimeError("install tests/requirements-browser.txt and run python -m playwright install")
+        elif requirement == "bundler":
+            for package in ("vite", "typescript"):
+                if not (ROOT / "examples/vite/node_modules" / package / "package.json").is_file():
+                    raise RuntimeError("run npm ci --prefix examples/vite first")
         elif requirement == "optimizer":
             try:
                 optimizer = driver.find_wasm_opt()

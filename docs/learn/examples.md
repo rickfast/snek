@@ -4,6 +4,9 @@ For JavaScript interoperability, see the [library bindings example](../reference
 in `examples/library/`. It demonstrates strings, numbers and exact `i64`/`bigint`
 calls. `host_demo.py` and `host.html` add typed callbacks that read and update the DOM.
 `async_demo.py` and `async.html` demonstrate awaiting `fetch` and handling failures in Snek.
+For a bundled TypeScript application, `examples/vite/` includes async host calls
+and a worker. See the [Vite guide](../reference/browsers.md#bundlers-vite-and-typescript)
+for development and production build commands.
 
 For a multi-file application, run this from the checkout:
 

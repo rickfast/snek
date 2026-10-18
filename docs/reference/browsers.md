@@ -90,9 +90,82 @@ Unicode, large strings, numeric boundaries, exceptions, worker calls, and simula
 unsupported environments. Browser downloads and system dependencies follow the
 [Playwright installation instructions](https://playwright.dev/python/docs/browsers).
 
+## Bundlers: Vite and TypeScript
+
+The checked-in `examples/vite/` project bundles Snek bindings, an async fetch
+callback, and a module worker. It needs no Wasm bundler plugin. Compile Snek first,
+then let Vite process the generated JavaScript and binary as separate assets.
+From the repository root, using the development compiler:
+
+```sh
+mkdir -p examples/vite/src/generated
+python -m snekc build examples/vite/program.py --no-opt --library --export greet --export twice --export load -o examples/vite/src/generated/program.wasm
+cd examples/vite
+npm ci
+npm run dev
+```
+
+With the standalone CLI, replace `python -m snekc` with `snek` and omit `--no-opt`.
+The example's locked dependencies are tested with Node 25.9. Re-run the Snek build
+when changing `program.py`; Vite does not compile Python or watch its imports.
+Generated files and build output are ignored by Git. Keep the `.js`, `.d.ts`, and
+`.wasm` files from the same build together in `src/generated/`.
+
+Import the bindings normally and the binary as a URL:
+
+```typescript
+import { instantiate } from "./generated/program.js";
+import wasmUrl from "./generated/program.wasm?url&no-inline";
+
+const library = await instantiate(wasmUrl, {
+  imports: {
+    fetch_text: async url => {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.text();
+    },
+  },
+});
+```
+
+Vite's [asset URL imports](https://vite.dev/guide/assets.html) rewrite filenames
+and deployment paths. `no-inline` keeps the binary as a separately fetched file.
+Use Snek's `instantiate`, not Vite's raw Wasm initialization: Snek needs its own
+string conversion, host imports, exception handling, and async driver.
+
+The example enables `vite/client` types and runs `tsc --noEmit` before bundling.
+Generated declarations check required host functions, Promise results and
+`i64`/`bigint` arguments. Vite's development server alone does not type-check.
+Its worker uses the static `new Worker(new URL("./worker.ts", import.meta.url),
+{ type: "module" })` pattern, so Vite emits and rewrites the worker chunk too.
+
+To build for a subdirectory such as GitHub Pages:
+
+```sh
+npm run build -- --base=/snek-demo/
+npm run preview -- --base=/snek-demo/
+```
+
+Deploy `dist/` under that path. `--base=./` is also tested for relative asset URLs.
+This is a client-side integration, not SSR support. No bundler can polyfill
+WasmGC or modern exception handling; the generated capability checks still apply.
+
+The `bundler` test suite runs development and production builds in each browser
+engine, with both compilers and raw/optimized Wasm. It checks async fetch, repeated
+worker calls, exact integers, Unicode, TypeScript errors, and hashed asset URLs.
+After the browser prerequisites above, run from the repository root:
+
+```sh
+npm ci --prefix examples/vite
+SNEK_BROWSER=chromium python tests/run_suites.py bundler
+```
+
+## Remaining browser work
+
 First-class browser support remains an active roadmap item:
 
 - Implemented: capability checks, loading diagnostics, engine CI, worker example,
-  typed host imports with a DOM example, and Promise-based async interop with a fetch example.
-- Next: tested bundler integration and an interactive documentation playground.
+  typed host imports with a DOM example, Promise-based async interop with a fetch example,
+  and tested Vite/TypeScript bundling.
+- Next: an interactive documentation playground.
 - Later: opaque object handles, callbacks crossing the boundary, and task concurrency.
