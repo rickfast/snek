@@ -18,3 +18,11 @@ def emit_component_source() -> str:
 
 def emit_input_source() -> str:
     return (RUNTIME / "component_input.wat").read_text()
+
+
+def emit_library_runtime() -> str:
+    return (RUNTIME / "library_runtime.wat").read_text()
+
+
+def emit_library_javascript() -> str:
+    return (RUNTIME / "library.js").read_text()

@@ -34,6 +34,23 @@ The linker embeds this module into both parser probes and the full compiler.
 Compiler entry and profiling builds share the phase definitions in
 `build_emitter.py`.
 
+`library.py` generates the scalar/string host ABI and JavaScript/TypeScript
+bindings for both compilers. `snekc/library_runtime.wat` and `snekc/library.js`
+are embedded resources, not dependencies of the resulting standalone CLI.
+Typed `@host("name")` declarations retain their host name in the signature IR.
+Both emitters use shared host-import signatures and wrappers: strings cross as
+UTF-8 pointer/length pairs (including multi-value returns), never GC references.
+Each callback gets a scratch-memory frame released after its arguments/results
+have been copied. Async host declarations use GC frames with the standard coroutine
+fields and protocol; exported coroutine roots stay in private globals while the
+JavaScript driver awaits Promises. Rejections are translated into Snek RuntimeError
+on resumption. The driver resets scratch memory at suspension and exit and clears
+the exported root on completion or failure.
+In text mode, bindings are a one-line JSON `SNEK-BINDINGS` comment in the WAT.
+In binary library mode, the compiler returns `SNEK-LIBRARY-1`, that JSON line,
+then core Wasm bytes. The Python and Rust filesystem drivers unpack this private
+protocol and write the three output files without doing language analysis.
+
 ## Run the full compiler bootstrap
 
 The `Self-hosting` GitHub Actions workflow runs on pushes, pull requests and

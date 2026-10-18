@@ -37,6 +37,8 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--no-opt", action="store_true", help="use native encoding only (no Binaryen needed)")
     b.add_argument("--keep-wat", action="store_true", help="keep the .wat next to the .wasm")
     b.add_argument("--component", action="store_true", help="emit a WASI 0.3 command component and WIT")
+    b.add_argument("--library", action="store_true", help="emit a library with JavaScript/TypeScript bindings")
+    b.add_argument("--export", action="append", default=[], dest="exports", metavar="FUNCTION", help="entry function to export (repeatable; requires --library)")
     r = sub.add_parser("run")
     source_arguments(r)
     r.add_argument("--no-opt", action="store_true", help="use native encoding only (no Binaryen needed)")
@@ -70,10 +72,13 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if ns.cmd == "build":
             res = driver.build(ns.src, ns.out, optimize=not ns.no_opt, keep_wat=ns.keep_wat,
-                               component=ns.component, frontend=ns.frontend, compiler=ns.compiler, module_root=ns.module_root)
+                               component=ns.component, frontend=ns.frontend, compiler=ns.compiler, module_root=ns.module_root,
+                               library=ns.library, exports=ns.exports)
             print(f"wrote {res.wasm_path} ({res.wasm_path.stat().st_size} bytes)")
             if res.wit_path:
                 print(f"wrote {res.wit_path}")
+            if res.js_path:
+                print(f"wrote {res.js_path} and {res.dts_path}")
             return 0
         with tempfile.TemporaryDirectory() as d:
             wasm = Path(d, ns.src.stem + ".wasm")

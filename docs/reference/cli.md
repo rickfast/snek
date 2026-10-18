@@ -22,6 +22,7 @@ snek --timings build program.snek
 | `check SOURCE` | Compile and discard output; report errors without creating a binary |
 | `wat SOURCE` | Write generated WebAssembly text to stdout |
 | `build SOURCE [-o PATH]` | Write an unoptimized core Wasm module |
+| `build SOURCE --library --export FUNCTION` | Write a core Wasm library plus `.js`/`.d.ts` bindings; repeat `--export` to select more functions |
 | `run SOURCE [--env NAME[=VALUE]] -- [ARGS...]` | Compile and execute with embedded Wasmtime |
 | `--timings` | Emit a `SNEK_TIMINGS` JSON record on stderr |
 | `--module-root PATH` | Resolve local imports under this root; defaults to the entry file's directory |
@@ -46,6 +47,7 @@ python -m snekc build program.snek --component
 | `--frontend cpython\|snek` | All | Parser selection within the Python reference pipeline |
 | `--module-root PATH` | All | Explicit local module/package root |
 | `-o PATH`, `--out PATH` | `build` | Explicit output path |
+| `--library --export FUNCTION` | `build` | Emit a [JavaScript library](libraries.md); repeat `--export` as needed |
 | `--no-opt` | `build`, `run` | Skip Binaryen; encode core Wasm directly |
 | `--keep-wat` | `build` | Keep readable WAT beside the binary |
 | `--component` | `build`, `run` | Build/run a native WASI 0.3 command component |

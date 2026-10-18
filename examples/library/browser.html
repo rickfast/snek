@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snek library example</title>
+<h1>Snek in the browser</h1>
+<pre id="result">Loading…</pre>
+<script type="module">
+  import { instantiate } from "./greetings.js";
+  try {
+    const lib = await instantiate(new URL("./greetings.wasm", import.meta.url));
+    const lines = [lib.greet("browser 🐍"), lib.add(20, 22), lib.twice(9007199254740993n)];
+    document.querySelector("#result").textContent = lines.join("\n");
+    document.documentElement.dataset.status = "ok";
+  } catch (error) {
+    document.querySelector("#result").textContent = String(error);
+    document.documentElement.dataset.status = "error";
+  }
+</script>
+</html>

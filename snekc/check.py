@@ -73,7 +73,7 @@ from .types import (
 INT_RANGE = {"i32": (-(2**31), 2**31 - 1), "i64": (-(2**63), 2**63 - 1)}
 
 ALLOWED_IMPORTS = {
-    "snek": {"i32", "i64", "f32", "f64", "Final", "final", "run", "checkpoint", "read_bytes", "write_bytes"},
+    "snek": {"i32", "i64", "f32", "f64", "Final", "final", "host", "run", "checkpoint", "read_bytes", "write_bytes"},
     "typing": {"Final", "Optional", "final", "Iterator", "Generator", "Coroutine", "Callable"},
     "collections.abc": {"Iterator", "Generator", "Coroutine", "Callable"},
     "types": {"TracebackType"},
@@ -442,7 +442,7 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
                         raise CompileError(f"cannot import '{a.name}' from {s.module}", s)
                     if a.name in self.library_imports:
                         raise CompileError(f"'{a.name}' is already imported", s)
-                    if a.name in ("run", "checkpoint", "read_bytes", "write_bytes") and (a.name in self.funcs or a.name in self.classes):
+                    if a.name in ("host", "run", "checkpoint", "read_bytes", "write_bytes") and (a.name in self.funcs or a.name in self.classes):
                         raise CompileError(f"'{a.name}' is already defined", s)
                     self.imported.add(a.name)
             elif isinstance(s, ast.Import):
@@ -472,7 +472,7 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
         for cls in self.class_order:
             self.declare_members(cls)
         for node in pending:
-            self.funcs[node.name] = (self.signature(node, is_method=False), node)
+            self.funcs[node.name] = (self.signature(node, is_method=False, allow_host=True), node)
 
     def check_new_name(self, name: str, node: ast.AST) -> None:
         existing = self.classes.get(name)
@@ -481,7 +481,7 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
         if name in self.classes or name in self.funcs:
             raise CompileError(f"'{name}' is already defined", node)
         if (name in BUILTINS or name in ("str", "u8s", "rt", "lit", "snek") or name in self.bnodes or name in self.library_imports
-                or (name in ("run", "checkpoint", "read_bytes", "write_bytes") and name in self.imported)):
+                or (name in ("host", "run", "checkpoint", "read_bytes", "write_bytes") and name in self.imported)):
             raise CompileError(f"'{name}' is a reserved name", node)
         if not name.isascii():
             raise CompileError("identifiers must be ASCII", node)
@@ -623,13 +623,30 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
             raise CompileError("field defaults must be literals", item.value)
         cls.fields[name] = FieldInfo(name, ty, final, item.value, cls, len(cls.fields) + 1)
 
-    def signature(self, node: ast.FunctionDef | ast.AsyncFunctionDef, is_method: bool) -> FuncSig:
+    def signature(self, node: ast.FunctionDef | ast.AsyncFunctionDef, is_method: bool, allow_host: bool = False) -> FuncSig:
         a = node.args
         if a.vararg or a.kwarg or a.kwonlyargs or (a.posonlyargs and not self.builtin_mode):
             raise CompileError("*args, **kwargs, keyword-only and positional-only parameters are not supported yet",
                                node)
+        host = ""
         if node.decorator_list and not is_method:
-            raise CompileError("function decorators are not supported yet", node.decorator_list[0])
+            d = node.decorator_list[0]
+            if (not allow_host or len(node.decorator_list) != 1 or not isinstance(d, ast.Call)
+                    or not isinstance(d.func, ast.Name) or d.func.id != "host" or "host" not in self.imported):
+                raise CompileError('function decorators support only top-level @host("name") declarations', d)
+            if (len(d.args) != 1 or d.keywords or not isinstance(d.args[0], ast.Constant)
+                    or not isinstance(d.args[0].value, str)):
+                raise CompileError("@host requires one literal string name", d)
+            host = d.args[0].value
+            if not host:
+                raise CompileError("host import name must not be empty", d)
+            if not host.isascii() or not host.isidentifier():
+                raise CompileError("host import names must be ASCII identifiers", d)
+            body = node.body[1:] if node.body and is_docstring(node.body[0]) else node.body
+            if len(body) != 1 or not isinstance(body[0], ast.Pass):
+                raise CompileError("host declarations must have only a pass body (plus an optional docstring)", node)
+            if a.defaults:
+                raise CompileError("host declarations cannot have default arguments", node)
         args = list(a.posonlyargs) + list(a.args)
         defaults: list[ast.expr | None] = [None] * (len(args) - len(a.defaults)) + list(a.defaults)
         if is_method:
@@ -660,6 +677,11 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
                 raise CompileError(f"'{node.name}' needs a return annotation (`-> T` or `-> None`)", node)
         else:
             ret = self.resolve_type(node.returns)
+        if host:
+            if any(t not in (I32, I64, F32, F64, BOOL, STR) for _, t in params):
+                raise CompileError("host boundaries support only scalar and string parameters", node)
+            if ret not in (I32, I64, F32, F64, BOOL, STR, NONE):
+                raise CompileError("host boundaries support only scalar, string, and None returns", node)
         yields = any(isinstance(n, (ast.Yield, ast.YieldFrom)) for n in scope_walk(body_nodes(node)))
         if isinstance(node, ast.AsyncFunctionDef):
             if yields:
@@ -672,7 +694,7 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
                 raise CompileError("generator special methods are not supported", node)
             if not isinstance(ret, IteratorT):
                 raise CompileError("a generator needs an Iterator[T] or Generator[T, None, None] return annotation", node)
-        return FuncSig(params, ret, defaults, len(a.posonlyargs))
+        return FuncSig(params, ret, defaults, len(a.posonlyargs), host)
 
     def resolve_type(self, node: ast.expr) -> Type:
         library = self.stdlib_type(node)
@@ -803,6 +825,8 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
     # ==== pass 2: bodies ============================================================
 
     def check_function(self, name: str, sig: FuncSig, node: ast.FunctionDef | ast.AsyncFunctionDef) -> ir.Func:
+        if sig.host:
+            return ir.Func(name, sig.params, sig.ret, {}, [], host=sig.host)
         self.ctx = FuncCtx(name, sig.ret)
         machine = self.suspension_context(node, sig.ret)
         for p, t in sig.params:

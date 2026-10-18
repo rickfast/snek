@@ -38,6 +38,7 @@ def instrument(source):
     prefix = "".join(part.source for part in parts[:-1] if part is not entries[0])
     result = prefix + "\nfrom snek import time, f64\n\ndef profile_command() -> None:\n"
     result += "    component = False\n"
+    result += '    exports: list[str] = []\n    entry = ""\n'
     result += "    marks: list[f64] = [time.monotonic()]\n"
     for _, statement in STEPS:
         result += "    " + statement + "\n    marks.append(time.monotonic())\n"

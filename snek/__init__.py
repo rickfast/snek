@@ -8,6 +8,8 @@ type checkers see them as int/float, while snekc enforces the real rules.
 
 from asyncio import run
 from typing import Final, final
+from functools import wraps
+from inspect import iscoroutinefunction
 
 from . import io, os, secrets, sys, time
 
@@ -22,6 +24,28 @@ i32 = int
 i64 = int
 f32 = float
 f64 = float
+
+
+def host(name: str):
+    """Declare a JavaScript host import for a Snek library.
+
+    CPython has no JavaScript host; calls fail explicitly rather than silently
+    executing the declaration's pass body. Tests can replace the function.
+    """
+    if not isinstance(name, str) or not name:
+        raise ValueError("host import name must be a nonempty string")
+
+    def decorate(function):
+        if iscoroutinefunction(function):
+            @wraps(function)
+            async def unavailable_async(*args, **kwargs):
+                raise RuntimeError(f"host import {name!r} requires a JavaScript host")
+            return unavailable_async
+        @wraps(function)
+        def unavailable(*args, **kwargs):
+            raise RuntimeError(f"host import {name!r} requires a JavaScript host")
+        return unavailable
+    return decorate
 
 
 def read_bytes() -> list[i32]:
@@ -47,4 +71,4 @@ def write_bytes(data: list[i32]) -> None:
         raise RuntimeError("stdout write failed") from error
 
 
-__all__ = ["i32", "i64", "f32", "f64", "Final", "final", "run", "checkpoint", "read_bytes", "write_bytes", "sys", "os", "time", "secrets", "io"]
+__all__ = ["i32", "i64", "f32", "f64", "Final", "final", "host", "run", "checkpoint", "read_bytes", "write_bytes", "sys", "os", "time", "secrets", "io"]

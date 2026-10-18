@@ -52,6 +52,12 @@ enum Command {
         source: PathBuf,
         #[arg(short, long)]
         out: Option<PathBuf>,
+        /// Emit JavaScript/TypeScript bindings beside the Wasm library.
+        #[arg(long)]
+        library: bool,
+        /// Entry-module function to export (repeatable).
+        #[arg(long = "export", requires = "library", value_name = "FUNCTION")]
+        exports: Vec<String>,
     },
     /// Compile and execute with the embedded runtime. Guest arguments follow --.
     Run {
@@ -117,6 +123,7 @@ fn compile(
     engine: &Engine,
     project: &mut project::Project,
     wat: bool,
+    exports: &[String],
     timings: &mut Timings,
 ) -> Result<Option<Vec<u8>>> {
     let start = Instant::now();
@@ -128,6 +135,7 @@ fn compile(
             &module,
             project,
             if wat { "--wat" } else { "--project" },
+            exports,
             timings,
         )?
         else {
@@ -139,6 +147,8 @@ fn compile(
         }
         if !(if wat {
             bytes.starts_with(b"(module")
+        } else if !exports.is_empty() {
+            bytes.starts_with(b"SNEK-LIBRARY-1\n")
         } else {
             bytes.starts_with(b"\0asm\x01\0\0\0")
         }) {
@@ -153,6 +163,7 @@ fn compiler_request(
     module: &Module,
     project: &project::Project,
     mode: &str,
+    exports: &[String],
     timings: &mut Timings,
 ) -> Result<Option<Vec<u8>>> {
     let stdout = MemoryOutputPipe::new(256 * 1024 * 1024);
@@ -164,6 +175,12 @@ fn compiler_request(
         .stdin(MemoryInputPipe::new(project.envelope()?))
         .stdout(stdout.clone())
         .stderr(stderr.clone());
+    if !exports.is_empty() {
+        wasi.arg("--library");
+        for name in exports {
+            wasi.arg(format!("--export={name}"));
+        }
+    }
     let mut request_timings = ExecutionTimings::default();
     let status = invoke(engine, module, wasi.build_p1(), &mut request_timings)
         .context("embedded compiler trapped")?;
@@ -213,15 +230,68 @@ fn run(cli: Cli, timings: &mut Timings) -> Result<i32> {
         Command::Wat { source } => (source, true),
     };
     let mut project = project::Project::new(source, cli.module_root.as_deref())?;
-    let Some(output) = compile(&engine, &mut project, wat, timings)? else {
+    let exports = match &cli.command {
+        Command::Build {
+            library, exports, ..
+        } => {
+            if *library && exports.is_empty() {
+                bail!("--library requires at least one --export FUNCTION");
+            }
+            exports.as_slice()
+        }
+        _ => &[],
+    };
+    let Some(output) = compile(&engine, &mut project, wat, exports, timings)? else {
         return Ok(1);
     };
     match cli.command {
-        Command::Build { source, out } => {
+        Command::Build {
+            source,
+            out,
+            library,
+            ..
+        } => {
             let out = out.unwrap_or_else(|| source.with_extension("wasm"));
             project.check_output(&out)?;
-            write_output(&source, &out, &output)?;
-            eprintln!("wrote {} ({} bytes)", out.display(), output.len());
+            let mut binary = output.as_slice();
+            let mut bindings = None;
+            if library {
+                let body = binary
+                    .strip_prefix(b"SNEK-LIBRARY-1\n")
+                    .context("invalid library header")?;
+                let end = body
+                    .iter()
+                    .position(|b| *b == b'\n')
+                    .context("missing library metadata")?;
+                let metadata: serde_json::Value = serde_json::from_slice(&body[..end])?;
+                let js = metadata["js"]
+                    .as_str()
+                    .context("missing JavaScript bindings")?
+                    .to_owned();
+                let dts = metadata["dts"]
+                    .as_str()
+                    .context("missing TypeScript declarations")?
+                    .to_owned();
+                let js_path = out.with_extension("js");
+                let dts_path = out.with_extension("d.ts");
+                project.check_output(&js_path)?;
+                project.check_output(&dts_path)?;
+                if out == js_path || out == dts_path || js_path == dts_path {
+                    bail!("output paths must be distinct");
+                }
+                bindings = Some((js_path, js, dts_path, dts));
+                binary = &body[end + 1..];
+                if !binary.starts_with(b"\0asm\x01\0\0\0") {
+                    bail!("invalid library binary");
+                }
+            }
+            write_output(&source, &out, binary)?;
+            if let Some((js_path, js, dts_path, dts)) = bindings {
+                write_output(&source, &js_path, js.as_bytes())?;
+                write_output(&source, &dts_path, dts.as_bytes())?;
+                eprintln!("wrote {} and {}", js_path.display(), dts_path.display());
+            }
+            eprintln!("wrote {} ({} bytes)", out.display(), binary.len());
         }
         Command::Check { source } => println!("{}: ok", source.display()),
         Command::Wat { .. } => std::io::stdout().lock().write_all(&output)?,
@@ -298,7 +368,7 @@ mod tests {
         let source = tempfile::NamedTempFile::new()?;
         fs::write(source.path(), b"print(42)\n")?;
         let mut project = project::Project::new(source.path(), None)?;
-        let output = compile(&engine, &mut project, false, &mut Timings::default())?;
+        let output = compile(&engine, &mut project, false, &[], &mut Timings::default())?;
         assert!(output.unwrap().starts_with(b"\0asm\x01\0\0\0"));
         Ok(())
     }

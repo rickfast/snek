@@ -1,0 +1,2 @@
+# Browser revisions are pinned by this package version.
+playwright==1.58.0

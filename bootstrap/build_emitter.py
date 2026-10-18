@@ -19,7 +19,7 @@ COMPILER_STEPS = (
     ("runtime_index", "runtime = body_runtime_tree()"),
     ("body_setup", "checked = BodyChecker(decl, runtime, body_runtime_intrinsics())"),
     ("check_bodies", "checked.run()"),
-    ("emit_wat", "wat = emit_source_module(checked, emit_prelude_source(), component)"),
+    ("emit_wat", "wat = emit_source_module(checked, emit_prelude_source(), component, exports, entry)"),
 )
 ENCODE_STEPS = (
     ("encode_wat_utf8", "wat_bytes = emit_utf8(wat)"),
@@ -30,13 +30,15 @@ ENCODE_STEPS = (
 
 def bundle_source() -> str:
     parts = [module_source(name) for name in (
-        "modules", "runtime_abi", "emit_support", "emit_program", "emit_runtime", "emit_host",
+        "modules", "library", "runtime_abi", "emit_support", "emit_program", "emit_runtime", "emit_host",
         "machine_lower", "machine_emit", "emit_suspension", "emit_module")]
     root = Path(__file__).resolve().parents[1]
     data = "\ndef emit_memory_source() -> str:\n    return " + repr((root / "snekc/abi_memory.wat").read_text()) + "\n"
     data += "\ndef emit_prelude_source() -> str:\n    return " + repr((root / "snekc/prelude.wat").read_text()) + "\n"
     data += "\ndef emit_component_source() -> str:\n    return " + repr((root / "snekc/component_runtime.wat").read_text()) + "\n"
     data += "\ndef emit_input_source() -> str:\n    return " + repr((root / "snekc/component_input.wat").read_text()) + "\n"
+    data += "\ndef emit_library_runtime() -> str:\n    return " + repr((root / "snekc/library_runtime.wat").read_text()) + "\n"
+    data += "\ndef emit_library_javascript() -> str:\n    return " + repr((root / "snekc/library.js").read_text()) + "\n"
     return body_bundle(entry=False) + "\n" + "\n".join(parts) + data
 
 
@@ -54,12 +56,20 @@ def emitter_command() -> None:
     text = False
     encoding = False
     project = False
+    library = False
+    exports: list[str] = []
+    entry = ""
     for argument in sys.argv[1:]:
         if argument == "--component": component = True
         elif argument == "--wat": text = True
         elif argument == "--encode": encoding = True
         elif argument == "--project": project = True
+        elif argument == "--library": library = True
+        elif argument.startswith("--export="): exports.append(argument[9:])
         else: raise ValueError("unknown compiler argument: " + argument)
+    if library and (component or encoding): raise ValueError("library output cannot be combined with component/encoder mode")
+    if library and len(exports) == 0: raise ValueError("--library requires at least one --export FUNCTION")
+    if not library and len(exports) != 0: raise ValueError("--export requires --library")
     data = read_bytes()
     if encoding:
         write_bytes(wasm_encode(data))
@@ -68,13 +78,17 @@ def emitter_command() -> None:
     for name, statement in COMPILER_STEPS[1:]:
         if name == "parse_source":
             source += '''    if project:
+        entry = source.split("\\n")[1]
         try:
-            module = module_project(source)
+            module = module_project(source, library)
         except ValueError as error:
             if str(error).startswith("SNEK-MODULE-NEEDED "):
                 print(str(error))
                 return
             raise
+    elif library:
+        entry = "library"
+        module = module_library(source)
     else:
         module = parse(source)
 '''
@@ -82,7 +96,12 @@ def emitter_command() -> None:
             source += "    " + statement + "\n"
     if binary:
         source += '    if text:\n        print(wat, end="")\n        return\n'
-        source += "".join("    " + statement + "\n" for _, statement in ENCODE_STEPS)
+        source += "".join("    " + statement + "\n" for _, statement in ENCODE_STEPS[:-1])
+        source += '''    if library:
+        metadata = wat.split("\\n;; SNEK-BINDINGS ")[1].split("\\n")[0]
+        output = emit_utf8("SNEK-LIBRARY-1\\n" + metadata + "\\n") + output
+    write_bytes(output)
+'''
     else:
         source += '    print(wat, end="")\n'
     return source + "emitter_command()\n"

@@ -379,7 +379,7 @@ class IRBridge:
                         locals_.pop("self", None)
             functions.append(ir.Func(node["name"], params, t.CoroutineT(t.NONE) if main else ret,
                                      locals_, body, sig_type=sig_type, self_cast=self_cast,
-                                     nonnull_locals=nonnull, machine=main or node["machine"],
+                                     nonnull_locals=nonnull, machine=main or node["machine"], host=sig.get("host", ""),
                                      closure_type=None if closure_type == t.NONE else closure_type))
         return ir.Module(functions, list(self.classes.values()), "snek.main",
                          UnicodeUse(dynamic=value["unicode_dynamic"], extra=set(value["unicode_extra"]),

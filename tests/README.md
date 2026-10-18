@@ -1,5 +1,24 @@
 # Test suites
 
+The `browser` suite uses `tests/requirements-browser.txt` and Playwright browser
+downloads. Set `SNEK_BROWSER=chromium`, `firefox`, or `webkit` (default Chromium).
+It tests both compilers' raw/optimized libraries, typed host imports, the DOM
+callback example, and the module-worker example in
+a fresh local HTTP server and isolated browser contexts. Missing browsers and
+unsupported Wasm features fail; there are no engine skips. See the
+[browser guide](../docs/reference/browsers.md) for setup.
+
+`check_library.py` executes generated JavaScript bindings in Node against the
+reference and self-hosted compilers, raw and optimized (the `reference` and
+`selfhost` suites). The `native` suite also runs it against the standalone CLI.
+Set `SNEK_LIBRARY_NATIVE` to a native executable to run the same host tests through
+the standalone build command. Coverage includes scalar/string conversion,
+initialization, module linking, exception recovery and invalid boundaries. Host
+imports also cover missing callbacks, copied strings, scalar return validation,
+sync-Promise/reentry rejection, async resolved-value validation, rejection/awaited
+cleanup, overlapping-call guards, lazy coroutine startup, and scratch-memory reuse
+within long-running calls. Browser checks include a real awaited-fetch example.
+
 Use `python tests/run_suites.py` as the test entry point (default: `fast`). These
 tests use `check_*.py`, not unittest's default `test_*.py` discovery convention.
 The runner verifies that every check script belongs to a suite, runs each script

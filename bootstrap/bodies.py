@@ -597,6 +597,9 @@ class BodyChecker:
         return result
 
     def function(self, name: str, sig: DeclSignature, node: Node, owner: str, method_decl: str) -> None:
+        if sig.host != "":
+            self.functions.append(BodyFunction(name, sig))
+            return
         body_type(sig.ret, node)
         for param in sig.params:
             body_type(param.ty, node)

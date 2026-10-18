@@ -80,11 +80,11 @@ class Project:
         error.args = (error.msg,)
         return error
 
-    def owned_tree(self):
+    def owned_tree(self, *, library: bool = False):
         from bootstrap.modules import module_project
         while True:
             try:
-                return module_project(self.envelope())
+                return module_project(self.envelope(), library)
             except ValueError as error:
                 message = str(error)
                 if message.startswith("SNEK-MODULE-NEEDED "):
@@ -100,11 +100,11 @@ class Project:
                     raise self.locate(problem) from None
                 raise
 
-    def compile(self, *, wat: bool = False, component: bool = False) -> bytes:
-        from .selfhost import invoke
+    def compile(self, *, wat: bool = False, component: bool = False, exports: list[str] | None = None) -> bytes:
+        from .selfhost import invoke, library_args
         while True:
             try:
-                output = invoke(self.envelope().encode(), ["--project", *(["--wat"] if wat else []), *(["--component"] if component else [])])
+                output = invoke(self.envelope().encode(), ["--project", *(["--wat"] if wat else []), *(["--component"] if component else []), *library_args(exports)])
             except CompileError as error:
                 raise self.locate(error) from None
             if not output.startswith(b"SNEK-MODULE-NEEDED "):

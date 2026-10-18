@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snek host imports</title>
+<h1>Snek calls JavaScript</h1>
+<p><label>Your name <input id="name" value="browser 🐍"></label></p>
+<button id="increment" disabled>Count a click</button>
+<p><output id="result" aria-live="polite">Loading…</output></p>
+<script type="module">
+  import { instantiate } from "./host_demo.js";
+
+  const result = document.querySelector("#result");
+  const button = document.querySelector("#increment");
+  try {
+    const lib = await instantiate(new URL("./host_demo.wasm", import.meta.url), {
+      imports: {
+        get_name: () => document.querySelector("#name").value,
+        render: text => { result.textContent = text; },
+      },
+    });
+    let count = 0;
+    button.addEventListener("click", () => {
+      try { count = lib.increment(count); }
+      catch (error) { result.textContent = error.message; }
+    });
+    result.textContent = "Ready. JavaScript owns the DOM; Snek calls typed functions.";
+    button.disabled = false;
+    document.documentElement.dataset.status = "ready";
+  } catch (error) {
+    result.textContent = error.message;
+    document.documentElement.dataset.status = "error";
+  }
+</script>
+</html>

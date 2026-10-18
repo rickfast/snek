@@ -97,6 +97,8 @@ nav:
   - Build & run:
       - CLI reference: reference/cli.md
       - WebAssembly targets: reference/targets.md
+      - JavaScript libraries: reference/libraries.md
+      - Browser support: reference/browsers.md
       - Standard library: reference/stdlib.md
       - Runtime compatibility: reference/compatibility.md
       - Troubleshooting: reference/troubleshooting.md

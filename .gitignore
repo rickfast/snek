@@ -5,6 +5,13 @@ __pycache__/
 !snekc/component_runtime.wat
 !snekc/component_input.wat
 !snekc/abi_memory.wat
+!snekc/library_runtime.wat
+examples/library/greetings.js
+examples/library/greetings.d.ts
+examples/library/host_demo.js
+examples/library/host_demo.d.ts
+examples/library/async_demo.js
+examples/library/async_demo.d.ts
 .venv/
 bench/node_modules/
 bench/work/

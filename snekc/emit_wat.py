@@ -311,6 +311,9 @@ class Emitter(CollectionEmitter, ProtocolEmitter, MachineEmitter, ClosureEmitter
         prelude = self.expand_lits(PRELUDE.read_text())
         funcs = []
         for f in self.m.funcs:
+            if f.host:
+                if isinstance(f.ret, CoroutineT): self.heap(f.ret)
+                continue  # emitted by the shared library ABI generator
             if f.name == self.m.main and not has_await(f.body):
                 # Preserve the direct structured path for synchronous programs.
                 # Components still need an async command shell, but not a CFG
@@ -1420,7 +1423,8 @@ class Emitter(CollectionEmitter, ProtocolEmitter, MachineEmitter, ClosureEmitter
         return f"({t.name}.{table[e.op]} {l} {r})"
 
 
-def emit_module(module: ir.Module, component: bool = False, *, graph_factory=None, machine_backend=None) -> str:
+def emit_module(module: ir.Module, component: bool = False, *, graph_factory=None, machine_backend=None,
+                exports: list[str] | None = None, entry: str = "") -> str:
     # Explicit opt-in while the rest of the emitter remains Python. A missing
     # or failing selected suspension pass is an error, never a Python fallback.
     import os
@@ -1430,4 +1434,35 @@ def emit_module(module: ir.Module, component: bool = False, *, graph_factory=Non
     if machine_backend is None and os.environ.get("SNEK_MACHINE_EMITTER"):
         from .machine_bridge import WasmMachineBackend
         machine_backend = WasmMachineBackend(Path(os.environ["SNEK_MACHINE_EMITTER"]))
-    return Emitter(module, component=component, graph_factory=graph_factory, machine_backend=machine_backend).emit()
+    selected = []
+    from bootstrap.library import LibraryExport, library_code, library_target, library_host_imports, library_host_wrapper
+    hosts = [LibraryExport(f.host, f.name, [str(t) for _, t in f.params],
+                          str(f.ret.elem) if isinstance(f.ret, CoroutineT) else str(f.ret),
+                          "$" + mangle(f.ret) if isinstance(f.ret, CoroutineT) else "")
+             for f in module.funcs if f.host]
+    if hosts and (not exports or component):
+        raise ValueError("host imports require a --library build")
+    if exports:
+        for name in exports:
+            target = library_target(name, entry)
+            function = next((f for f in module.funcs if f.name == (target if entry else name)), None)
+            if function is None:
+                raise ValueError("library export must name a function defined in the entry module: " + name)
+            if function.machine and not isinstance(function.ret, CoroutineT):
+                raise ValueError("library exports cannot be generators: " + name)
+            selected.append(LibraryExport(name, function.name, [str(t) for _, t in function.params],
+                                          str(function.ret.elem) if isinstance(function.ret, CoroutineT) else str(function.ret),
+                                          "$" + mangle(function.ret) if isinstance(function.ret, CoroutineT) else ""))
+        if any("str" in item.params for item in selected) or any(item.ret == "str" or item.heap for item in hosts):
+            # Do not mutate the checked IR: command emission can reuse it.
+            module = replace(module, unicode=replace(module.unicode, dynamic=True))
+    emitter = Emitter(module, component=component, graph_factory=graph_factory, machine_backend=machine_backend)
+    wat = emitter.emit()
+    if exports:
+        if component or emitter.main_async or emitter.byte_io or emitter.stdlib_io or emitter.wasi_features:
+            raise ValueError("library targets support print(), not WASI services or async initialization")
+        wat = wat.replace('(export "_start")', '(export "__snek_init")')
+        wat = wat.replace("(module\n", "(module\n" + library_host_imports(hosts) + "\n", 1)
+        wrappers = "\n".join(library_host_wrapper(item, i) for i, item in enumerate(hosts))
+        wat = wat.rstrip()[:-1] + wrappers + "\n" + library_code(selected, hosts) + "\n)\n"
+    return wat

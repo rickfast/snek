@@ -23,6 +23,7 @@ MANIFEST = {
     "formats": ("__future__", "snek", "bootstrap.parser", "bootstrap.declarations"),
     "scopes": ("__future__", "bootstrap.parser", "bootstrap.declarations"),
     "modules": ("__future__", "snek", "bootstrap.parser", "bootstrap.declarations", "bootstrap.scopes"),
+    "library": ("__future__", "snek", "bootstrap.parser", "bootstrap.emit_data", "bootstrap.machine_emit"),
     "bodies": ("__future__", "snek", "bootstrap.parser", "bootstrap.formats", "bootstrap.scopes", "bootstrap.declarations"),
     "emit_support": ("__future__", "snek", "bootstrap.declarations"),
     "emit_program": ("__future__", "snek", "bootstrap.parser", "bootstrap.declarations", "bootstrap.bodies", "bootstrap.emit_support", "snekc.runtime_abi"),
@@ -31,7 +32,7 @@ MANIFEST = {
     "machine_lower": ("__future__", "snek", "bootstrap.parser"),
     "machine_emit": ("__future__", "snek", "bootstrap.parser"),
     "emit_suspension": ("__future__", "snek", "bootstrap.parser", "bootstrap.declarations", "bootstrap.bodies", "bootstrap.emit_program", "bootstrap.machine_lower", "bootstrap.machine_emit"),
-    "emit_module": ("__future__", "snek", "bootstrap.declarations", "bootstrap.bodies", "bootstrap.parser", "bootstrap.emit_data", "bootstrap.emit_program", "bootstrap.emit_support", "bootstrap.emit_runtime", "bootstrap.emit_host", "bootstrap.emit_suspension"),
+    "emit_module": ("__future__", "snek", "bootstrap.declarations", "bootstrap.bodies", "bootstrap.parser", "bootstrap.emit_data", "bootstrap.emit_program", "bootstrap.emit_support", "bootstrap.emit_runtime", "bootstrap.emit_host", "bootstrap.emit_suspension", "bootstrap.library"),
 }
 HEADER = "from __future__ import annotations\nfrom snek import i32, i64, read_bytes, write_bytes, sys\n"
 PARSER_PRIMITIVES = ("fail", "utf8", "json_string", "Node", "string", "scalar", "missing", "sequence")

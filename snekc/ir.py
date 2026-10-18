@@ -468,6 +468,7 @@ class Func:
     export: str | None = None
     machine: bool = False
     closure_type: Type | None = None
+    host: str = ""
 
 
 @dataclass

@@ -35,6 +35,13 @@ CHECKS = {
     )
 }
 CHECKS.update({
+    "browser": Check("check_browser.py", ("browser", "optimizer")),
+    "selfhost-browser": Check("check_browser.py", ("browser", "optimizer", "runtime", "compiler"), "snek"),
+    "library": Check("check_library.py", ("node",)),
+    "selfhost-library": Check("check_library.py", ("node", "runtime", "compiler"), "snek"),
+    "native-library": Check("check_library.py", ("node", "native"), args=("--native",)),
+    "library-optimized": Check("check_library.py", ("node", "optimizer"), args=("--optimize",)),
+    "selfhost-library-optimized": Check("check_library.py", ("node", "runtime", "compiler", "optimizer"), "snek", ("--optimize",)),
     "modules": Check("check_modules.py", ("runtime",)),
     "selfhost-modules": Check("check_modules.py", ("runtime", "compiler"), "snek"),
     "module-components": Check("check_modules.py", ("component-tools",), args=("--component",)),
@@ -66,17 +73,18 @@ CHECKS.update({
 })
 
 SUITES = {
+    "browser": ("browser", "selfhost-browser"),
     "fast": ("suites", "closures", "keyed_builtins", "lazy_runtime", "wasm", "benchmarks", "native_bench", "compiler_profile", "tooling", "linker", "emission_pipeline", "cli", "runtime_abi", "body_context"),
     "tooling": ("suites", "native_bench", "compiler_profile", "lazy_runtime", "tooling"),
-    "reference": ("reference-corpus", "modules", "byte_io", "formatting", "string_fusion"),
+    "reference": ("reference-corpus", "modules", "library", "library-optimized", "byte_io", "formatting", "string_fusion"),
     "bootstrap": ("parser", "frontend", "declarations", "bootstrap", "emitter_support", "machine_lowering"),
     "checkers": ("bodies", "aggregate_bodies", "runtime_bodies", "ordered_bodies", "selfhost_bodies", "language_bodies"),
     "compiler": ("selfhost_compiler",),
-    "selfhost": ("selfhost_compiler", "selfhost-modules", "lazy_runtime", "selfhost-corpus"),
+    "selfhost": ("selfhost_compiler", "selfhost-modules", "selfhost-library", "selfhost-library-optimized", "lazy_runtime", "selfhost-corpus"),
     "components": ("components", "module-components", "stdlib", "host_library", "component_lifecycle"),
     "selfhost-components": ("selfhost-component-corpus", "selfhost-module-components", "selfhost_components", "selfhost-component-lifecycle"),
     "checker-components": ("language_components",),
-    "native": ("native",),
+    "native": ("native", "native-library"),
     "packaging": ("packages",),
 }
 
@@ -124,6 +132,9 @@ def prerequisites(requirements):
         elif requirement == "wasmtime-py":
             if importlib.util.find_spec("wasmtime") is None:
                 raise RuntimeError("install Python wasmtime (CI uses 49.0.0)")
+        elif requirement == "browser":
+            if importlib.util.find_spec("playwright") is None:
+                raise RuntimeError("install tests/requirements-browser.txt and run python -m playwright install")
         elif requirement == "optimizer":
             try:
                 optimizer = driver.find_wasm_opt()

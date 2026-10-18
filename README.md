@@ -157,6 +157,12 @@ The IR is the language/backend seam. WAT remains the shared instruction represen
 
 ## What works
 
+- **JavaScript libraries.** Export typed functions to Node and browsers with
+  `snek build program.py --library --export function_name`. Builds include `.js`
+  wrappers and `.d.ts` declarations, with scalar/string conversion and translated
+  exceptions. Typed `@host("name")` declarations call JavaScript functions supplied
+  by the application; async declarations await Promises, and async exports return
+  Promises. See [host bindings](docs/reference/libraries.md).
 - **Local modules and packages.** Ordinary imports, aliases, relative imports and
   re-exports of functions/classes from `.py` or `.snek` files. Package initialization
   runs once; cycles, ambiguous paths and root escapes are diagnosed. Both CLIs
@@ -380,3 +386,5 @@ The suite now covers eleven workloads, including dictionaries, list builtins, pr
 7. **Done: own core binary encoder.** `--no-opt` builds need only Python; `wasm-opt` is used only for optimization. Component packaging still uses `wasm-tools`. See [DESIGN.md](DESIGN.md#native-binary-encoding).
 8. **Done: self-hosting.** The independent compiler consumes its unchanged Snek source and emits byte-identical stage-2 and stage-3 compiler binaries. Parsing, checking, closure/suspension lowering, runtime and Unicode generation, ordinary emission, module assembly and core binary encoding run in Snek, with Python compiler entry points disabled during the proof. `--compiler snek` supports core and component builds; Python remains the default reference implementation. Component packaging still uses the host linker and `wasm-tools`. See [`bootstrap/`](bootstrap/README.md) for reproducible proof and regression commands.
 9. **Done: local modules and packages.** Static local imports, aliases, relative imports, function/class re-exports and initialization ordering work through the shared Snek-owned linker, in both compilers and the native CLI. `--module-root` selects the source root. See [module rules](DESIGN.md#modules-and-imports); dynamic imports, module globals and package registry resolution remain out of scope.
+10. **Done: JavaScript library exports and host imports.** `build --library --export FUNCTION` emits Wasm, ES-module JavaScript bindings and TypeScript declarations. Both compilers and the native CLI support scalar/string boundaries, typed synchronous and async `@host("name")` callbacks, Promise-returning async exports, once-only initialization, and exception translation. One exported call is active per instance. See the [host bindings guide](docs/reference/libraries.md). Collection/class handles, task concurrency and user-defined WIT interfaces remain future work.
+11. **In progress: first-class browser support.** Capability checks and actionable loading errors, browser-engine CI, worker examples, sync/async host imports, bundler integration, and an interactive docs playground. JavaScript owns DOM objects and events; Snek calls application-supplied functions and awaits Promises. Object handles and task concurrency follow separately. See the [browser support plan](docs/reference/browsers.md).

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snek async host imports</title>
+<h1>Snek awaits fetch</h1>
+<button id="load" disabled>Load message</button>
+<p><output id="result" aria-live="polite">Loading module…</output></p>
+<script type="module">
+  import { instantiate } from "./async_demo.js";
+
+  const result = document.querySelector("#result");
+  const button = document.querySelector("#load");
+  try {
+    const lib = await instantiate(new URL("./async_demo.wasm", import.meta.url), {
+      imports: {
+        fetch_text: async url => {
+          const response = await fetch(url);
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          return response.text();
+        },
+      },
+    });
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      result.textContent = "Fetching…";
+      try { result.textContent = await lib.load("./message.txt"); }
+      catch (error) { result.textContent = error.message; }
+      finally { button.disabled = false; }
+    });
+    result.textContent = "Ready. Snek awaits JavaScript's fetch Promise.";
+    button.disabled = false;
+    document.documentElement.dataset.status = "ready";
+  } catch (error) {
+    result.textContent = error.message;
+    document.documentElement.dataset.status = "error";
+  }
+</script>
+</html>

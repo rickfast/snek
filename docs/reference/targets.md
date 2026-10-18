@@ -9,6 +9,10 @@ source_sections:
 The core target is the default. Components are opt-in and require additional
 host tools, but use the same Snek source language.
 
+For browser and Node function calls, use the [JavaScript library target](libraries.md)
+(`--library --export FUNCTION`). It produces a core module plus `.js`/`.d.ts`
+bindings. The table below compares the two **command** targets.
+
 | | Core module | Native component |
 | --- | --- | --- |
 | Build | `python -m snekc build program.snek` | Add `--component` |

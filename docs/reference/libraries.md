@@ -1,0 +1,273 @@
+# JavaScript libraries
+
+Compile selected Snek functions into a library callable from Node or a browser:
+
+```sh
+snek build examples/library/greetings.py --library --export greet --export add --export twice
+```
+
+This writes `greetings.wasm`, `greetings.js` and `greetings.d.ts` beside the source.
+The JavaScript file is an ES module. In Node projects, use `"type": "module"` in
+`package.json`. The Wasm engine needs WasmGC and exception handling, just as for
+[command programs](compatibility.md).
+
+The development CLI has the same build flags. It also supports optimization and
+`--keep-wat`:
+
+```sh
+python -m snekc build examples/library/greetings.py --library --export greet --export add --export twice --compiler snek --no-opt
+```
+
+Choose `--compiler python` for the reference compiler. Both use the same bridge
+ABI and binding generator, written in Snek. The standalone CLI needs no external
+compiler, JavaScript runtime, or Wasm tools to produce the three files.
+
+## Node
+
+```javascript
+import { readFile } from "node:fs/promises";
+import { instantiate } from "./greetings.js";
+
+const lib = await instantiate(await readFile(new URL("./greetings.wasm", import.meta.url)));
+console.log(lib.greet("Snek 🐍")); // Hello, Snek 🐍!
+console.log(lib.add(20, 22));     // 42
+console.log(lib.twice(9007199254740993n)); // exact i64 arithmetic
+```
+
+Run the checked-in example with `node examples/library/node.mjs` after building.
+Node callers should pass bytes or a compiled `WebAssembly.Module`; the URL loader
+uses `fetch`, which does not load local `file:` URLs in Node.
+
+## Browser
+
+See [browser support](browsers.md) for compatibility checks, error handling,
+Web Workers, and the browser-engine test matrix.
+
+```javascript
+import { instantiate } from "./greetings.js";
+
+const lib = await instantiate(new URL("./greetings.wasm", import.meta.url));
+document.querySelector("#result").textContent = lib.greet("browser");
+```
+
+Serve the files over HTTP. `instantiate` also accepts a `Response`, `ArrayBuffer`,
+typed-array view, or compiled `WebAssembly.Module`. Loading is asynchronous;
+ordinary Snek exports are synchronous and async exports return Promises. It does
+not require a WASI installation.
+
+The checked-in `examples/library/browser.html` runs the same example. After
+building, serve `examples/library/` with a static HTTP server and open that page.
+
+## Calling JavaScript from Snek
+
+Declare synchronous host functions with `@host("name")`. The name selects a
+function supplied by the application; Snek does not automatically gain access to
+browser globals or Node APIs.
+
+```python
+from snek import host, i32
+
+@host("get_name")
+def get_name() -> str:
+    pass
+
+@host("render")
+def render(text: str) -> None:
+    pass
+
+def increment(count: i32) -> i32:
+    count += 1
+    render("Hello, " + get_name() + "! Clicks: " + str(count))
+    return count
+```
+
+Build the checked-in example:
+
+```sh
+snek build examples/library/host_demo.py --library --export increment
+```
+
+Supply the required functions when loading it:
+
+```javascript
+const lib = await instantiate(new URL("./host_demo.wasm", import.meta.url), {
+  imports: {
+    get_name: () => document.querySelector("#name").value,
+    render: text => { document.querySelector("#result").textContent = text; },
+  },
+});
+let count = 0;
+button.addEventListener("click", () => { count = lib.increment(count); });
+```
+
+Serve `examples/library/` and open `host.html` for a runnable version. JavaScript
+owns the DOM and event handlers; Snek receives strings and calls typed functions.
+The same imports mechanism works in Node and Web Workers with functions appropriate
+to those environments.
+
+Host declarations must be top-level functions (`def` or `async def`), with an optional
+docstring followed by `pass`. Names are nonempty ASCII identifiers. Parameters
+and return values use the boundary types below; defaults, additional decorators,
+methods and nested declarations are rejected. Declarations can live in imported
+local modules and be used as callable values inside Snek. Repeated host names must
+have identical parameter and return types and agree on sync/async behavior. They
+require `--library`, even if unused.
+
+The generated `SnekImports` interface describes required callbacks, and
+`instantiate` requires options when a program declares imports. Every declaration
+must have a matching own function property, including unused declarations. The
+loader snapshots the functions before initialization and calls them without a
+receiver; use an arrow function or `.bind()` for methods that need `this`.
+
+Synchronous callbacks receive copied JavaScript values. Their return types and integer ranges
+are checked, including `undefined` for a `None` return. `None` callbacks use
+`undefined` rather than `void` in TypeScript so async callbacks are not accepted.
+Promises and thenables are rejected at runtime, including for `None` callbacks.
+Use an async host declaration for `fetch`, timers and other Promise-based operations.
+
+Synchronous host functions can run during module initialization. A JavaScript exception aborts
+the current call (or rejects initialization) and propagates unchanged; it is not
+a Snek exception and does not run Snek `except`/`finally` cleanup. Use typed return
+values for expected host failures. Boundary validation errors behave the same way.
+The JavaScript bridge still resets its scratch memory, and subsequent calls work.
+Callbacks cannot re-enter the same instance; a later event can make a fresh call.
+
+The CPython shim preserves declarations for imports and tooling but raises a clear
+error when called: CPython has no JavaScript host. Python tests can replace the
+declared functions with their own test implementations.
+
+## Async imports and exports
+
+Use `async def` with the same decorator to declare a Promise-returning host
+function. Await it from a Snek async function:
+
+```python
+from snek import host
+
+@host("fetch_text")
+async def fetch_text(url: str) -> str:
+    pass
+
+async def load(url: str) -> str:
+    try:
+        return (await fetch_text(url)).strip().upper()
+    except RuntimeError as error:
+        return "Could not load: " + str(error)
+```
+
+```sh
+snek build examples/library/async_demo.py --library --export load
+```
+
+```javascript
+import { instantiate } from "./async_demo.js";
+
+const lib = await instantiate(new URL("./async_demo.wasm", import.meta.url), {
+  imports: {
+    fetch_text: async url => {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.text();
+    },
+  },
+});
+const text = await lib.load("./message.txt");
+```
+
+Serve `examples/library/` and open `async.html` for a runnable fetch example.
+Async exports return `Promise<T>`; async host declarations require
+`PromiseLike<T>` callbacks (`PromiseLike<void>` for `None`). Returning a bare
+value instead of a Promise/thenable is an error. Resolved values use the same
+scalar/string checks as synchronous calls. Merely creating a Snek coroutine does
+not invoke the callback: it starts when that coroutine is awaited.
+
+The loader advances the existing GC-backed coroutine frames until they suspend,
+awaits the host Promise, and resumes with the resolved value. No Wasm stack or
+borrowed string buffer is retained across the wait. `await checkpoint()` yields
+to the JavaScript event loop; CPU-bound work between awaits still runs on the
+calling thread, so use a Worker when needed.
+
+Promise rejections, synchronous throws from async callbacks, and invalid resolved
+values become catchable Snek `RuntimeError`s with the host name and an error
+message. Snek `except` and `finally` run, including awaited cleanup. An uncaught
+exception rejects the exported Promise with `SnekError`. The original JavaScript
+error object/stack is not preserved. This differs from synchronous host callback
+errors, which still escape unchanged and bypass Snek cleanup.
+
+Each instance allows **one active exported call**, including time spent awaiting.
+Overlapping sync calls throw and overlapping async calls reject; they are not
+queued. Await completion before using the instance again, or create separate
+instances for independent work. Callbacks must not call back into the same
+instance. Errors release the active call and scratch storage so it can be reused.
+
+Async module initialization, task spawning, and a Snek cancellation API are not
+supported. `run()` is a command entry mechanism, not a way to block JavaScript
+waiting for a Promise. Start library coroutines through an async export. The
+application can own an `AbortController` inside its host implementation; a rejected
+fetch then follows normal Snek error/cleanup handling. An unsettled Promise keeps
+its instance busy until the host settles it.
+
+## Boundary types
+
+| Snek | JavaScript / TypeScript |
+| --- | --- |
+| `i32` | `number`, checked as a signed 32-bit integer |
+| `i64` | `bigint`, checked as a signed 64-bit integer |
+| `f32` | `number`, rounded to float32 by Wasm |
+| `f64` | `number` |
+| `bool` | `boolean` |
+| `str` | `string`, copied as UTF-8 |
+| `None` return | `void` / `undefined` |
+
+The generated `.d.ts` describes an instance's exported methods. Wrappers also
+validate types, argument counts and integer ranges at runtime. Every parameter
+must be supplied, including parameters with Snek defaults; calls are positional.
+Float infinities, NaN and signed zero follow Wasm arithmetic. JavaScript strings
+must contain valid Unicode scalar values: lone UTF-16 surrogates are rejected.
+
+Strings are copied into the GC heap before user code runs and copied back for
+JavaScript results. No GC reference or ownership handle crosses the boundary.
+Temporary linear memory is reused after each call, so callers never free values;
+its capacity can remain at the largest call's high-water mark.
+Exported string parameters and host string returns also enable full-Unicode tables for the operations used by the
+program, so case conversion and character classification work on host input even
+when those characters never appear in the source.
+
+## Initialization, errors and output
+
+Each `instantiate` creates an independent instance and runs module initialization
+once. The entry's `__name__` is its module name, not `"__main__"`, so command-only
+main guards do not execute. Local imports work with the usual `--module-root`
+rules. Select functions defined in the entry module; wrap imported functions in
+an entry function when you want to expose them.
+
+An uncaught Snek exception becomes a JavaScript `SnekError` with its class name and
+message. Failed initialization rejects `instantiate`. Wasm traps and host callback
+errors propagate as JavaScript errors. Reentrant calls into the same instance
+are rejected.
+
+`print()` is supported, but output is discarded unless you supply a callback:
+
+```javascript
+const lib = await instantiate(bytes, { stdout: text => process.stdout.write(text) });
+```
+
+Callbacks receive text chunks, not necessarily whole lines. Snek exception output
+is captured in the thrown error instead of printed to stderr. Only selected
+functions appear on the returned, frozen API object.
+
+## Current limits
+
+Exports must be entry-module functions with the boundary types above (or coroutines
+returning those types). Collections, classes, optionals, callbacks, generators and raw coroutine objects cannot cross
+the boundary. Libraries can use these internally where supported by the language,
+but cannot perform async module initialization or use WASI services such as
+stdin, environment variables, clocks and randomness. Unsupported signatures and
+services fail at compile time, including services referenced by unexported code.
+
+`--library` requires one or more `--export` flags and cannot be combined with
+`--component`. This is a core-Wasm JavaScript library target, not a WIT component
+library. Native command and WASI component targets are unchanged.
+
+Export names are ASCII identifiers. `memory`, `then`, and the `__snek_` prefix
+are reserved for the bridge and loader.

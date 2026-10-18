@@ -31,12 +31,16 @@ def invoke(data: bytes, args: list[str]) -> bytes:
     return result.stdout
 
 
-def wat(source: str, *, component: bool = False) -> str:
-    result = invoke(source.encode(), ["--wat", *(["--component"] if component else [])])
+def wat(source: str, *, component: bool = False, exports: list[str] | None = None) -> str:
+    result = invoke(source.encode(), ["--wat", *(["--component"] if component else []), *library_args(exports)])
     text = result.decode("utf-8")
     if not text.startswith("(module"):
         raise RuntimeError("Snek compiler did not return core WAT")
     return text
+
+
+def library_args(exports: list[str] | None) -> list[str]:
+    return ["--library", *("--export=" + name for name in exports)] if exports else []
 
 
 def encode(wat: str) -> bytes:

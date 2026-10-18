@@ -56,6 +56,39 @@ See `examples/modules/main.py` for a multi-file program that also runs under
 CPython. Build it with `python -m snekc run examples/modules/main.py --no-opt`
 or `snek run examples/modules/main.py`.
 
+## JavaScript library boundaries
+
+`--library --export FUNCTION` produces a core Wasm library and generated
+JavaScript/TypeScript bindings. Both exports and `@host("name")`
+imports support fixed-width numbers, booleans and copied strings, plus `None`
+returns. Host declarations have typed signatures and `pass` bodies; their host
+names remain explicit metadata in checked IR, not ordinary function bodies.
+JavaScript supplies the functions when instantiating the library. There is no
+ambient DOM, filesystem or network access.
+
+The shared ABI generator lowers strings to UTF-8 pointer/length pairs and copies
+them into the GC heap before use. Host string returns use Wasm multi-value
+results. Scratch frames are released after each callback, and the JavaScript
+entry guard resets the arena on exceptional exit. GC references never escape.
+Host string returns, like exported string parameters, enable the Unicode tables
+needed for open-world input.
+
+Synchronous host exceptions propagate unchanged to JavaScript, bypassing Snek
+exception handlers and cleanup. An `async def` host declaration instead wraps a
+Promise as a GC-backed coroutine frame. It starts lazily on first resume, suspends,
+and retrieves a checked result on the next resume after JavaScript settles it.
+Rejections and invalid resolved values become Snek `RuntimeError`s, allowing normal
+exception handling and awaited cleanup. Async exports keep their root frame in a
+private GC global until completion; the JavaScript driver awaits pending host work
+or yields to the event loop for a cooperative checkpoint. No Wasm stack is retained.
+
+Each instance permits one active exported call, including suspended time. Reentrant
+and overlapping calls are rejected, not queued. Scratch memory is reset at suspension
+and exit; exported roots are cleared on success and failure. Async initialization,
+task spawning, cancellation APIs and object handles remain unsupported. The CPython shim raises on a host call
+unless the application replaces the declaration with a Python implementation.
+See the [library guide](docs/reference/libraries.md) for the public contract.
+
 ## Types and inference
 
 - **Annotations.** Function signatures and class fields must be annotated. Locals are inferred from their first assignment and keep that type.

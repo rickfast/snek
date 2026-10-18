@@ -240,10 +240,12 @@ class DeclParam:
 class DeclSignature:
     params: list[DeclParam]
     ret: DeclType
+    host: str
 
     def __init__(self) -> None:
         self.params = []
         self.ret = DeclType("None")
+        self.host = ""
 
     def same(self, other: DeclSignature) -> bool:
         if not self.ret.same(other.ret) or len(self.params) != len(other.params):
@@ -259,7 +261,7 @@ class DeclSignature:
         params: list[Node] = []
         for param in self.params:
             params.append(param.tree())
-        return Node("Signature").put("params", sequence(params)).put("returns", self.ret.tree())
+        return Node("Signature").put("params", sequence(params)).put("returns", self.ret.tree()).put("host", string(self.host))
 
 
 class DeclField:
@@ -372,7 +374,7 @@ class Declarations:
         if name in self.classes or name in self.function_nodes:
             declaration_error("'" + name + "' is already defined", node)
         if (name in self.reserved or name in self.library_imports
-                or (name in ("run", "checkpoint", "read_bytes", "write_bytes") and name in self.imported)):
+                or (name in ("host", "run", "checkpoint", "read_bytes", "write_bytes") and name in self.imported)):
             declaration_error("'" + name + "' is a reserved name", node)
 
     def library_binding(self, name: str, path: list[str], node: Node) -> None:
@@ -407,7 +409,7 @@ class Declarations:
         level = node.get("level").text
         allowed: list[str] = []
         if module == "snek":
-            allowed = ["i32", "i64", "f32", "f64", "Final", "final", "run", "checkpoint", "read_bytes", "write_bytes"]
+            allowed = ["i32", "i64", "f32", "f64", "Final", "final", "host", "run", "checkpoint", "read_bytes", "write_bytes"]
         elif module in ("typing", "collections.abc"):
             allowed = ["Iterator", "Generator", "Coroutine", "Callable"]
             if module == "typing":
@@ -440,7 +442,7 @@ class Declarations:
                 declaration_error("cannot import '" + name + "' from " + module, node)
             if name in self.library_imports:
                 declaration_error("'" + name + "' is already imported", node)
-            if name in ("run", "checkpoint", "read_bytes", "write_bytes") and (name in self.classes or name in self.function_nodes):
+            if name in ("host", "run", "checkpoint", "read_bytes", "write_bytes") and (name in self.classes or name in self.function_nodes):
                 declaration_error("'" + name + "' is already defined", node)
             if name not in self.imported:
                 self.imported.append(name)
@@ -477,7 +479,7 @@ class Declarations:
         for name in self.class_order:
             self.members(self.classes[name])
         for name in self.function_nodes:
-            self.functions[name] = self.signature(self.function_nodes[name], False)
+            self.functions[name] = self.signature(self.function_nodes[name], False, True)
         # Constructors are resolved separately, as in the production checker.
         for name in self.class_order:
             cls = self.classes[name]
@@ -632,13 +634,36 @@ class Declarations:
             declaration_error("field defaults must be literals", default)
         cls.fields[name] = DeclField(name, ty, final, cls.name, len(cls.fields) + 1, default)
 
-    def signature(self, node: Node, method: bool) -> DeclSignature:
+    def signature(self, node: Node, method: bool, allow_host: bool = False) -> DeclSignature:
         arguments = node.get("args")
         if (arguments.get("vararg").kind != "none" or arguments.get("kwarg").kind != "none"
                 or len(arguments.get("kwonlyargs").items) > 0 or len(arguments.get("posonlyargs").items) > 0):
             declaration_error("*args, **kwargs, keyword-only and positional-only parameters are not supported yet", node)
-        if not method and len(node.get("decorator_list").items) > 0:
-            declaration_error("function decorators are not supported yet", node.get("decorator_list").items[0])
+        host = ""
+        decorators = node.get("decorator_list").items
+        if not method and len(decorators) > 0:
+            decorator = decorators[0]
+            if (not allow_host or len(decorators) != 1 or decorator.kind != "Call"
+                    or not named(decorator.get("func"), "host") or "host" not in self.imported):
+                declaration_error('function decorators support only top-level @host("name") declarations', decorator)
+            values = decorator.get("args").items
+            if (len(values) != 1 or len(decorator.get("keywords").items) != 0
+                    or values[0].kind != "Constant" or values[0].get("value").kind != "str"):
+                declaration_error('@host requires one literal string name', decorator)
+            host = values[0].get("value").text
+            if len(host) == 0:
+                declaration_error("host import name must not be empty", decorator)
+            if not (host[0].isascii() and (host[0].isalpha() or host[0] == "_")):
+                declaration_error("host import names must be ASCII identifiers", decorator)
+            for char in host:
+                if not (char.isascii() and (char.isalnum() or char == "_")):
+                    declaration_error("host import names must be ASCII identifiers", decorator)
+            body = node.get("body").items
+            if len(body) > 0 and docstring(body[0]): body = body[1:]
+            if len(body) != 1 or body[0].kind != "Pass":
+                declaration_error("host declarations must have only a pass body (plus an optional docstring)", node)
+            if len(arguments.get("defaults").items) != 0:
+                declaration_error("host declarations cannot have default arguments", node)
         args = arguments.get("args").items
         defaults = arguments.get("defaults").items
         offset = len(args) - len(defaults)
@@ -650,6 +675,7 @@ class Declarations:
                 declaration_error("`self` cannot have a default value", defaults[0])
             start = 1
         sig = DeclSignature()
+        sig.host = host
         seen: list[str] = ["self"] if method else []
         for index in range(start, len(args)):
             arg = args[index]
@@ -673,6 +699,12 @@ class Declarations:
                 declaration_error("'" + node.get("name").text + "' needs a return annotation (`-> T` or `-> None`)", node)
         else:
             sig.ret = self.resolve_type(ret)
+        if host != "":
+            for param in sig.params:
+                if param.ty.kind not in ("i32", "i64", "f32", "f64", "bool", "str"):
+                    declaration_error("host boundaries support only scalar and string parameters", node)
+            if sig.ret.kind not in ("i32", "i64", "f32", "f64", "bool", "str", "None"):
+                declaration_error("host boundaries support only scalar, string, and None returns", node)
         yields = direct_yield(node.get("body"))
         if node.kind == "AsyncFunctionDef":
             if yields:

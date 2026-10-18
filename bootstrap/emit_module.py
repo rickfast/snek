@@ -10,6 +10,7 @@ from bootstrap.emit_support import EmitUnicode
 from bootstrap.emit_runtime import emit_collection_helpers, emit_keyed_builtin, emit_byte_io
 from bootstrap.emit_host import emit_host_helpers, emit_host_core_imports, emit_io_helpers, emit_component_imports
 from bootstrap.emit_suspension import OwnedMachine, owned_has_await, owned_machine_types, owned_machine_helpers, owned_runtime_machines, owned_runtime_machine
+from bootstrap.library import LibraryExport, library_target, library_code, library_host_imports, library_host_wrapper
 
 
 def emit_closures(e: SourceEmitter) -> str:
@@ -128,16 +129,27 @@ def emit_types(e: SourceEmitter, classes: list[str]) -> str:
     return "\n".join(lines)
 
 
-def emit_source_module(checked: BodyChecker, prelude_source: str, component: bool = False) -> str:
+def emit_source_module(checked: BodyChecker, prelude_source: str, component: bool = False, exports: list[str] | None = None, entry: str = "") -> str:
     e = SourceEmitter(checked, component)
     prelude = e.literals.expand(prelude_source)
     funcs: list[str] = []
+    host_functions: list[LibraryExport] = []
     for name in checked.decl.class_order:
         cls = checked.decl.classes[name]
         if cls.builtin:
             funcs.append(f"(func ${name}.__new__ (param $__msg (ref null $str)) (result (ref ${name})) (struct.new ${name} (global.get ${name}.vt.inst) (local.get $__msg) (ref.null $str)))")
     main_async = False
     for f in checked.functions:
+        if f.sig.host != "":
+            if exports is None or len(exports) == 0 or component:
+                raise ValueError("host imports require a --library build")
+            params: list[str] = []
+            for param in f.sig.params: params.append(param.ty.display())
+            async_host = f.sig.ret.kind == "Coroutine"
+            item = LibraryExport(f.sig.host, f.name, params, f.sig.ret.args[0].display() if async_host else f.sig.ret.display(), e.types.heap(f.sig.ret) if async_host else "")
+            funcs.append(library_host_wrapper(item, len(host_functions)))
+            host_functions.append(item)
+            continue
         if f.name == "snek.main":
             if owned_has_await(f.body):
                 # Main's coroutine ABI belongs to this emission, not the
@@ -173,12 +185,41 @@ def emit_source_module(checked: BodyChecker, prelude_source: str, component: boo
     machines = owned_machine_helpers(e)
     literals = e.literals.functions()
     unicode = EmitUnicode()
-    unicode.build(e.literals.texts, checked.unicode_flags, checked.unicode_cases, checked.unicode_decimal, checked.unicode_dynamic, checked.unicode_extra)
+    unicode_dynamic = checked.unicode_dynamic
+    for item in host_functions:
+        # Async rejection messages are also arbitrary host strings.
+        if item.ret == "str" or item.heap != "": unicode_dynamic = True
     imports = '(import "wasi_snapshot_preview1" "fd_write" (func $wasi.fd_write (param i32 i32 i32 i32) (result i32)))\n(import "wasi_snapshot_preview1" "proc_exit" (func $wasi.proc_exit (param i32)))'
     if e.byte_io or "stream_read" in e.io:
         imports += '\n(import "wasi_snapshot_preview1" "fd_read" (func $wasi.fd_read (param i32 i32 i32 i32) (result i32)))'
     imports = emit_component_imports("stream_read" in e.io, e.features) if component else imports + "\n" + emit_host_core_imports(e.features)
+    imports += "\n" + library_host_imports(host_functions)
     start = '(func $snek.start (export "_start") (call $lib.reset) (call $snek.sys.reset) (call $rt.uncaught (block $uncaught (result (ref $BaseException)) (try_table (catch $snek.exc $uncaught) (call $snek.main)) (call $rt.flush) (return))))'
     if main_async:
         start = '(func $snek.start (export "_start") (local $main (ref $coro<none>)) (call $lib.reset) (call $snek.sys.reset) (call $rt.uncaught (block $uncaught (result (ref $BaseException)) (try_table (catch $snek.exc $uncaught) (local.set $main (call $snek.main)) (loop $run (br_if $run (call $coro<none>.advance (local.get $main))))) (call $rt.flush) (return))))'
-    return "\n".join(["(module", imports, emit_types(e, classes), "(tag $snek.exc (param (ref $BaseException)))", '' if component else '(memory (export "memory") 1)', unicode.wat(), prelude, byte_io, io, host, literals, collections, "\n".join(keyed), protocols, machines, builders, vtables, closures, "\n".join(funcs), component_runtime if component else start, ")"]) + "\n"
+    library = ""
+    if exports is not None and len(exports) > 0:
+        if component or main_async or e.byte_io or len(e.io) != 0 or len(e.features) != 0:
+            raise ValueError("library targets support print(), not WASI services or async initialization")
+        selected: list[LibraryExport] = []
+        for name in exports:
+            target = library_target(name, entry)
+            found = False
+            for function in checked.functions:
+                if function.name == (target if entry != "" else name):
+                    if function.machine and function.sig.ret.kind != "Coroutine":
+                        raise ValueError("library exports cannot be generators: " + name)
+                    params: list[str] = []
+                    for param in function.sig.params:
+                        params.append(param.ty.display())
+                        if param.ty.kind == "str": unicode_dynamic = True
+                    async_export = function.sig.ret.kind == "Coroutine"
+                    selected.append(LibraryExport(name, function.name, params, function.sig.ret.args[0].display() if async_export else function.sig.ret.display(), e.types.heap(function.sig.ret) if async_export else ""))
+                    found = True
+                    break
+            if not found: raise ValueError("library export must name a function defined in the entry module: " + name)
+        library = library_code(selected, host_functions)
+        start = start.replace('(export "_start")', '(export "__snek_init")')
+    # Host strings are open-world input, even when every source literal is ASCII.
+    unicode.build(e.literals.texts, checked.unicode_flags, checked.unicode_cases, checked.unicode_decimal, unicode_dynamic, checked.unicode_extra)
+    return "\n".join(["(module", imports, emit_types(e, classes), "(tag $snek.exc (param (ref $BaseException)))", '' if component else '(memory (export "memory") 1)', unicode.wat(), prelude, byte_io, io, host, literals, collections, "\n".join(keyed), protocols, machines, builders, vtables, closures, "\n".join(funcs), component_runtime if component else start, library, ")"]) + "\n"

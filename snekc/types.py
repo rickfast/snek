@@ -260,6 +260,7 @@ class FuncSig:
     ret: Type
     defaults: list[ast.expr | None] = field(default_factory=list)  # one per param; literals only
     posonly: int = 0  # leading parameters that cannot be passed by keyword (built-in methods)
+    host: str = ""
 
     def __post_init__(self) -> None:
         if not self.defaults:

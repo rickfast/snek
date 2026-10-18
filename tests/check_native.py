@@ -57,6 +57,15 @@ class NativeTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(output.read_bytes().startswith(b"\0asm\x01\0\0\0"))
 
+    def test_library_build_without_external_dependencies(self):
+        self.source.write_text('def greet(name: str) -> str:\n    return "Hello, " + name\n')
+        output = self.root / "library.wasm"
+        result = self.cli("build", self.source, "--library", "--export", "greet", "-o", output)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(output.read_bytes().startswith(b"\0asm\x01\0\0\0"))
+        self.assertIn("export async function instantiate", output.with_suffix(".js").read_text())
+        self.assertIn('"greet"(arg0: string): string;', output.with_suffix(".d.ts").read_text())
+
     def test_compile_failure_preserves_output(self):
         self.source.write_text("print(missing)\n")
         output = self.root / "output.wasm"

@@ -19,6 +19,46 @@ from snekc.wasm import encode
 
 
 class RepeatEmissionTests(unittest.TestCase):
+    def test_host_metadata_survives_body_bridge_and_repeat_emission(self):
+        import json
+        from bootstrap.body_bridge import to_module
+        from snekc.emit_wat import emit_module
+        source = 'from snek import host\n@host("text")\ndef text() -> str:\n    pass\n'
+        source += '@host("async_text")\nasync def async_text() -> str:\n    pass\n'
+        owned = check(source)
+        before = owned.tree().json()
+        reference = to_module(json.loads(before))
+        self.assertEqual(next(f.host for f in reference.funcs if f.name == "text"), "text")
+        prelude = (ROOT / "snekc/prelude.wat").read_text()
+        for build in (lambda: emit_source_module(owned, prelude, exports=["text", "async_text"]),
+                      lambda: emit_module(reference, exports=["text", "async_text"])):
+            wat = build()
+            self.assertIn('(import "snek_host" "text"', wat)
+            self.assertIn('(import "snek_host_async" "async_text"', wat)
+            self.assertEqual(build(), wat)
+            self.assertTrue(encode(wat).startswith(b"\0asm"))
+        self.assertEqual(owned.tree().json(), before)
+        self.assertFalse(reference.unicode.dynamic)
+
+    def test_library_unicode_policy_does_not_mutate_checked_program(self):
+        import ast
+        from snekc.check import check_module
+        from snekc.emit_wat import emit_module
+        source = 'def identity(value: str) -> str:\n    return value\n'
+        prelude = (ROOT / "snekc/prelude.wat").read_text()
+        owned = check(source)
+        before = owned.tree().json()
+        command = emit_source_module(owned, prelude)
+        library = emit_source_module(owned, prelude, exports=["identity"])
+        self.assertIn('(export "identity")', library)
+        self.assertEqual(owned.tree().json(), before)
+        self.assertEqual(emit_source_module(owned, prelude), command)
+        reference = check_module(ast.parse(source))
+        command = emit_module(reference)
+        self.assertIn('(export "identity")', emit_module(reference, exports=["identity"]))
+        self.assertFalse(reference.unicode.dynamic)
+        self.assertEqual(emit_module(reference), command)
+
     def test_repeated_and_mixed_core_component_emission_preserves_checked_ir(self):
         prelude = (ROOT / "snekc/prelude.wat").read_text()
         sources = (

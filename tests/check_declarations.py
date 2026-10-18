@@ -65,7 +65,7 @@ def signature(sig):
         {"_type": "Parameter", "name": name, "type": type_tree(ty),
          "default": None if default is None else ast.dump(default)}
         for (name, ty), default in zip(sig.params, sig.defaults)
-    ], "returns": type_tree(sig.ret)}
+    ], "returns": type_tree(sig.ret), "host": sig.host}
 
 
 def reference(source):
@@ -259,6 +259,10 @@ class DeclarationTests(unittest.TestCase):
         self.assertEqual(child["methods"][0]["decl"], "Parent")
         self.assertEqual(child["methods"][0]["owner"], "Child")
         self.assertEqual(leaf["constructor"], parent["constructor"])
+
+    def test_typed_host_declaration_metadata(self):
+        data = self.compare('from snek import host, i32\n@host("render")\ndef render(value: str, count: i32) -> None:\n    pass\n')
+        self.assertEqual(data["functions"][0]["signature"]["host"], "render")
 
     def test_no_python_parser_checker_or_ast_adapter(self):
         expected = declare(FOCUSED).tree().json()

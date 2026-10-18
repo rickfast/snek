@@ -72,6 +72,7 @@ class ModuleStatement:
 
 class ModuleProject:
     entry: str
+    library: bool
     modules: dict[str, SourceModule]
     statements: list[ModuleStatement]
     imports: dict[str, Node]
@@ -79,6 +80,7 @@ class ModuleProject:
 
     def __init__(self, entry: str) -> None:
         self.entry = entry
+        self.library = False
         self.modules = {}
         self.statements = []
         self.imports = {}
@@ -164,7 +166,7 @@ class ModuleProject:
             if node.kind in ("Import", "ImportFrom"):
                 self.import_statement(module, node)
             elif main_guard(node):
-                branch = "body" if name == self.entry else "orelse"
+                branch = "body" if name == self.entry and not self.library else "orelse"
                 for child in node.get(branch).items:
                     if child.kind in ("FunctionDef", "AsyncFunctionDef", "ClassDef"):
                         self.error("module functions and classes must be declared directly at module scope", child)
@@ -334,9 +336,9 @@ class ModuleProject:
             if node.kind == "Name" and node.get("id").text not in locals_:
                 name = node.get("id").text
                 if name == "__name__":
-                    value = "__main__" if owner.name == self.entry else owner.name
+                    value = "__main__" if owner.name == self.entry and not self.library else owner.name
                     return Node("Constant", "", node.line, node.column).put("value", string(value)).put("kind", missing())
-                if name in ("i32", "i64", "f32", "f64", "Final", "Optional", "final", "Callable", "Iterator", "Generator", "Coroutine", "TracebackType", "run", "checkpoint", "read_bytes", "write_bytes"):
+                if name in ("i32", "i64", "f32", "f64", "Final", "Optional", "final", "host", "Callable", "Iterator", "Generator", "Coroutine", "TracebackType", "run", "checkpoint", "read_bytes", "write_bytes"):
                     self.error("'" + name + "' must be imported in this module", node)
         if node.kind in ("FunctionDef", "AsyncFunctionDef", "Lambda"):
             return self.function(owner, node, locals_, False)
@@ -362,7 +364,7 @@ class ModuleProject:
             elif node.kind == "ImportFrom":
                 if node.get("level").text != "0" or not module_builtin(node.get("module").text): local_imports = True
         # Preserve the existing single-source pipeline and its exact artifacts.
-        if not local_imports and "." not in self.entry:
+        if not self.library and not local_imports and "." not in self.entry:
             return entry.tree
         self.load(self.entry, Node("Module", "", 1, 0))
         body: list[Node] = []
@@ -462,5 +464,14 @@ class ModuleEnvelope:
         return project
 
 
-def module_project(source: str) -> Node:
-    return ModuleEnvelope(source).read().link()
+def module_project(source: str, library: bool = False) -> Node:
+    project = ModuleEnvelope(source).read()
+    project.library = library
+    return project.link()
+
+
+def module_library(source: str) -> Node:
+    project = ModuleProject("library")
+    project.library = True
+    project.modules["library"] = SourceModule("library", "<input>", False, True, source, 0)
+    return project.link()
