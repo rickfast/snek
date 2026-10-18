@@ -346,6 +346,7 @@ reject `gather`, just as they reject `wait_all`.
 | `f64` | `number` |
 | `bool` | `boolean` |
 | `str` | `string`, copied as UTF-8 |
+| `str | None` | `string | null`, with copied UTF-8 for non-null values |
 | `HostObject` | `object`, opaque GC-managed JavaScript reference |
 | `HostObject | None` | `object | null` |
 | Snek class `C` / `C | None` | Opaque `SnekObject<"module.C">` / handle or `null` |
@@ -354,6 +355,7 @@ reject `gather`, just as they reject `wait_all`.
 | `tuple[T, ...]` with a fixed supported shape | Immutable, GC-managed `SnekTuple<readonly [...]>` handle |
 | `Callable[[T, ...], R]` | Typed synchronous function, or async function when `R` is a `Coroutine` |
 | `None` return | `void` / `undefined` |
+| Other supported reference `T | None` | The same function/handle/object type, or `null` |
 
 The generated `.d.ts` describes an instance's exported methods. Wrappers also
 validate types, argument counts and integer ranges at runtime. Every parameter
@@ -371,6 +373,38 @@ its capacity can remain at the largest call's high-water mark.
 Exported string parameters and host string returns also enable full-Unicode tables for the operations used by the
 program, so case conversion and character classification work on host input even
 when those characters never appear in the source.
+
+## Nullable references
+
+Supported reference types may be annotated `T | None`: strings, lists,
+dictionaries, tuples, callbacks, Snek class instances, and `HostObject`.
+`None` crosses as JavaScript `null`, including in nested collections, callback
+signatures, and async results. Non-null values retain their usual validation,
+identity, and ownership checks. There is no additional nullable wrapper.
+
+```python
+from snek import host
+
+@host("attribute")
+def attribute(name: str) -> str | None:
+    pass
+
+def title() -> str | None:
+    value = attribute("title")
+    return value.upper() if value is not None else None
+```
+
+The host can supply `attribute: name => element.getAttribute(name)`. Generated
+TypeScript requires callers to narrow nullable results before using them.
+Empty strings, empty collections and `null` remain distinct. `undefined` is not
+accepted as a nullable value. A plain `-> None` function still returns
+`undefined`; it is not the same boundary type as `-> T | None`.
+
+Dictionary keys may be nullable strings or nullable tuples of supported key
+fields. A present key whose value is `None` returns `null` from `get()`; a missing
+key returns `undefined`, and `has()` distinguishes membership. Numeric and bool
+optionals remain unsupported by the language, as do bare `None` collection fields.
+Raw coroutine and generator values remain unsupported even when nullable.
 
 ## Snek-owned list handles
 
@@ -420,7 +454,7 @@ provide transaction isolation.
 Create lists in Snek, then pass their handles back. JavaScript arrays, lookalike
 objects, handles for different element types, and handles from another instance
 are rejected. Handles are not transferable between workers; send `toArray()` data
-instead. Optional lists are not supported yet.
+instead. Nullable lists use the same handles for non-null values.
 Supported lists can also be parameters and
 results of [typed callbacks](#typed-callbacks).
 
@@ -448,8 +482,8 @@ const snapshot = rows.toArray().map(row => row.toArray());
 Removing a child from its parent does not invalidate an existing child handle.
 Nested handles also work in host callbacks, async returns, and `gather()` results.
 There is no automatic recursive array conversion: choose explicitly which levels
-to copy, as above. Nullability is supported for `HostObject` and Snek class
-elements, not for child lists themselves.
+to copy, as above. Supported reference elements, including child lists, may be
+nullable; `get()` then returns the child handle or `null`.
 
 ### Lists of callbacks
 
@@ -479,7 +513,8 @@ JavaScript functions returning `PromiseLike<T>`. Generated TypeScript checks
 parameter and result types, including `undefined` for synchronous `None` results.
 Host functions may inspect and mutate callback lists during a Snek call, but must
 defer invoking Snek callbacks until the synchronous step returns. Callback values
-cannot be nullable. Callback parameters/results may themselves be callbacks;
+may be nullable, with missing callbacks represented by `null`.
+Callback parameters/results may themselves be callbacks;
 see [higher-order callbacks](#higher-order-callbacks).
 
 ## Snek-owned dictionary handles
@@ -525,9 +560,8 @@ sharing a dictionary see each other's changes; this is not a transaction API.
 
 Both key and value types are invariant. JavaScript `Map`s, plain objects,
 wrongly typed handles, and handles from another instance are rejected. There is
-no implicit conversion or manual disposal. Nullable keys and optional
-dictionaries remain unsupported at the library boundary even where the language
-supports them internally.
+no implicit conversion or manual disposal. Nullable dictionaries and supported
+nullable reference keys use `null`; non-null handles keep the same ownership rules.
 
 ### Tuple dictionary keys
 
@@ -554,7 +588,8 @@ console.log(cache.get(lib.key("asset", 1))); // "cached"
 Keys can be empty tuples or nested tuples of strings, booleans, i32s and i64s.
 They must be handles of exactly the expected shape from the same instance.
 Arrays, foreign handles, mutable collection fields, floats, class instances,
-callbacks, and nullable tuple/key fields are not accepted as keys. Converting
+and callbacks are not accepted as keys. String and tuple keys/fields may be
+nullable. Converting
 `entries()` to a JavaScript `Map` changes tuple-key lookup to object identity.
 
 ## Snek-owned tuple handles
@@ -593,8 +628,8 @@ Returning the same tuple from an instance returns the same handle.
 Tuple field types must match exactly, including nested shapes. Arrays, lookalike
 objects, differently typed tuples, and tuples from another instance are rejected;
 array copies cannot be passed back as tuple handles. There are no setters or
-manual lifetime calls. Optional tuples, bare `None` fields, unsupported field
-types remain unsupported at the boundary. Supported immutable tuples may be
+manual lifetime calls. Nullable tuples and nullable reference fields are supported;
+bare `None` fields and unsupported field types remain rejected. Supported immutable tuples may be
 [dictionary keys](#tuple-dictionary-keys).
 
 ## Snek-owned class handles
@@ -764,8 +799,8 @@ Callback arguments and results can be numbers, booleans, strings, `HostObject`,
 or `HostObject | None`, Snek class/nullable class handles, plus supported `list[T]`,
 `dict[K, V]`, and fixed-shape tuple handles (including nested collections);
 results can also be `None`. Callbacks may also accept and return other callbacks,
-and supported collections can contain callbacks. Unsupported collection shapes and
-optional callbacks are not supported. Callbacks with these result types
+and supported collections can contain callbacks. Nullable callbacks use `null`;
+unsupported collection shapes remain rejected. Callbacks with these result types
 are synchronous: returning a Promise is an error, including for `None` results.
 The generated TypeScript uses `undefined` for a `None` callback result to catch
 accidentally async functions.
@@ -913,7 +948,7 @@ functions appear on the returned, frozen API object.
 
 Exports must be entry-module functions with the boundary types above (or coroutines
 returning those types). Collections other than the supported list/dictionary/tuple handles,
-optional types other than `HostObject`/class references, generators and raw coroutine objects cannot cross
+generators and raw coroutine objects cannot cross
 the boundary. Libraries can use these internally where supported by the language,
 but cannot perform async module initialization or use WASI services such as
 stdin, environment variables, clocks and randomness. Unsupported signatures and

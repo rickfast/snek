@@ -91,7 +91,8 @@ Element access reuses callback identity maps; retained functions keep their
 captured state after removal. Inserting a JavaScript function creates a closure
 without executing user code, so hosts may register callbacks during a Snek call.
 Invoking a Snek callback still requires leaving the active synchronous step.
-Optional lists and optional callbacks are not yet part of this boundary.
+Supported references can be nullable at every boundary depth. Nullable variants
+resolve through the same non-null type metadata, wrapper maps and ownership checks.
 
 Library dictionaries use `SnekDict<K, V>` handles with invariant keys and values.
 Boundary keys are `str`, `bool`, `i32`, `i64`, or fixed-shape tuples of supported
@@ -113,12 +114,22 @@ getter closure strongly roots its GC tuple. `toArray()` returns a frozen shallow
 copy; fields are immutable but referenced collections remain live. TypeScript
 uses positional tuple types plus an invariant private brand to match Snek's
 exact-shape assignment rules. JavaScript indices are nonnegative safe integers.
-The loader requires bridge ABI 7 and verifies the generated tuple getters.
+The loader verifies the generated tuple getters.
 Dictionary tuple keys reuse ordinary structural hashing and equality, including
 nested and empty tuples. Equal but distinct key handles find the same entry;
 updates preserve the original key reference. Key signatures are decoded with
 bracket-depth tracking, and nested tuple getters are discovered through the
-same boundary metadata graph. Nullable keys remain unsupported.
+same boundary metadata graph. Nullable string and tuple keys are supported too.
+
+Bridge ABI 8 adds nullable strings through private GC string conversion helpers.
+Non-null strings still use pointer/length parameters and copied UTF-8. A nullable
+string instead crosses as `(ref null $str)`; JavaScript lowers non-null values
+through the private reader and lifts them through the private writer, preserving
+the distinction between an empty string and `null`. This works within borrowed
+collection/host scratch frames and in suspended async results. Nullable strings
+enable open-world Unicode tables just like ordinary host string input. Plain
+`None` returns remain `undefined`, while nullable references use `null` and reject
+`undefined`. Raw coroutine/generator values and numeric optionals remain excluded.
 
 Class boundaries use opaque `SnekObject` handles. A per-instance JavaScript
 private brand validates ownership; the private field strongly roots the WasmGC

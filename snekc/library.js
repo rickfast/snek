@@ -200,8 +200,8 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
     throw new SnekLoadError("Unable to instantiate Snek library. Use the .wasm and .js files from the same --library build.", { cause });
   }
   wasm = instance.exports;
-  if (wasm.__snek_abi?.value !== 7 || !(wasm.__snek_yielded instanceof WebAssembly.Global) || !(wasm.memory instanceof WebAssembly.Memory) || !(wasm.__snek_length instanceof WebAssembly.Global) ||
-      ["__snek_init", "__snek_reset", "__snek_alloc", "__snek_mark", "__snek_restore",
+  if (wasm.__snek_abi?.value !== 8 || !(wasm.__snek_yielded instanceof WebAssembly.Global) || !(wasm.memory instanceof WebAssembly.Memory) || !(wasm.__snek_length instanceof WebAssembly.Global) ||
+      ["__snek_init", "__snek_reset", "__snek_alloc", "__snek_mark", "__snek_restore", "__snek_string_from", "__snek_string_to",
         ...listSignatures.flatMap((_, i) => ["len", "get", "set", "append", "pop"].map(op => `__snek_list_${op}_${i}`)),
         ...dictSignatures.flatMap((_, i) => ["len", "next", "get", "contains", "set", "delete", "clear", "copy", "keys_at", "values_at"].map(op => `__snek_dict_${op}_${i}`)),
         ...tupleSignatures.flatMap(([, fields], i) => fields.map((_, field) => `__snek_tuple_get_${i}_${field}`)),
@@ -251,6 +251,11 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
     }
   }
   function lower(type, value) {
+    if (type.endsWith(" | None")) {
+      if (value === null) return [null];
+      const inner = type.slice(0, -7);
+      return inner === "str" ? [wasm.__snek_string_from(...lower("str", value))] : lower(inner, value);
+    }
     const object = classSignatures.findIndex(([signature]) => signature === type);
     if (object !== -1) {
       const [, name, nullable] = classSignatures[object];
@@ -330,6 +335,11 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
   enter(() => wasm.__snek_init());
   const api = Object.create(null);
   function lift(result, value) {
+    if (result.endsWith(" | None")) {
+      if (value === null) return null;
+      const inner = result.slice(0, -7);
+      return lift(inner, inner === "str" ? wasm.__snek_string_to(value) : value);
+    }
     const object = classSignatures.findIndex(([signature]) => signature === result);
     if (object !== -1) {
       if (value === null) return null;

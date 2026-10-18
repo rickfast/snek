@@ -478,6 +478,73 @@ def empty_keyed() -> dict[tuple[()], str]:
 '''
 TUPLE_EXPORTS = ["pair", "echo", "from_host", "delayed", "empty", "echo_empty", "singleton", "scalars", "apply", "apply_async", "composed", "box_value", "in_list", "in_dict", "keyed", "echo_keyed", "apply_keyed", "delayed_keyed", "nested_key", "nested_keyed", "empty_keyed"]
 
+OPTIONAL_SOURCE = '''
+from typing import Callable, Coroutine
+from snek import i32, host, checkpoint
+@host("text")
+def text() -> str | None:
+    pass
+@host("text_async")
+async def text_async() -> str | None:
+    pass
+@host("list_async")
+async def list_async(values: list[str | None] | None) -> list[str | None] | None:
+    pass
+@host("mix")
+def mix(a: str | None, b: str, c: str | None) -> str | None:
+    pass
+def mixed(a: str | None, b: str, c: str | None) -> str | None:
+    return mix(a, b, c)
+def echo(value: str | None) -> str | None:
+    return value
+def upper() -> str | None:
+    value = text()
+    return value.upper() if value is not None else None
+async def upper_async() -> str | None:
+    value = await text_async()
+    return value.upper() if value is not None else None
+def make_list() -> list[str | None]:
+    return ["value", None]
+def maybe_list(values: list[str | None] | None) -> list[str | None] | None:
+    return values
+async def later_list(values: list[str | None] | None) -> list[str | None] | None:
+    return await list_async(values)
+def make_dict() -> dict[str | None, str | None]:
+    return {"key": "value", None: None}
+def maybe_dict(values: dict[str | None, str | None] | None) -> dict[str | None, str | None] | None:
+    return values
+def make_key(value: str | None) -> tuple[str | None, i32]:
+    return (value, 1)
+def keys() -> dict[tuple[str | None, i32] | None, str]:
+    return {("key", 1): "tuple", None: "null"}
+def maybe_tuple(value: tuple[str | None, i32] | None) -> tuple[str | None, i32] | None:
+    return value
+def make_callback() -> Callable[[str | None], str | None]:
+    def fn(value: str | None) -> str | None:
+        return value.upper() if value is not None else None
+    return fn
+def maybe_callback(fn: Callable[[str | None], str | None] | None) -> Callable[[str | None], str | None] | None:
+    return fn
+def call_optional(fn: Callable[[str | None], str | None] | None, value: str | None) -> str | None:
+    return fn(value) if fn is not None else None
+def async_callback() -> Callable[[str | None], Coroutine[None, None, str | None]]:
+    async def fn(value: str | None) -> str | None:
+        await checkpoint()
+        return value
+    return fn
+async def apply_async(fn: Callable[[str | None], Coroutine[None, None, str | None]] | None, value: str | None) -> str | None:
+    return await fn(value) if fn is not None else None
+def holder() -> tuple[list[str] | None, dict[str, str] | None, Callable[[str], str] | None]:
+    return (None, None, None)
+def factory(fn: Callable[[bool], Callable[[str | None], str | None] | None], enabled: bool) -> Callable[[str | None], str | None] | None:
+    return fn(enabled)
+def callback_list() -> list[Callable[[str | None], str | None] | None]:
+    return [make_callback(), None]
+def collection_list() -> list[list[str | None] | None]:
+    return [make_list(), None]
+'''
+OPTIONAL_EXPORTS = ["echo", "upper", "upper_async", "mixed", "make_list", "maybe_list", "later_list", "make_dict", "maybe_dict", "make_key", "keys", "maybe_tuple", "make_callback", "maybe_callback", "call_optional", "async_callback", "apply_async", "holder", "factory", "callback_list", "collection_list"]
+
 OBJECT_SOURCE = '''from snek import HostObject, host, checkpoint
 from typing import Callable, Iterator
 @host("lookup")
@@ -845,6 +912,56 @@ const second = await instantiate(await WebAssembly.compile(bytes));
 assert.equal(second.add(2, 3), 5);
 ''')
 
+    def test_optional_reference_boundaries(self):
+        self.src.write_text(OPTIONAL_SOURCE)
+        self.build(OPTIONAL_EXPORTS)
+        self.node('''
+let supplied = null;
+const options = {imports: {text: () => supplied, text_async: async () => supplied, list_async: async x => x,
+  mix: (a, b, c) => a === null && c === null ? null : (a ?? "") + b + (c ?? "")}};
+const lib = await instantiate(bytes, options), foreign = await instantiate(bytes, options);
+for (const value of [null, "", "\\0", "straße 🐍", "x".repeat(200000)]) assert.equal(lib.echo(value), value);
+for (const invalid of [undefined, 0, {}, Promise.resolve("wrong")]) assert.throws(() => lib.echo(invalid), TypeError);
+assert.throws(() => lib.echo("\\ud800"), /surrogate/);
+assert.equal(lib.mixed(null, "middle", null), null);
+assert.equal(lib.mixed("a".repeat(200000), "🐍".repeat(50000), "last"), "a".repeat(200000) + "🐍".repeat(50000) + "last");
+assert.equal(lib.mixed("first", "middle", null), "firstmiddle");
+assert.equal(lib.upper(), null); assert.equal(await lib.upper_async(), null);
+supplied = "straße 🐍"; assert.equal(lib.upper(), "STRASSE 🐍"); assert.equal(await lib.upper_async(), "STRASSE 🐍");
+const list = lib.make_list(); assert.equal(lib.maybe_list(list), list); assert.equal(lib.maybe_list(null), null);
+list.append(null); list.set(0, "edited"); assert.deepEqual(list.toArray(), ["edited", null, null]);
+assert.equal(await lib.later_list(list), list); assert.equal(await lib.later_list(null), null);
+assert.throws(() => lib.maybe_list(foreign.make_list()), TypeError);
+const dict = lib.make_dict(); assert.equal(lib.maybe_dict(dict), dict); assert.equal(lib.maybe_dict(null), null);
+assert.equal(dict.has(null), true); assert.equal(dict.get(null), null); assert.equal(dict.get("missing"), undefined);
+dict.set(null, "nonnull"); dict.set("key", null); assert.deepEqual(dict.entries(), [["key", null], [null, "nonnull"]]);
+const key = lib.make_key(null); assert.equal(lib.maybe_tuple(key), key); assert.equal(lib.maybe_tuple(null), null);
+assert.deepEqual(key.toArray(), [null, 1]);
+const keys = lib.keys(); assert.equal(keys.get(null), "null"); assert.equal(keys.get(lib.make_key("key")), "tuple");
+keys.set(key, "optional field"); assert.equal(keys.get(lib.make_key(null)), "optional field");
+const fn = lib.make_callback(); assert.equal(lib.maybe_callback(fn), fn); assert.equal(lib.maybe_callback(null), null);
+assert.equal(fn(null), null); assert.equal(lib.call_optional(fn, "straße"), "STRASSE"); assert.equal(lib.call_optional(null, "ignored"), null);
+const js = x => x; assert.equal(lib.maybe_callback(js), js); assert.equal(lib.call_optional(js, null), null);
+assert.equal(lib.factory(enabled => enabled ? js : null, true), js);
+assert.equal(lib.factory(enabled => enabled ? js : null, false), null);
+const functions = lib.callback_list(); assert.equal(functions.get(1), null); functions.append(js); assert.equal(functions.get(2), js);
+functions.set(0, null); assert.equal(functions.get(0), null);
+const rows = lib.collection_list(); rows.set(1, list); assert.equal(rows.get(1), list); rows.append(null); assert.equal(rows.get(2), null);
+assert.deepEqual(lib.holder().toArray(), [null, null, null]);
+const asyncFn = lib.async_callback(); assert.equal(await asyncFn(null), null);
+assert.equal(await lib.apply_async(asyncFn, "async"), "async"); assert.equal(await lib.apply_async(null, "ignored"), null);
+await assert.rejects(lib.apply_async(async () => undefined, null), SnekError);
+assert.equal(await lib.apply_async(async x => x, null), null);
+''')
+
+    def test_nullable_string_host_only_unicode(self):
+        self.src.write_text(OPTIONAL_SOURCE)
+        self.build(["upper"])
+        self.node('''
+const lib = await instantiate(bytes, {imports: {text: () => "straße 🐍", text_async: async () => null, list_async: async x => x, mix: () => null}});
+assert.equal(lib.upper(), "STRASSE 🐍");
+''')
+
     def test_tuple_dictionary_keys(self):
         self.src.write_text(TUPLE_SOURCE)
         self.build(TUPLE_EXPORTS)
@@ -1001,10 +1118,10 @@ changed.clear(); changed.set("after", "cleanup"); assert.deepEqual(changed.entri
         self.node('const lib = await instantiate(bytes); assert.throws(() => lib.apply(x => x, new Map()), /handle from this Snek instance/);')
 
     def test_unsupported_dictionary_boundaries(self):
-        for ty in ("dict[tuple[str, str] | None, str]", "dict[str | None, str]", "dict[str, tuple[str | None, str]]", "dict[str, str] | None"):
+        for ty in ("dict[list[str], str]", "dict[str, Coroutine[None, None, str]]", "dict[str, list[Coroutine[None, None, str]]]", "dict[str, Callable[[None], str]]"):
             for host in (False, True):
                 with self.subTest(ty=ty, host=host):
-                    self.src.write_text('from snek import host\n' + ('@host("f")\n' if host else '') + f'def f(value: {ty}) -> None:\n    pass\n')
+                    self.src.write_text('from snek import host\nfrom typing import Callable, Coroutine\n' + ('@host("f")\n' if host else '') + f'def f(value: {ty}) -> None:\n    pass\n')
                     with self.assertRaises(Exception): self.build(["f"])
 
     def test_higher_order_callbacks(self):
@@ -1314,8 +1431,8 @@ assert.equal(lib.echo(value), value); assert.equal(lib.read(value), 42);
 ''')
 
     def test_class_handles_reject_unsupported_boundary_shapes(self):
-        base = 'from typing import Callable\nfrom snek import host\nclass Box:\n    pass\n'
-        for ty in ("dict[tuple[str, str] | None, Box]", "list[Callable[[], Box] | None]", "Callable[[Callable[[], dict[tuple[str, str] | None, Box]]], Box]", "list[Box] | None"):
+        base = 'from typing import Callable, Coroutine\nfrom snek import host\nclass Box:\n    pass\n'
+        for ty in ("dict[Box, Box]", "list[Coroutine[None, None, Box]]", "Callable[[Coroutine[None, None, Box]], Box]", "tuple[Box, Coroutine[None, None, Box]]"):
             for host in (False, True):
                 self.src.write_text(base + ('@host("f")\n' if host else '') + f'def f(value: {ty}) -> None:\n    pass\n')
                 with self.subTest(ty=ty, host=host), self.assertRaises(Exception):
@@ -1809,12 +1926,12 @@ await assert.rejects(lib.apply_bool(async () => 1, true), /expected boolean/);
 ''')
 
     def test_unsupported_callback_signatures(self):
-        for signature in ("Callable[[tuple[str | None, str]], str]", "Callable[[str], tuple[str | None, str]]",
+        for signature in ("Callable[[tuple[Coroutine[None, None, str], str]], str]", "Callable[[str], tuple[Coroutine[None, None, str], str]]",
                           "Callable[[Callable[[None], str]], str]", "Callable[[], Coroutine[str]]",
-                          "Callable[[], Coroutine[None, None, tuple[str | None, str]]]",
+                          "Callable[[], Coroutine[None, None, tuple[Coroutine[None, None, str], str]]]",
                           "Callable[[list[Callable[[None], str]]], str]",
                           "Callable[[Coroutine[None, None, str]], str]",
-                          "Callable[[None], str]", "Callable[[str], str] | None"):
+                          "Callable[[None], str]", "Callable[[str], Coroutine[None, None, Coroutine[None, None, str]]]"):
             for host in (False, True):
                 with self.subTest(signature=signature, host=host):
                     self.src.write_text('from snek import host\nfrom typing import Callable, Coroutine\n' +
@@ -1979,15 +2096,15 @@ assert.equal(lib.call("hi"), "hi🐍🐍");
             ('@host("x")\nasync def f() -> None:\n    return\n', "pass body"),
             ('@host("x")\ndef f() -> i32:\n    return 1\n', "pass body"),
             ('@host("x")\ndef f(x: i32 = 0) -> None:\n    pass\n', "default arguments"),
-            ('@host("x")\ndef f(x: list[tuple[str | None, i32]]) -> None:\n    pass\n', "host boundaries"),
-            ('@host("x")\ndef f() -> str | None:\n    pass\n', "scalar, string"),
+            ('@host("x")\ndef f(x: list[Coroutine[None, None, str]]) -> None:\n    pass\n', "host boundaries"),
+            ('@host("x")\ndef f() -> list[Coroutine[None, None, str]]:\n    pass\n', "scalar, string"),
             ('def outer() -> None:\n    @host("x")\n    def inner() -> None:\n        pass\n', "top-level"),
             ('@host("same")\ndef a() -> i32:\n    pass\n@host("same")\ndef b() -> str:\n    pass\n', "conflicting signatures"),
             ('@host("same")\ndef a() -> i32:\n    pass\n@host("same")\nasync def b() -> i32:\n    pass\n', "conflicting signatures"),
         ]
         for source, message in cases:
             with self.subTest(source=source):
-                self.src.write_text('from snek import host, i32\n' + source + '\ndef entry() -> None:\n    pass\n')
+                self.src.write_text('from snek import host, i32\nfrom typing import Coroutine\n' + source + '\ndef entry() -> None:\n    pass\n')
                 with self.assertRaisesRegex(Exception, message):
                     self.build(exports=["entry"])
 
@@ -2402,7 +2519,7 @@ assert.equal(output, "loop cleaned\\n");
         self.node('''
 const original = WebAssembly.instantiate;
 try {
-  for (const version of [undefined, 1, 2, 3, 4, 5, 6, 8]) {
+  for (const version of [undefined, 1, 2, 3, 4, 5, 6, 7, 9]) {
     WebAssembly.instantiate = async (...args) => {
       const instance = await original(...args);
       return {exports: {...instance.exports, __snek_abi: version === undefined ? undefined : new WebAssembly.Global({value: "i32"}, version)}};
@@ -2484,15 +2601,15 @@ assert.equal(lib.number("٤٢"), 42);
 
     def test_unsupported_boundaries_and_services(self):
         for source in (
-            'def value(x: list[tuple[str | None, str]]) -> str:\n    return x[0][1]\n',
-            'def value() -> list[tuple[str | None, str]]:\n    return [(None, "y")]\n',
-            'async def value() -> list[tuple[str | None, str]]:\n    return [(None, "y")]\n',
-            'def value(x: list[list[str] | None]) -> None:\n    pass\n',
+            'def value(x: list[Coroutine[None, None, str]]) -> None:\n    pass\n',
+            'async def child() -> str:\n    return "x"\ndef value() -> list[Coroutine[None, None, str]]:\n    return [child()]\n',
+            'async def child() -> str:\n    return "x"\nasync def value() -> list[Coroutine[None, None, str]]:\n    return [child()]\n',
+            'def value(x: Coroutine[None, None, str] | None) -> None:\n    pass\n',
             'from snek import sys\ndef value() -> str:\n    return sys.argv[0]\n',
             'from snek import time, f64\ndef value() -> f64:\n    return time.time()\n',
         ):
             with self.subTest(source=source):
-                self.src.write_text(source)
+                self.src.write_text('from typing import Coroutine\n' + source)
                 with self.assertRaises((ValueError, RuntimeError)): self.build(["value"])
 
     def test_failed_init_and_callback(self):

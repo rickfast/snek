@@ -141,6 +141,23 @@ class RepeatEmissionTests(unittest.TestCase):
             self.assertTrue(encode(wat).startswith(b"\0asm"))
         self.assertEqual(owned.tree().json(), before)
 
+    def test_optional_references_survive_owned_bridge_and_repeat_emission(self):
+        import json
+        from bootstrap.body_bridge import to_module
+        from snekc.emit_wat import emit_module
+        from check_library import OPTIONAL_SOURCE, OPTIONAL_EXPORTS
+        owned = check(OPTIONAL_SOURCE)
+        before = owned.tree().json()
+        reference = to_module(json.loads(before))
+        prelude = (ROOT / "snekc/prelude.wat").read_text()
+        for build in (lambda: emit_source_module(owned, prelude, exports=OPTIONAL_EXPORTS),
+                      lambda: emit_module(reference, exports=OPTIONAL_EXPORTS)):
+            wat = build()
+            self.assertIn('(export "__snek_string_from")', wat)
+            self.assertEqual(build(), wat)
+            self.assertTrue(encode(wat).startswith(b"\0asm"))
+        self.assertEqual(owned.tree().json(), before)
+
     def test_tuple_handles_survive_owned_bridge_and_repeat_emission(self):
         import json
         from bootstrap.body_bridge import to_module

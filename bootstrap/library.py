@@ -50,7 +50,8 @@ def library_boundary_types(exports: list[LibraryExport], hosts: list[LibraryExpo
         ty = types[i]
         i += 1
         children: list[str] = []
-        if ty.startswith("list["): children.append(library_list_element(ty))
+        if ty.endswith(" | None"): children.append(ty[:-7])
+        elif ty.startswith("list["): children.append(library_list_element(ty))
         elif ty.startswith("dict["): children = library_dict_types(ty)
         elif ty.startswith("tuple["): children = library_tuple_types(ty)
         elif ty.startswith("Callable["): children = library_callback_types(ty)
@@ -161,6 +162,10 @@ def library_callback_heap(ty: str) -> str:
 
 
 def library_type(ty: str) -> str:
+    if ty.endswith(" | None"):
+        heap = library_reference_heap(ty)
+        if heap == "": raise ValueError("unsupported optional library type: " + ty)
+        return "(ref null " + heap + ")"
     if ty.startswith("class:"): return "(ref " + ("null " if ty.endswith(" | None") else "") + "$" + library_class_name(ty) + ")"
     if ty.startswith("list["): return "(ref " + library_list_heap(ty) + ")"
     if ty.startswith("dict["): return "(ref $" + library_mangle(ty) + ")"
@@ -178,22 +183,12 @@ def library_list_element(ty: str) -> str:
     elem = ty[5:-1]
     if not ty.startswith("list[") or not ty.endswith("]"):
         raise ValueError("invalid library list type: " + ty)
-    if elem.startswith("list["):
-        library_list_element(elem)
-    elif elem.startswith("Callable["):
-        library_callback_types(elem)
-    elif elem.startswith("dict["):
-        library_dict_types(elem)
-    elif elem.startswith("tuple["):
-        library_tuple_types(elem)
-    elif elem.startswith("class:"):
-        if library_class_name(elem) == "": raise ValueError("invalid library class element: " + ty)
-    elif elem not in ("i32", "i64", "f32", "f64", "bool", "str", "HostObject", "HostObject | None"):
-        raise ValueError("library list elements must be scalar, string, object handles, supported callbacks or collections; got " + ty)
+    library_type(elem)
     return elem
 
 
 def library_mangle(ty: str) -> str:
+    if ty.endswith(" | None"): return library_mangle(ty[:-7]) + "?"
     if ty.startswith("class:"): return library_class_name(ty) + ("?" if ty.endswith(" | None") else "")
     if ty.startswith("list["): return "list<" + library_mangle(library_list_element(ty)) + ">"
     if ty.startswith("Callable["): return library_callback_heap(ty)[1:]
@@ -229,7 +224,7 @@ def library_tuple_types(ty: str) -> list[str]:
 def library_tuples(exports: list[LibraryExport], hosts: list[LibraryExport]) -> list[str]:
     types: list[str] = []
     for ty in library_boundary_types(exports, hosts):
-        if ty.startswith("tuple["): types.append(ty)
+        if ty.startswith("tuple[") and not ty.endswith(" | None"): types.append(ty)
     return types
 
 
@@ -247,6 +242,7 @@ def library_tuple_code(tuples: list[str]) -> str:
 
 
 def library_dict_key(ty: str) -> bool:
+    if ty.endswith(" | None"): return library_dict_key(ty[:-7])
     if ty in ("str", "bool", "i32", "i64"): return True
     if ty.startswith("tuple[") and ty.endswith("]"):
         for field in library_tuple_types(ty):
@@ -278,7 +274,7 @@ def library_dict_types(ty: str) -> list[str]:
 def library_dicts(exports: list[LibraryExport], hosts: list[LibraryExport]) -> list[str]:
     types: list[str] = []
     for ty in library_boundary_types(exports, hosts):
-        if ty.startswith("dict["): types.append(ty)
+        if ty.startswith("dict[") and not ty.endswith(" | None"): types.append(ty)
     return types
 
 
@@ -328,7 +324,7 @@ def library_list_heap(ty: str) -> str:
 def library_lists(exports: list[LibraryExport], hosts: list[LibraryExport]) -> list[str]:
     lists: list[str] = []
     for ty in library_boundary_types(exports, hosts):
-        if ty.startswith("list["): lists.append(ty)
+        if ty.startswith("list[") and not ty.endswith(" | None"): lists.append(ty)
     return lists
 
 
@@ -361,6 +357,7 @@ def library_list_code(lists: list[str]) -> str:
 
 
 def library_ts(ty: str) -> str:
+    if ty.endswith(" | None"): return library_ts(ty[:-7]) + " | null"
     if ty.startswith("class:"): return "SnekObject<" + json_string(library_class_label(library_class_name(ty))) + ">" + (" | null" if ty.endswith(" | None") else "")
     if ty.startswith("list["): return "SnekList<" + library_ts(library_list_element(ty)) + ">"
     if ty.startswith("dict["):
@@ -385,20 +382,30 @@ def library_ts(ty: str) -> str:
     return "number"
 
 
+def library_reference_heap(ty: str) -> str:
+    if ty.endswith(" | None"): ty = ty[:-7]
+    if ty == "str": return "$str"
+    if ty == "HostObject": return "extern"
+    if ty.startswith("class:"): return "$" + library_class_name(ty)
+    if ty.startswith("list["): return library_list_heap(ty)
+    if ty.startswith("dict[") or ty.startswith("tuple["): return "$" + library_mangle(ty)
+    if ty.startswith("Callable["): return library_callback_heap(ty)
+    return ""
+
+
+def library_needs_unwrap(ty: str) -> bool:
+    return ty != "str" and not ty.endswith(" | None") and library_reference_heap(ty) != ""
+
+
 def library_nullable(ty: str) -> str:
-    if ty.startswith("class:"): return "(ref null $" + library_class_name(ty) + ")"
-    if ty.startswith("list["): return "(ref null " + library_list_heap(ty) + ")"
-    if ty.startswith("dict["): return "(ref null $" + library_mangle(ty) + ")"
-    if ty.startswith("tuple["): return "(ref null $" + library_mangle(ty) + ")"
-    if ty == "HostObject": return "(ref null extern)"
-    if ty.startswith("Callable["): return "(ref null " + library_callback_heap(ty) + ")"
-    return library_type(ty)
+    heap = library_reference_heap(ty)
+    return "(ref null " + heap + ")" if ty != "str" and heap != "" else library_type(ty)
 
 
 def library_callbacks(exports: list[LibraryExport], hosts: list[LibraryExport]) -> list[str]:
     callbacks: list[str] = []
     for ty in library_boundary_types(exports, hosts):
-        if ty.startswith("Callable["): callbacks.append(ty)
+        if ty.startswith("Callable[") and not ty.endswith(" | None"): callbacks.append(ty)
     return callbacks
 
 
@@ -427,8 +434,7 @@ def library_sync_export(item: LibraryExport, head: str, args: list[str]) -> str:
     if item.ret == "str": call = "(call $__snek_write " + call + ")"
     if result != "": call = "(local.set $result " + call + ")"
     value = "(local.get $result)" if result != "" else ""
-    if item.ret == "HostObject" or item.ret.startswith("Callable[") or item.ret.startswith("list[") or item.ret.startswith("dict[") or item.ret.startswith("tuple["): value = "(ref.as_non_null " + value + ")"
-    if item.ret.startswith("class:") and not item.ret.endswith(" | None"): value = "(ref.as_non_null " + value + ")"
+    if library_needs_unwrap(item.ret): value = "(ref.as_non_null " + value + ")"
     return head + " (call $rt.uncaught (block $failed (result (ref $BaseException)) (try_table (catch $snek.exc $failed) " + call + ") (call $rt.flush) (return " + value + "))) (unreachable))"
 
 
@@ -543,9 +549,7 @@ def library_host_wrapper(item: LibraryExport, index: i32) -> str:
 def library_async_host(item: LibraryExport, index: i32) -> str:
     B = item.heap
     F = "$__snek_host_frame_" + str(index)
-    result_type = "(ref null $str)" if item.ret == "str" else library_type(item.ret) if item.ret != "None" else ""
-    if item.ret == "HostObject" or item.ret.startswith("Callable[") or item.ret.startswith("list[") or item.ret.startswith("dict[") or item.ret.startswith("tuple["): result_type = library_nullable(item.ret)
-    if item.ret.startswith("class:"): result_type = library_nullable(item.ret)
+    result_type = "(ref null $str)" if item.ret == "str" else library_nullable(item.ret) if item.ret != "None" else ""
     elem = Node("Type").put("none", Node("scalar", "true" if item.ret == "None" else "false")).put("storage", string(result_type))
     fields = machine_fields_wat(Node("Machine").put("heap", string(B)).put("elem", elem))
     params = ""
@@ -572,13 +576,8 @@ def library_async_host(item: LibraryExport, index: i32) -> str:
     clear = "(struct.set " + F + " $request " + frame + " (ref.null extern))"
     start += " (struct.set " + F + " $request " + frame + " (call $__snek_host_" + str(index) + args + ")) (global.set $__snek_bump (local.get $mark))"
     start += " (struct.set " + B + " $pc (local.get $a) (i32.const 1)) (struct.set " + B + " $busy (local.get $a) (i32.const 0)) (return (i32.const 1))"
-    default = "" if item.ret == "None" else " (ref.null $str)" if item.ret == "str" else " (" + library_type(item.ret) + ".const 0)"
-    if item.ret in ("HostObject", "HostObject | None"): default = " (ref.null extern)"
-    if item.ret.startswith("Callable["): default = " (ref.null " + library_callback_heap(item.ret) + ")"
-    if item.ret.startswith("list["): default = " (ref.null " + library_list_heap(item.ret) + ")"
-    if item.ret.startswith("dict["): default = " (ref.null $" + library_mangle(item.ret) + ")"
-    if item.ret.startswith("tuple["): default = " (ref.null $" + library_mangle(item.ret) + ")"
-    if item.ret.startswith("class:"): default = " (ref.null $" + library_class_name(item.ret) + ")"
+    heap = library_reference_heap(item.ret)
+    default = "" if item.ret == "None" else " (ref.null " + heap + ")" if heap != "" else " (" + library_type(item.ret) + ".const 0)"
     finish = "(struct.set " + B + " $pc (local.get $a) (i32.const -1)) (struct.set " + B + " $busy (local.get $a) (i32.const 0)) " + clear
     take = "(call $__snek_result_" + str(index) + " (local.get $request))"
     if item.ret == "str":
@@ -622,8 +621,7 @@ def library_async_export(item: LibraryExport, head: str, args: list[str]) -> str
         result = " (result " + library_type(item.ret) + ")"
         body = "(struct.get " + B + " $value " + value + ")"
         if item.ret == "str": body = "(call $__snek_write (ref.as_non_null " + body + "))"
-        elif item.ret == "HostObject" or item.ret.startswith("Callable[") or item.ret.startswith("list[") or item.ret.startswith("dict[") or item.ret.startswith("tuple["): body = "(ref.as_non_null " + body + ")"
-        elif item.ret.startswith("class:") and not item.ret.endswith(" | None"): body = "(ref.as_non_null " + body + ")"
+        elif library_needs_unwrap(item.ret): body = "(ref.as_non_null " + body + ")"
     lines.append('(func (export "__snek_result_' + item.name + '")' + parameter + result + " " + body + ")")
     return "\n".join(lines)
 

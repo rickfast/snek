@@ -179,7 +179,8 @@ class DeclType:
         return self.kind not in ("i32", "i64", "f32", "f64", "bool", "None")
 
     def host_boundary(self) -> bool:
-        if self.kind == "class" or (self.kind == "optional" and self.args[0].kind == "class"): return True
+        if self.kind == "optional": return self.args[0].reference() and self.args[0].host_boundary()
+        if self.kind == "class": return True
         if self.kind == "list":
             return self.args[0].kind != "None" and self.args[0].host_boundary()
         if self.kind == "dict":

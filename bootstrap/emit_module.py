@@ -11,12 +11,13 @@ from bootstrap.emit_runtime import emit_collection_helpers, emit_keyed_builtin, 
 from bootstrap.emit_host import emit_host_helpers, emit_host_core_imports, emit_io_helpers, emit_component_imports
 from bootstrap.emit_suspension import OwnedMachine, owned_has_await, owned_machine_types, owned_machine_helpers, owned_runtime_machines, owned_runtime_machine
 from bootstrap.tasks import wait_all_code
-from bootstrap.library import LibraryExport, LibraryClass, library_target, library_code, library_host_imports, library_host_wrapper, library_callbacks, library_callback_imports, library_callback_async, library_lists, library_dicts, library_dict_operations, library_tuples
+from bootstrap.library import LibraryExport, LibraryClass, library_target, library_code, library_host_imports, library_host_wrapper, library_callbacks, library_callback_imports, library_callback_async, library_lists, library_dicts, library_dict_operations, library_tuples, library_boundary_types
 
 
 def owned_library_type(ty: DeclType) -> str:
     inner = inner_type(ty)
     if inner.kind == "class": return "class:" + inner.name + (" | None" if ty.kind == "optional" else "")
+    if ty.kind == "optional": return owned_library_type(ty.args[0]) + " | None"
     if ty.kind == "list": return "list[" + owned_library_type(ty.args[0]) + "]"
     if ty.kind == "dict": return "dict[" + owned_library_type(ty.args[0]) + ", " + owned_library_type(ty.args[1]) + "]"
     if ty.kind == "tuple":
@@ -267,6 +268,7 @@ def emit_source_module(checked: BodyChecker, prelude_source: str, component: boo
         callbacks = library_callbacks(selected, host_functions)
         imports += "\n" + library_callback_imports(callbacks, len(host_functions))
         if len(callbacks) > 0 or len(library_lists(selected, host_functions)) > 0 or len(library_dicts(selected, host_functions)) > 0 or len(library_tuples(selected, host_functions)) > 0: unicode_dynamic = True
+        if "str | None" in library_boundary_types(selected, host_functions): unicode_dynamic = True
         start = start.replace('(export "_start")', '(export "__snek_init")')
     # Host strings are open-world input, even when every source literal is ASCII.
     imports += "\n" + library_host_imports(host_functions, e.types.host_objects, library_callback_async(callbacks))

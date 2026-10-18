@@ -24,6 +24,7 @@ from check_library import CALLBACK_LIST_SOURCE, CALLBACK_LIST_EXPORTS
 from check_library import HIGHER_CALLBACK_SOURCE, HIGHER_CALLBACK_EXPORTS
 from check_library import DICT_SOURCE, DICT_EXPORTS
 from check_library import TUPLE_SOURCE, TUPLE_EXPORTS
+from check_library import OPTIONAL_SOURCE, OPTIONAL_EXPORTS
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -99,6 +100,10 @@ class BrowserTests(unittest.TestCase):
         for name, optimize in (("tuples", False), ("tuples-optimized", True)):
             driver.build(source, root / (name + ".wasm"), optimize=optimize,
                          compiler=compiler, library=True, exports=TUPLE_EXPORTS)
+        source.write_text(OPTIONAL_SOURCE)
+        for name, optimize in (("optional", False), ("optional-optimized", True)):
+            driver.build(source, root / (name + ".wasm"), optimize=optimize,
+                         compiler=compiler, library=True, exports=OPTIONAL_EXPORTS)
         source.write_text(CLASS_VALUE_SOURCE)
         for name, optimize in (("classes", False), ("classes-optimized", True)):
             driver.build(source, root / (name + ".wasm"), optimize=optimize,
@@ -133,6 +138,32 @@ class BrowserTests(unittest.TestCase):
         self.page = context.new_page()
         self.page.set_default_timeout(15000)
         self.page.goto(self.url)
+
+    def test_nullable_references(self):
+        for target in ("optional", "optional-optimized"):
+            with self.subTest(target=target):
+                result = self.page.evaluate('''async target => {
+                  const {instantiate, SnekError} = await import(`/${target}.js`);
+                  const lib = await instantiate(`/${target}.wasm`, {imports: {
+                    text: () => "straße 🐍", text_async: async () => null,
+                    list_async: async x => x, mix: (a, b, c) => (a ?? "") + b + (c ?? ""),
+                  }});
+                  const list = lib.make_list(), dict = lib.make_dict(), key = lib.make_key(null), fn = lib.make_callback();
+                  const same = lib.maybe_list(list) === list && await lib.later_list(list) === list &&
+                    lib.maybe_dict(dict) === dict && lib.maybe_tuple(key) === key && lib.maybe_callback(fn) === fn;
+                  const absent = [lib.echo(null), lib.maybe_list(null), await lib.later_list(null), lib.maybe_dict(null),
+                    lib.maybe_tuple(null), lib.maybe_callback(null), await lib.upper_async(), await lib.apply_async(null, "")];
+                  const keys = lib.keys(); keys.set(key, "nullable field");
+                  let invalid = false;
+                  try {await lib.apply_async(async () => undefined, null);} catch(e) {invalid = e instanceof SnekError;}
+                  return {same, absent, text: lib.upper(), mixed: lib.mixed(null, "middle", "last"), invalid,
+                    callback: lib.call_optional(fn, "straße"), callbackNull: await lib.apply_async(lib.async_callback(), null),
+                    tuple: key.toArray(), nullKey: dict.get(null), keyed: keys.get(lib.make_key(null)),
+                    missing: dict.get("absent") === undefined, holder: lib.holder().toArray()};
+                }''', target)
+                self.assertEqual(result, {"same": True, "absent": [None] * 8, "text": "STRASSE 🐍",
+                    "mixed": "middlelast", "invalid": True, "callback": "STRASSE", "callbackNull": None,
+                    "tuple": [None, 1], "nullKey": None, "keyed": "nullable field", "missing": True, "holder": [None] * 3})
 
     def test_tuple_handles(self):
         for target in ("tuples", "tuples-optimized"):

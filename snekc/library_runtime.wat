@@ -1,6 +1,6 @@
 ;; Call-scoped bridge arena. Library targets disallow WASI arena users.
 ;; Strings are copied into the GC heap; private JS drivers retain opaque GC frames.
-(global (export "__snek_abi") i32 (i32.const 7))
+(global (export "__snek_abi") i32 (i32.const 8))
 (export "__snek_yielded" (global $sm.yielded))
 (global $__snek_bump (mut i32) (i32.const 65536))
 (global $__snek_length (export "__snek_length") (mut i32) (i32.const 0))
@@ -21,7 +21,7 @@
     (then (if (i32.eq (memory.grow (i32.sub (local.get $pages) (memory.size))) (i32.const -1)) (then (unreachable)))))
   (global.set $__snek_bump (i32.wrap_i64 (local.get $end)))
   (local.get $ptr))
-(func $__snek_read (param $ptr i32) (param $n i32) (result (ref $str))
+(func $__snek_read (export "__snek_string_from") (param $ptr i32) (param $n i32) (result (ref $str))
   (local $bytes (ref $u8s)) (local $i i32)
   (local.set $bytes (array.new_default $u8s (local.get $n)))
   (block $done (loop $copy
@@ -29,7 +29,7 @@
     (array.set $u8s (local.get $bytes) (local.get $i) (i32.load8_u (i32.add (local.get $ptr) (local.get $i))))
     (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $copy)))
   (call $rt.mkstr (local.get $bytes) (i32.const -1)))
-(func $__snek_write (param $s (ref $str)) (result i32)
+(func $__snek_write (export "__snek_string_to") (param $s (ref $str)) (result i32)
   (local $bytes (ref $u8s)) (local $ptr i32) (local $i i32) (local $n i32)
   (local.set $bytes (struct.get $str $bytes (local.get $s)))
   (local.set $n (array.len (local.get $bytes)))

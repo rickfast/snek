@@ -21,6 +21,7 @@ from check_library import CALLBACK_LIST_SOURCE, CALLBACK_LIST_EXPORTS
 from check_library import HIGHER_CALLBACK_SOURCE, HIGHER_CALLBACK_EXPORTS
 from check_library import DICT_SOURCE, DICT_EXPORTS
 from check_library import TUPLE_SOURCE, TUPLE_EXPORTS
+from check_library import OPTIONAL_SOURCE, OPTIONAL_EXPORTS
 
 EXAMPLE = ROOT / "examples/vite"
 SERVER = '''
@@ -33,6 +34,31 @@ console.log(JSON.stringify({url: server.resolvedUrls.local[0]}));
 '''
 
 TYPES = '''
+import {type SnekLibrary as OptionalLibrary} from "./generated/optional.js";
+declare const optional: OptionalLibrary;
+const optionalText: string | null = optional.echo(null);
+const optionalAsync: Promise<string | null> = optional.upper_async();
+optional.maybe_list(null); optional.maybe_dict(null); optional.maybe_tuple(null); optional.maybe_callback(null);
+const maybeList = optional.maybe_list(optional.make_list());
+if (maybeList !== null) maybeList.append(null);
+const nullableDict = optional.make_dict(); nullableDict.set(null, null);
+const maybeValue: string | null | undefined = nullableDict.get(null);
+optional.keys().set(optional.make_key(null), "nullable key");
+optional.keys().set(null, "absent tuple");
+optional.call_optional(value => value, null);
+optional.apply_async(async value => value, null);
+const nullableCallback = optional.make_callback();
+optional.factory(enabled => enabled ? nullableCallback : null, true);
+// @ts-expect-error nullable result requires narrowing
+const requiredString: string = optional.echo("text");
+// @ts-expect-error nullable handle requires narrowing
+maybeList.append(null);
+// @ts-expect-error undefined is not None/null
+optional.echo(undefined);
+// @ts-expect-error nullable callback results still require a string or null
+optional.call_optional(value => 42, null);
+// @ts-expect-error async callback results cannot be undefined
+optional.apply_async(async value => undefined, null);
 import {type SnekLibrary as TupleLibrary, type SnekTuple} from "./generated/tuples.js";
 declare const tuples: TupleLibrary;
 const pair = tuples.pair("typed");
@@ -257,6 +283,10 @@ class BundlerTests(unittest.TestCase):
         print(f"Bundler browser: {engine} {cls.browser.version}; compiler: {cls.compiler}", flush=True)
 
     def compile(self, optimize):
+        source = self.root / "optional.py"
+        source.write_text(OPTIONAL_SOURCE)
+        driver.build(source, self.root / "src/generated/optional.wasm", optimize=optimize,
+                     compiler=self.compiler, library=True, exports=OPTIONAL_EXPORTS)
         source = self.root / "tuples.py"
         source.write_text(TUPLE_SOURCE)
         driver.build(source, self.root / "src/generated/tuples.wasm", optimize=optimize,
