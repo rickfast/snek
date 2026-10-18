@@ -183,7 +183,7 @@ class DeclType:
         if self.kind == "list":
             return self.args[0].kind != "None" and self.args[0].host_boundary()
         if self.kind == "dict":
-            return self.args[0].kind in ("str", "bool", "i32", "i64") and self.args[1].kind != "None" and self.args[1].host_boundary()
+            return self.args[0].hashable() and self.args[0].host_boundary() and self.args[1].kind != "None" and self.args[1].host_boundary()
         if self.kind == "tuple":
             for arg in self.args:
                 if arg.kind == "None" or not arg.host_boundary(): return False

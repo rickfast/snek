@@ -460,8 +460,23 @@ def in_list(value: tuple[str, i32]) -> list[tuple[str, i32]]:
     return [value, value]
 def in_dict(value: tuple[str, i32]) -> dict[str, tuple[str, i32]]:
     return {"tuple": value}
+def keyed(value: tuple[str, i32]) -> dict[tuple[str, i32], str]:
+    return {value: "original"}
+def echo_keyed(values: dict[tuple[str, i32], str]) -> dict[tuple[str, i32], str]:
+    return values
+def apply_keyed(fn: Callable[[dict[tuple[str, i32], str]], dict[tuple[str, i32], str]], values: dict[tuple[str, i32], str]) -> dict[tuple[str, i32], str]:
+    return fn(values)
+async def delayed_keyed(values: dict[tuple[str, i32], str]) -> dict[tuple[str, i32], str]:
+    await checkpoint()
+    return values
+def nested_key(text: str) -> tuple[tuple[str, i32], bool, i64]:
+    return (pair(text), True, i64(9007199254740993))
+def nested_keyed(key: tuple[tuple[str, i32], bool, i64]) -> dict[tuple[tuple[str, i32], bool, i64], str]:
+    return {key: "nested"}
+def empty_keyed() -> dict[tuple[()], str]:
+    return {(): "empty"}
 '''
-TUPLE_EXPORTS = ["pair", "echo", "from_host", "delayed", "empty", "echo_empty", "singleton", "scalars", "apply", "apply_async", "composed", "box_value", "in_list", "in_dict"]
+TUPLE_EXPORTS = ["pair", "echo", "from_host", "delayed", "empty", "echo_empty", "singleton", "scalars", "apply", "apply_async", "composed", "box_value", "in_list", "in_dict", "keyed", "echo_keyed", "apply_keyed", "delayed_keyed", "nested_key", "nested_keyed", "empty_keyed"]
 
 OBJECT_SOURCE = '''from snek import HostObject, host, checkpoint
 from typing import Callable, Iterator
@@ -830,6 +845,31 @@ const second = await instantiate(await WebAssembly.compile(bytes));
 assert.equal(second.add(2, 3), 5);
 ''')
 
+    def test_tuple_dictionary_keys(self):
+        self.src.write_text(TUPLE_SOURCE)
+        self.build(TUPLE_EXPORTS)
+        self.node('''
+const options = {imports: {inspect: x => x, later: async x => x}};
+const lib = await instantiate(bytes, options), foreign = await instantiate(bytes, options);
+const original = lib.pair("key 🐍"), equal = lib.pair("key 🐍"), different = lib.pair("different");
+assert.notEqual(original, equal);
+const dict = lib.keyed(original); assert.equal(lib.echo_keyed(dict), dict);
+assert.equal(dict.get(equal), "original"); assert.equal(dict.has(equal), true);
+dict.set(equal, "updated"); assert.equal(dict.size, 1);
+assert.equal(dict.entries()[0][0], original); assert.equal(dict.entries()[0][1], "updated");
+assert.equal(lib.apply_keyed(values => {values.set(equal, "callback"); return values;}, dict), dict);
+assert.equal(await lib.delayed_keyed(dict), dict); assert.equal(dict.get(original), "callback");
+dict.set(different, "second"); assert.equal(dict.delete(equal), true); assert.equal(dict.delete(original), false);
+dict.set(equal, "reinserted"); assert.deepEqual(dict.entries(), [[different, "second"], [equal, "reinserted"]]);
+for (const wrong of [original.toArray(), foreign.pair("key 🐍"), lib.singleton()]) assert.throws(() => dict.get(wrong), /handle from this Snek instance/);
+const key = lib.nested_key("nested"), nested = lib.nested_keyed(key);
+assert.equal(nested.get(lib.nested_key("nested")), "nested"); assert.equal(nested.entries()[0][0], key);
+assert.equal(nested.get(lib.nested_key("different")), undefined);
+const empty = lib.empty_keyed(); assert.equal(empty.get(lib.empty()), "empty");
+for (let i = 0; i < 100; i++) dict.set(lib.pair("grow" + i), "value" + i);
+for (let i = 0; i < 100; i++) assert.equal(dict.get(lib.pair("grow" + i)), "value" + i);
+''')
+
     def test_tuple_handles(self):
         self.src.write_text(TUPLE_SOURCE)
         self.build(TUPLE_EXPORTS)
@@ -961,7 +1001,7 @@ changed.clear(); changed.set("after", "cleanup"); assert.deepEqual(changed.entri
         self.node('const lib = await instantiate(bytes); assert.throws(() => lib.apply(x => x, new Map()), /handle from this Snek instance/);')
 
     def test_unsupported_dictionary_boundaries(self):
-        for ty in ("dict[tuple[str, str], str]", "dict[str | None, str]", "dict[str, tuple[str | None, str]]", "dict[str, str] | None"):
+        for ty in ("dict[tuple[str, str] | None, str]", "dict[str | None, str]", "dict[str, tuple[str | None, str]]", "dict[str, str] | None"):
             for host in (False, True):
                 with self.subTest(ty=ty, host=host):
                     self.src.write_text('from snek import host\n' + ('@host("f")\n' if host else '') + f'def f(value: {ty}) -> None:\n    pass\n')
@@ -1275,7 +1315,7 @@ assert.equal(lib.echo(value), value); assert.equal(lib.read(value), 42);
 
     def test_class_handles_reject_unsupported_boundary_shapes(self):
         base = 'from typing import Callable\nfrom snek import host\nclass Box:\n    pass\n'
-        for ty in ("dict[tuple[str, str], Box]", "list[Callable[[], Box] | None]", "Callable[[Callable[[], dict[tuple[str, str], Box]]], Box]", "list[Box] | None"):
+        for ty in ("dict[tuple[str, str] | None, Box]", "list[Callable[[], Box] | None]", "Callable[[Callable[[], dict[tuple[str, str] | None, Box]]], Box]", "list[Box] | None"):
             for host in (False, True):
                 self.src.write_text(base + ('@host("f")\n' if host else '') + f'def f(value: {ty}) -> None:\n    pass\n')
                 with self.subTest(ty=ty, host=host), self.assertRaises(Exception):

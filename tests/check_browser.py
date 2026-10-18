@@ -149,13 +149,21 @@ class BrowserTests(unittest.TestCase):
                   try {lib.echo(foreign.pair("foreign"));} catch(e) {wrongInstance = e instanceof TypeError;}
                   try {pair.get(-1);} catch(e) {bounds = e instanceof RangeError;}
                   composed.get(0).append("live"); composed.get(1).set("key", "edited");
+                  const keyed = lib.keyed(pair), equal = lib.pair("browser 🐍");
+                  const valueEquality = keyed.get(equal) === "original";
+                  keyed.set(equal, "updated");
+                  const originalKey = keyed.entries()[0][0] === pair && keyed.size === 1;
+                  const nestedKey = lib.nested_key("nested");
+                  const nestedLookup = lib.nested_keyed(nestedKey).get(lib.nested_key("nested"));
                   return {same, invalid, wrongInstance, bounds, copied: pair.toArray(), frozen: Object.isFrozen(pair.toArray()),
                     empty: lib.empty().toArray(), singleton: lib.singleton().toArray(), nested: composed.get(4).toArray(),
-                    list: composed.get(0).toArray(), dict: composed.get(1).get("key"), callback: composed.get(2)("works")};
+                    list: composed.get(0).toArray(), dict: composed.get(1).get("key"), callback: composed.get(2)("works"),
+                    valueEquality, originalKey, nestedLookup, emptyKey: lib.empty_keyed().get(lib.empty())};
                 }''', target)
                 self.assertEqual(result, {"same": True, "invalid": True, "wrongInstance": True, "bounds": True,
                     "copied": ["browser 🐍", 7], "frozen": True, "empty": [], "singleton": ["one"],
-                    "nested": ["nested", 7], "list": ["item", "live"], "dict": "edited", "callback": "tuple:works"})
+                    "nested": ["nested", 7], "list": ["item", "live"], "dict": "edited", "callback": "tuple:works",
+                    "valueEquality": True, "originalKey": True, "nestedLookup": "nested", "emptyKey": "empty"})
 
     def test_dictionary_handles(self):
         for target in ("dicts", "dicts-optimized"):

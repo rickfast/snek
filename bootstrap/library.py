@@ -246,14 +246,30 @@ def library_tuple_code(tuples: list[str]) -> str:
     return "\n".join(lines)
 
 
+def library_dict_key(ty: str) -> bool:
+    if ty in ("str", "bool", "i32", "i64"): return True
+    if ty.startswith("tuple[") and ty.endswith("]"):
+        for field in library_tuple_types(ty):
+            if not library_dict_key(field): return False
+        return True
+    return False
+
+
 def library_dict_types(ty: str) -> list[str]:
     if not ty.startswith("dict[") or not ty.endswith("]"):
         raise ValueError("invalid library dictionary type: " + ty)
-    # Boundary keys are scalar, so their canonical spelling contains no commas.
-    split = ty.find(", ")
+    split = -1
+    depth = 0
+    for i in range(5, len(ty) - 1):
+        char = ty[i]
+        if char == "[": depth += 1
+        elif char == "]": depth -= 1
+        elif char == "," and depth == 0:
+            split = i
+            break
     key = ty[5:split]
-    if split < 0 or key not in ("str", "bool", "i32", "i64"):
-        raise ValueError("library dictionary keys must be str, bool, i32 or i64; got " + ty)
+    if split < 0 or not library_dict_key(key):
+        raise ValueError("library dictionary keys must be str, bool, i32, i64 or tuples of those types; got " + ty)
     value = ty[split + 2:-1]
     library_type(value)
     return [key, value]

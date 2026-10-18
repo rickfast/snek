@@ -121,7 +121,7 @@ def host_boundary(t: Type) -> bool:
     if isinstance(t, ClassT) or (isinstance(t, OptionalT) and isinstance(t.inner, ClassT)): return True
     leaf = (I32, I64, F32, F64, BOOL, STR, HOST_OBJECT, OptionalT(HOST_OBJECT))
     if isinstance(t, ListT): return t.elem != NONE and host_boundary(t.elem)
-    if isinstance(t, DictT): return t.key in (STR, BOOL, I32, I64) and t.value != NONE and host_boundary(t.value)
+    if isinstance(t, DictT): return is_hashable(t.key) and host_boundary(t.key) and t.value != NONE and host_boundary(t.value)
     if isinstance(t, TupleT): return all(elem != NONE and host_boundary(elem) for elem in t.elems)
     if isinstance(t, CallableT):
         ret = t.ret.elem if isinstance(t.ret, CoroutineT) else t.ret

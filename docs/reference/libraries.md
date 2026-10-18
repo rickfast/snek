@@ -485,7 +485,8 @@ see [higher-order callbacks](#higher-order-callbacks).
 ## Snek-owned dictionary handles
 
 `dict[K, V]` crosses as a live `SnekDict<K, V>` handle when `K` is `str`, `bool`,
-`i32`, or `i64` and `V` is a supported boundary type. Values can include nested
+`i32`, `i64`, or a fixed-shape tuple of supported keys, and `V` is a supported
+boundary type. Values can include nested
 dictionaries, lists, callbacks, class handles, and nullable class/`HostObject`
 references. Dictionaries also work inside lists and callback signatures, in
 sync/async exports, and in host imports.
@@ -524,9 +525,37 @@ sharing a dictionary see each other's changes; this is not a transaction API.
 
 Both key and value types are invariant. JavaScript `Map`s, plain objects,
 wrongly typed handles, and handles from another instance are rejected. There is
-no implicit conversion or manual disposal. Tuple keys, nullable keys, optional
+no implicit conversion or manual disposal. Nullable keys and optional
 dictionaries remain unsupported at the library boundary even where the language
 supports them internally.
+
+### Tuple dictionary keys
+
+Tuple keys use Snek's structural value equality and hashing, not JavaScript object
+identity. Distinct handles with equal fields find the same entry. Updating through
+an equal key preserves the original stored key handle and its insertion position;
+deleting and reinserting stores the new key at the end.
+
+```python
+from snek import i32
+
+def key(name: str, revision: i32) -> tuple[str, i32]:
+    return (name, revision)
+
+def cache() -> dict[tuple[str, i32], str]:
+    return {key("asset", 1): "cached"}
+```
+
+```javascript
+const cache = lib.cache();
+console.log(cache.get(lib.key("asset", 1))); // "cached"
+```
+
+Keys can be empty tuples or nested tuples of strings, booleans, i32s and i64s.
+They must be handles of exactly the expected shape from the same instance.
+Arrays, foreign handles, mutable collection fields, floats, class instances,
+callbacks, and nullable tuple/key fields are not accepted as keys. Converting
+`entries()` to a JavaScript `Map` changes tuple-key lookup to object identity.
 
 ## Snek-owned tuple handles
 
@@ -565,7 +594,8 @@ Tuple field types must match exactly, including nested shapes. Arrays, lookalike
 objects, differently typed tuples, and tuples from another instance are rejected;
 array copies cannot be passed back as tuple handles. There are no setters or
 manual lifetime calls. Optional tuples, bare `None` fields, unsupported field
-types, and tuple dictionary keys remain unsupported at the boundary.
+types remain unsupported at the boundary. Supported immutable tuples may be
+[dictionary keys](#tuple-dictionary-keys).
 
 ## Snek-owned class handles
 

@@ -40,6 +40,14 @@ const tupleText: string = pair.get(0);
 const tupleNumber: number = pair.get(1);
 const tupleLength: 2 = pair.length;
 const tupleArray: readonly [string, number] = pair.toArray();
+const keyed = tuples.keyed(pair);
+const keyedValue: string | undefined = keyed.get(tuples.pair("equal"));
+keyed.set(pair, "typed");
+const keyText: string = keyed.entries()[0][0].get(0);
+// @ts-expect-error dictionary tuple-key shapes are exact
+keyed.get(tuples.singleton());
+// @ts-expect-error tuple-key copies are not handles
+keyed.set(pair.toArray(), "wrong");
 tuples.apply(value => value, pair);
 tuples.apply_async(async value => value, pair);
 tuples.composed().get(0).append("live");

@@ -94,7 +94,8 @@ Invoking a Snek callback still requires leaving the active synchronous step.
 Optional lists and optional callbacks are not yet part of this boundary.
 
 Library dictionaries use `SnekDict<K, V>` handles with invariant keys and values.
-Boundary keys are `str`, `bool`, `i32`, or `i64`; values recursively support the
+Boundary keys are `str`, `bool`, `i32`, `i64`, or fixed-shape tuples of supported
+keys; values recursively support the
 other boundary types. Private wrappers reuse the ordinary ordered-dictionary
 helpers. The emitters register those helpers only for dictionary types reachable
 through exported or host signatures, including nested callback signatures.
@@ -113,6 +114,11 @@ copy; fields are immutable but referenced collections remain live. TypeScript
 uses positional tuple types plus an invariant private brand to match Snek's
 exact-shape assignment rules. JavaScript indices are nonnegative safe integers.
 The loader requires bridge ABI 7 and verifies the generated tuple getters.
+Dictionary tuple keys reuse ordinary structural hashing and equality, including
+nested and empty tuples. Equal but distinct key handles find the same entry;
+updates preserve the original key reference. Key signatures are decoded with
+bracket-depth tracking, and nested tuple getters are discovered through the
+same boundary metadata graph. Nullable keys remain unsupported.
 
 Class boundaries use opaque `SnekObject` handles. A per-instance JavaScript
 private brand validates ownership; the private field strongly roots the WasmGC
