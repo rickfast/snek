@@ -29,7 +29,7 @@ from . import ir, unicode
 from .builtins import BUILTINS_SOURCE, STR_METHODS_SOURCE
 from .errors import CompileError
 from .formatting import FORMAT_SOURCE, parse_spec
-from .closures import ClosureChecker, callable_type, scope_walk, body_nodes
+from .closures import ClosureChecker, ComprehensionEmit, callable_type, scope_walk, body_nodes
 from .ordered_builtins import OrderedBuiltinChecker
 from .stdlib import MODULE_EXPORTS, StdlibChecker, import_bindings
 from .types import (
@@ -182,6 +182,16 @@ class _Renamer(ast.NodeTransformer):
         node.id = self.mapping.get(node.id, node.id)
         return node
 
+    def visit_Lambda(self, node: ast.Lambda) -> ast.Lambda:
+        # Defaults belong to the outer scope; the body can shadow constructor
+        # locals when a comprehension contains a lambda in an inlined base init.
+        node.args.defaults = [self.visit(value) for value in node.args.defaults]
+        node.args.kw_defaults = [self.visit(value) if value is not None else None for value in node.args.kw_defaults]
+        params = {arg.arg for arg in [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]}
+        params |= {arg.arg for arg in (node.args.vararg, node.args.kwarg) if arg is not None}
+        node.body = _Renamer({key: value for key, value in self.mapping.items() if key not in params}).visit(node.body)
+        return node
+
     def visit_ExceptHandler(self, node: ast.ExceptHandler) -> ast.ExceptHandler:
         self.generic_visit(node)
         if node.name:
@@ -314,6 +324,8 @@ class FuncCtx:
         self.free: set[str] = set()
         self.nested_sigs = {}
         self.pending_closures = []
+        self.comp_hint: Type | None = None
+        self.comp_result = ""
 
     def add_param(self, name: str, ty: Type) -> None:
         self.params.append((name, ty))
@@ -914,7 +926,7 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
             st.out.append(self.construct(cls, st.assigned, init[0] if init else cls.node))
         if not terminated:
             st.out.append(ir.Return(ctx.get("self")))
-        return ir.Func(f"{cls.name}.__new__", ctx.params, ClassT(cls), ctx.locals, st.out)
+        return self.finish_closures(ir.Func(f"{cls.name}.__new__", ctx.params, ClassT(cls), ctx.locals, st.out))
 
     def require_exception_super(self, cls: ClassInfo, node: ast.FunctionDef) -> None:
         if cls is self.exc_base or not cls.is_subclass_of(self.exc_base):
@@ -1060,6 +1072,8 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
 
     def check_stmt(self, s: ast.stmt) -> tuple[list[ir.Stmt], bool]:
         ctx = self.ctx
+        if isinstance(s, ComprehensionEmit):
+            return self.comprehension_emit(s), False
         if isinstance(s, ast.Expr):
             if is_docstring(s):
                 return [], False
@@ -1661,7 +1675,9 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
         var = s.target.id if isinstance(s.target, ast.Name) else None
         it = s.iter
         loop_flow = self.enter_loop(s.body + [s])
-        if isinstance(it, ast.Call) and isinstance(it.func, ast.Name) and it.func.id == "range":
+        if (isinstance(it, ast.Call) and isinstance(it.func, ast.Name)
+                and (it.func.id == "comp.range" or (it.func.id == "range" and "range" not in ctx.types
+                     and not (ctx.scope and "range" in ctx.scope.bound)))):
             if var is None:
                 raise CompileError("range() loop target must be a simple name", s.target)
             stmts = self.lower_range_for(var, it, s, loop_flow)
@@ -1921,8 +1937,10 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
             return self.check_fstring(node)
         if isinstance(node, ast.IfExp):
             return self.check_ifexp(node, expected)
-        if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
-            raise CompileError("comprehensions are not supported yet", node)
+        if isinstance(node, (ast.ListComp, ast.DictComp)):
+            return self.check_comprehension(node, expected)
+        if isinstance(node, (ast.SetComp, ast.GeneratorExp)):
+            raise CompileError("set comprehensions and generator expressions are not supported yet", node)
         if isinstance(node, ast.Set):
             raise CompileError(f"{type(node).__name__.lower()} literals are not supported yet", node)
         if isinstance(node, ast.Lambda):

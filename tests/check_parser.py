@@ -71,6 +71,9 @@ def normalized(value):
 
 
 VALID = [
+    "a = [x * y for x in xs if x > 0 if ok(x) for y in ys(x)]\nb = {x: y for x, y in items if y}\n",
+    "a = [x if x else 0 for x in (xs if flag else ys)]\nb = [[x for x in row] for row in rows]\n",
+    "async def f():\n return {k: await v(k) async for k in keys if await ok(k)}\n",
     "", "# comment without newline", "\ufeff# BOM\nx = 1\r\n",
     "x = (1 +\n # indented comment\n 2)\ny = 3 + \\\n 4\n",
     "if True:\n\tpass\n\t# comment\n\tif False:\n\t\tpass\nx=0\n",
@@ -117,6 +120,9 @@ INVALID = [
     'del *a\n', 'x = (yield from a,b)\n', 'from x import (*,)\n',
     'import *\n', 'from x import *, a\n', 'from x import * as a\n',
     '# comment\x00\n', 'x = "\x00"\n',
+    '[x, y for x in xs]', '[*x for x in xs]', '{**d for d in ds}',
+    '[x for 1 in xs]', '[x for x xs]', '[x for x in xs, ys]',
+    '[x for x in xs if]', '{x: y for x in xs,}',
 ]
 
 
@@ -190,7 +196,7 @@ class ParserTests(unittest.TestCase):
                 self.assertIn(b"line ", result.stderr)
 
     def test_explicit_subset_boundaries(self):
-        for source in ["x = b'bytes'", "x = 1j", "x = {1, 2}", "x = [n for n in xs]",
+        for source in ["x = b'bytes'", "x = 1j", "x = {1, 2}", "x = (n for n in xs)", "x = {n for n in xs}",
                        "x = (n := 1)", "x = '\\ud800'", "café = 1"]:
             with self.subTest(source=source):
                 ast.parse(source)

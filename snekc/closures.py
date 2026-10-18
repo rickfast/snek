@@ -11,23 +11,45 @@ from dataclasses import dataclass, field, fields, replace
 
 from . import ir
 from .errors import CompileError
-from .types import CallableT, CellT, EnvT, FuncSig, NONE, OptionalT, Type, ClassT
+from .types import CallableT, CellT, EnvT, FuncSig, NONE, OptionalT, Type, ClassT, ListT, DictT, CoroutineT
 
 
-FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+COMPREHENSIONS = (ast.ListComp, ast.DictComp)
+FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, *COMPREHENSIONS)
+
+
+class ComprehensionEmit(ast.stmt):
+    _fields = ("value",)
+
+
+def comprehension_loop(node, first_iter=None):
+    """Reuse ordinary loop checking; only the innermost append/set is special."""
+    value = (ast.List(elts=[node.elt], ctx=ast.Load()) if isinstance(node, ast.ListComp)
+             else ast.Dict(keys=[node.key], values=[node.value]))
+    body = [ast.copy_location(ComprehensionEmit(value=ast.copy_location(value, node)), node)]
+    for index, gen in reversed(list(enumerate(node.generators))):
+        for condition in reversed(gen.ifs):
+            body = [ast.copy_location(ast.If(test=condition, body=body, orelse=[]), condition)]
+        iterable = gen.iter if index else (first_iter if first_iter is not None else ast.Constant(None))
+        body = [ast.copy_location(ast.For(target=gen.target, iter=iterable, body=body, orelse=[]), gen.target)]
+    return body[0]
 
 
 def scope_walk(nodes):
     """Walk one lexical scope, including but not descending into child scopes."""
     for node in nodes:
         yield node
-        if isinstance(node, ast.AnnAssign):
+        if isinstance(node, COMPREHENSIONS):
+            yield from scope_walk([node.generators[0].iter])
+        elif isinstance(node, ast.AnnAssign):
             yield from scope_walk([node.target] + ([node.value] if node.value is not None else []))
         elif not isinstance(node, (*FUNCTIONS, ast.ClassDef)):
             yield from scope_walk(ast.iter_child_nodes(node))
 
 
 def body_nodes(node):
+    if isinstance(node, COMPREHENSIONS):
+        return [comprehension_loop(node)]
     return [node.body] if isinstance(node, ast.Lambda) else node.body
 
 
@@ -88,6 +110,86 @@ def callable_type(sig: FuncSig) -> CallableT:
 
 
 class ClosureChecker:
+    def check_comprehension(self, node, expected):
+        from .check import FuncCtx, is_num_literal
+        parent = self.ctx
+        for gen in node.generators:
+            if gen.is_async:
+                raise CompileError("async for comprehensions are not supported yet", node)
+        first = node.generators[0].iter
+        params, arguments = [], []
+
+        def parameter(expr):
+            value = self.check_expr(expr)
+            name = f"comp.arg.{len(params)}"
+            params.append((name, value.ty))
+            arguments.append(value)
+            return ast.copy_location(ast.Name(id=name, ctx=ast.Load()), expr)
+
+        if (isinstance(first, ast.Call) and isinstance(first.func, ast.Name) and first.func.id == "range"
+                and "range" not in parent.types and not (parent.scope and "range" in parent.scope.bound)):
+            # Constants stay syntax so range's contextual widths and literal
+            # step validation are unchanged. Evaluate other bounds outside.
+            args = [parameter(a) if i < 2 and not is_num_literal(a) else a for i, a in enumerate(first.args)]
+            first = ast.copy_location(ast.Call(func=ast.Name(id="comp.range", ctx=ast.Load()),
+                                              args=args, keywords=first.keywords), first)
+        else:
+            first = parameter(first)
+        scope = (parent.scope.children[id(node)] if parent.scope is not None
+                 else analyze_scope(node, set(parent.types)))
+        if parent.is_init:
+            # Constructor bodies are checked during field initialization, not
+            # prepare_scope. Discover captures here and box them at completion.
+            parent.cells |= scope.free
+        name = f"closure.{self.nclosures}"
+        self.nclosures += 1
+        child = FuncCtx(name, NONE)
+        child.async_ = parent.async_
+        child.comp_hint = expected.inner if isinstance(expected, OptionalT) else expected
+        child.add_param("closure.env", EnvT())
+        for param, ty in params:
+            child.add_param(param, ty)
+        self.ctx = child
+        try:
+            self.prepare_scope(node, scope, parent)
+            loop = self.check_for(comprehension_loop(node, first))
+            ty = child.types[child.comp_result]
+            result = child.get(child.comp_result)
+            empty = ir.ListLit(ty, []) if isinstance(ty, ListT) else ir.DictLit(ty, [])
+            ret = CoroutineT(ty) if child.async_ else ty
+            closure_ty = CallableT(tuple(t for _, t in params), ret)
+            body = [ir.SetLocal(child.comp_result, empty), *loop, ir.Return(result)]
+            func = ir.Func(name, child.params, ret, child.locals, body,
+                           machine=child.async_, closure_type=closure_ty)
+            self.out.append(self.finish_closures(func))
+        finally:
+            self.ctx = parent
+        closure = ir.Closure(closure_ty, name, [cell_ref(n, parent.types[n]) for n in sorted(child.free)])
+        call = ir.CallValue(ret, closure, arguments)
+        return ir.Await(ty, call) if child.async_ else call
+
+    def comprehension_emit(self, node):
+        ctx = self.ctx
+        literal = node.value
+        hint = ctx.comp_hint
+        values = []
+        nodes = literal.elts if isinstance(literal, ast.List) else [literal.keys[0], literal.values[0]]
+        hints = ([hint.elem] if isinstance(hint, ListT) else [hint.key, hint.value] if isinstance(hint, DictT) else [])
+        for i, item in enumerate(nodes):
+            expected = hints[i] if i < len(hints) else None
+            value = self.check_expr(item, expected)
+            ty = expected or value.ty
+            if ty == NONE:
+                raise CompileError("cannot infer comprehension element type; add an annotation", item)
+            values.append(self.coerce(value, ty, item))
+        ty = ListT(values[0].ty) if isinstance(literal, ast.List) else DictT(values[0].ty, values[1].ty)
+        if isinstance(ty, DictT):
+            self.check_key_type(ty.key, node)
+        ctx.comp_result = ctx.temp(ty)
+        recv = ctx.get(ctx.comp_result)
+        value = ir.ListAppend(NONE, recv, values[0]) if isinstance(ty, ListT) else ir.DictOp(NONE, "set", recv, values)
+        return [ir.ExprStmt(value)]
+
     def prepare_scope(self, node, scope: Scope | None = None, parent=None):
         ctx = self.ctx
         ctx.scope = scope or analyze_scope(node)

@@ -303,7 +303,35 @@ class ModuleProject:
             for item in node.get("elts").items:
                 self.store(owner, item, locals_)
 
+    def comprehension_part(self, owner: SourceModule, node: Node, names: list[str], init: bool) -> Node:
+        return self.init_locals(owner, node, names) if init else self.rewrite(owner, node, names)
+
+    def comprehension(self, owner: SourceModule, node: Node, names: list[str], init: bool) -> Node:
+        targets: list[str] = []
+        for gen in node.get("generators").items:
+            scope_target(gen.get("target"), targets)
+        bound = names.copy()
+        if init:
+            bound = []
+            for name in names:
+                if name not in targets: bound.append(name)
+        else:
+            bound.extend(targets)
+        out = module_copy(node)
+        generators = out.get("generators").items
+        for index in range(len(generators)):
+            gen = generators[index]
+            self.store(owner, gen.get("target"), bound)
+            module_set(gen, "target", self.comprehension_part(owner, gen.get("target"), bound, init))
+            module_set(gen, "iter", self.comprehension_part(owner, gen.get("iter"), names if index == 0 else bound, init))
+            module_set(gen, "ifs", self.comprehension_part(owner, gen.get("ifs"), bound, init))
+        for key in (["elt"] if node.kind == "ListComp" else ["key", "value"]):
+            module_set(out, key, self.comprehension_part(owner, out.get(key), bound, init))
+        return out
+
     def init_locals(self, owner: SourceModule, node: Node, names: list[str]) -> Node:
+        if node.kind in ("ListComp", "DictComp"):
+            return self.comprehension(owner, node, names, True)
         if node.kind == "Lambda":
             shadowed: list[str] = []
             args = node.get("args")
@@ -323,6 +351,8 @@ class ModuleProject:
         return node
 
     def rewrite(self, owner: SourceModule, node: Node, locals_: list[str]) -> Node:
+        if node.kind in ("ListComp", "DictComp"):
+            return self.comprehension(owner, node, locals_, False)
         if node.kind in ("Import", "ImportFrom"):
             self.error("imports must be at module scope", node)
         if node.kind in ("Assign", "Delete"):

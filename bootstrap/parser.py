@@ -1246,6 +1246,23 @@ class Parser:
                 step = self.expression(0)
         return token.node("Slice").put("lower", lower).put("upper", upper).put("step", step)
 
+    def comprehension_generators(self) -> Node:
+        generators: list[Node] = []
+        while self.at("for") or self.at("async"):
+            token = self.peek()
+            asynchronous = self.accept("async")
+            self.expect("for")
+            binding = self.expressions(5)
+            target(binding, True)
+            self.expect("in")
+            iterable = self.expression(1)
+            filters: list[Node] = []
+            while self.accept("if"):
+                filters.append(self.expression(1))
+            generators.append(token.node("comprehension").put("target", binding).put("iter", iterable)
+                              .put("ifs", sequence(filters)).put("is_async", scalar(1 if asynchronous else 0)))
+        return sequence(generators)
+
     def atom(self) -> Node:
         token = self.peek()
         if self.accept("("):
@@ -1261,6 +1278,12 @@ class Parser:
             elements: list[Node] = []
             while not self.at("]"):
                 elements.append(self.star_expression(0))
+                if self.at("for") or self.at("async"):
+                    if len(elements) != 1 or elements[0].kind == "Starred":
+                        token.error("invalid comprehension element")
+                    generators = self.comprehension_generators()
+                    self.expect("]")
+                    return token.node("ListComp").put("elt", elements[0]).put("generators", generators)
                 if not self.accept(","):
                     break
             self.expect("]")
@@ -1276,6 +1299,12 @@ class Parser:
                     keys.append(self.expression(0))
                     self.expect(":")
                     values.append(self.expression(0))
+                if self.at("for") or self.at("async"):
+                    if len(keys) != 1 or keys[0].kind == "none":
+                        token.error("invalid dictionary comprehension")
+                    generators = self.comprehension_generators()
+                    self.expect("}")
+                    return token.node("DictComp").put("key", keys[0]).put("value", values[0]).put("generators", generators)
                 if not self.accept(","):
                     break
             self.expect("}")

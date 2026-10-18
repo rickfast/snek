@@ -26,6 +26,7 @@ from check_library import DICT_SOURCE, DICT_EXPORTS
 from check_library import TUPLE_SOURCE, TUPLE_EXPORTS
 from check_library import OPTIONAL_SOURCE, OPTIONAL_EXPORTS
 from check_library import ITERATOR_SOURCE, ITERATOR_EXPORTS
+from check_library import COMPREHENSION_SOURCE, COMPREHENSION_EXPORTS
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -43,6 +44,10 @@ class BrowserTests(unittest.TestCase):
         cls.root = root
         compiler = os.environ.get("SNEK_COMPILER", "python")
         source = root / "fixture.py"
+        source.write_text(COMPREHENSION_SOURCE, encoding="utf-8")
+        for name, optimize in (("comprehensions", False), ("comprehensions-optimized", True)):
+            driver.build(source, root / (name + ".wasm"), optimize=optimize,
+                         compiler=compiler, library=True, exports=COMPREHENSION_EXPORTS)
         source.write_text(SOURCE + '\ndef upper(value: str) -> str:\n    return value.upper()\n')
         for name, optimize in (("raw", False), ("optimized", True)):
             driver.build(source, root / (name + ".wasm"), optimize=optimize,
@@ -162,6 +167,24 @@ class BrowserTests(unittest.TestCase):
                   return {mismatch, before, output, value: lib.value()};
                 }''', suffix)
                 self.assertEqual(result, {"mismatch": True, "before": "", "output": "initialized\n", "value": 1})
+
+    def test_comprehensions(self):
+        for target in ("comprehensions", "comprehensions-optimized"):
+            with self.subTest(target=target):
+                result = self.page.evaluate('''async target => {
+                  const {instantiate} = await import(`/${target}.js`);
+                  let output = ""; const calls = [];
+                  const lib = await instantiate(`/${target}.wasm`, {
+                    stdout: x => {output += x;},
+                    imports: {later: async x => {calls.push(x); return x + 10;}},
+                  });
+                  const first = lib.callbacks(3), second = lib.callbacks(5);
+                  const values = (await lib.collect(3)).toArray();
+                  return {squares: lib.squares(6).toArray(), labels: lib.labels(5).entries(),
+                    callbacks: [first.get(0)(), second.get(0)(), first.get(1)()], values, calls, output};
+                }''', target)
+                self.assertEqual(result, {"squares": [0, 4, 16], "labels": [["0", 4], ["1", 3]],
+                    "callbacks": [2, 4, 2], "values": [10, 11, 12], "calls": [0, 1, 2], "output": "cleanup\n"})
 
     def test_iterator_handles(self):
         for target in ("iterators", "iterators-optimized"):

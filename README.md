@@ -352,6 +352,10 @@ example suitable for the differential suite.
 
 ## Performance
 
+The [2026-10-18 refresh](bench/README.md#compute-and-javascript-boundary-refresh--2026-10-18)
+adds current compute measurements, JavaScript boundary costs and artifact sizes.
+The broader cross-interpreter comparison below remains the dated October 11 run.
+
 The suite now covers eleven workloads, including dictionaries, list builtins, protocols, generators and async calls. These are five-run medians in milliseconds on an Apple M5 Max (macOS, Node 25.9, Wasmtime 49, native CPython 3.13.14), from the [2026-10-11 snapshot](bench/results/2026-10-11.json). See [`bench/`](bench/README.md) for the full comparison, startup/allocation tests, component timings and caveats.
 
 **String-fusion follow-up:** writing integers directly into the result buffer cuts the Wasmtime Python-hosted strings benchmark from 555.9 to 136.4 ms (**4.07×**) in a fresh paired run. Explicit DRC and copying CLI comparisons also improve. See the [separate results](bench/README.md#strings-fusion-follow-up); the full-suite tables below retain their original, pre-fusion timings.
@@ -410,3 +414,4 @@ The suite now covers eleven workloads, including dictionaries, list builtins, pr
 31. **Done: library interface validation.** Generated JavaScript verifies the complete Wasm boundary schema before module initialization, rejecting stale bindings with incompatible scalar, host, callback or nested handle types. Both compiler paths and optimized builds share the check. See [loading](docs/reference/browsers.md#compatibility-and-loading).
 32. **Done: ordered dictionary union.** Matching dictionaries support shallow-copy `|` and in-place `|=`, preserving key order, aliases and Python's operand evaluation order. Both compiler paths reuse the existing dictionary helpers. See [dictionary semantics](DESIGN.md#dictionaries) and [the example](examples/dict_union.py).
 33. **Done: dictionary literal unpacking.** `{**base, "key": value, **overrides}` merges matching typed dictionaries in source order, with shallow copies and stable key positions. Earlier unpacks are copied before later expressions execute or suspend. See [dictionary semantics](DESIGN.md#dictionaries) and [the example](examples/dict_unpack.py).
+34. **Done: list and dictionary comprehensions.** Nested loops, filters, target unpacking, lexical isolation and captured lambdas work in both compilers. Ordinary comprehensions support sequential `await` inside async functions, including cancellation cleanup. See [comprehensions](DESIGN.md#comprehensions) and [the example](examples/comprehensions.py).

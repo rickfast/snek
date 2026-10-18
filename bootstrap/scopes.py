@@ -1,6 +1,6 @@
 """Lexical closure analysis over the owned syntax tree, written in Snek."""
 from __future__ import annotations
-from bootstrap.parser import Node, missing
+from bootstrap.parser import Node, missing, sequence
 from bootstrap.declarations import declaration_error
 
 
@@ -27,9 +27,33 @@ class BodyScope:
         raise ValueError("missing lexical scope")
 
 
+def comprehension_loop(node: Node, first_iter: Node) -> Node:
+    value = Node("List", "", node.line, node.column).put("elts", sequence([node.get("elt")])) if node.kind == "ListComp" else Node("Dict", "", node.line, node.column).put("keys", sequence([node.get("key")])).put("values", sequence([node.get("value")]))
+    body = sequence([Node("ComprehensionEmit", "", node.line, node.column).put("value", value)])
+    generators = node.get("generators").items
+    for index in range(len(generators) - 1, -1, -1):
+        gen = generators[index]
+        filters = gen.get("ifs").items
+        for j in range(len(filters) - 1, -1, -1):
+            cond = filters[j]
+            body = sequence([Node("If", "", cond.line, cond.column).put("test", cond).put("body", body).put("orelse", sequence([]))])
+        iterable = gen.get("iter") if index > 0 else first_iter
+        body = sequence([Node("For", "", gen.line, gen.column).put("target", gen.get("target"))
+                         .put("iter", iterable).put("body", body).put("orelse", sequence([]))])
+    return body.items[0]
+
+
+def scope_body(node: Node) -> Node:
+    if node.kind in ("ListComp", "DictComp"):
+        return sequence([comprehension_loop(node, missing())])
+    return node.get("body")
+
+
 def scope_walk(node: Node, out: list[Node]) -> None:
     out.append(node)
-    if node.kind == "AnnAssign":
+    if node.kind in ("ListComp", "DictComp"):
+        scope_walk(node.get("generators").items[0].get("iter"), out)
+    elif node.kind == "AnnAssign":
         scope_walk(node.get("target"), out)
         scope_walk(node.get("value"), out)
     elif node.kind not in ("FunctionDef", "AsyncFunctionDef", "Lambda", "ClassDef"):
@@ -53,7 +77,7 @@ def scope_target(node: Node, names: list[str]) -> None:
 def body_scope(node: Node, outer: list[str]) -> BodyScope:
     scope = BodyScope(node)
     nodes: list[Node] = []
-    scope_walk(node.get("body"), nodes)
+    scope_walk(scope_body(node), nodes)
     arguments = node.get("args") if "args" in node.keys else missing()
     params: list[str] = []
     if arguments.kind != "none":
@@ -97,7 +121,7 @@ def body_scope(node: Node, outer: list[str]) -> BodyScope:
         if (name not in scope.bound and name in outer) or name in scope.nonlocal_names:
             add_name(scope.free, name)
     for item in nodes:
-        if item.kind in ("FunctionDef", "AsyncFunctionDef", "Lambda"):
+        if item.kind in ("FunctionDef", "AsyncFunctionDef", "Lambda", "ListComp", "DictComp"):
             child = body_scope(item, outer + scope.bound)
             scope.children.append(child)
             for name in child.free:

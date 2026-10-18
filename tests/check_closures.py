@@ -40,6 +40,28 @@ def outer(x: i32) -> Callable[[], i32]:
         self.assertEqual(cells, {"cell.value": CellT(I32)})
         self.assertEqual(sum(isinstance(n, ir.CellNew) for n in walk(outer.body)), 1)
 
+    def test_comprehension_target_cells_belong_to_each_helper_invocation(self):
+        module = self.check('''
+def outer(x: i32) -> list[Callable[[], i32]]:
+    return [lambda: x for x in range(x)]
+''')
+        outer = next(f for f in module.funcs if f.name == "outer")
+        self.assertFalse(any(isinstance(t, CellT) for t in outer.locals.values()))
+        helper = next(f for f in module.funcs if "cell.x" in f.locals
+                      and any(isinstance(n, ir.Loop) for n in walk(f.body)))
+        self.assertEqual(sum(isinstance(n, ir.CellNew) for n in walk(helper.body)), 1)
+        self.assertTrue(any(isinstance(n, ir.Loop) for n in walk(helper.body)))
+        self.assertFalse(any(isinstance(n, ir.CapturedGet) for f in module.funcs for n in walk(f.body)))
+
+    def test_comprehension_only_captures_outer_values_used_inside(self):
+        module = self.check('''
+def outer(n: i32, offset: i32) -> list[i32]:
+    return [i + offset for i in range(n)]
+''')
+        outer = next(f for f in module.funcs if f.name == "outer")
+        cells = {n for n, t in outer.locals.items() if isinstance(t, CellT)}
+        self.assertEqual(cells, {"cell.offset"})
+
     def test_siblings_share_a_single_cell(self):
         module = self.check('''
 def outer(x: i32) -> tuple[Callable[[], i32], Callable[[], i32]]:

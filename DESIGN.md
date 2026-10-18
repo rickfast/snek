@@ -459,6 +459,47 @@ def __exit__(self, exc_type: type[BaseException] | None,
 - Float lists accumulate in f64 with compensated addition, following CPython 3.13's float fast path. A possibly empty float list requires an explicit float start, e.g. `sum(xs, 0.0)`: Python otherwise returns integer `0` for an empty list, which cannot share a static result type with a non-empty float sum. A non-empty float literal may omit the start. Bool starts are rejected; use `i32(flag)` explicitly.
 - These builtins currently accept lists, not arbitrary iterables; `min`/`max` also retain their two-argument forms, not arbitrary variadic forms. Sorted lists with NaN values or NaN keys can differ from CPython's TimSort because NaN comparisons are unordered.
 
+### Comprehensions
+
+List and dictionary comprehensions build typed collections eagerly:
+
+```python
+squares = [x * x for x in range(10) if x % 2 == 0]
+lookup = {str(x): x * x for x in range(5)}
+pairs = [(x, y) for x in range(3) for y in range(x) if y != 1]
+```
+
+Each `for` uses the same iterable types and target-unpacking rules as an ordinary
+loop: ranges, lists, strings, homogeneous tuples, dictionaries/views and Snek
+generators. Nested loops and repeated `if` clauses execute left to right. The
+outermost iterable is evaluated once in the enclosing scope; subsequent
+iterables run inside the comprehension as their loops are reached. Dictionary
+keys are evaluated before values, and duplicate keys keep their original
+insertion position while replacing the value.
+
+Targets belong to a separate lexical scope, including when they shadow an outer
+variable of a different type. They never leak or overwrite the outer binding,
+even after an exception. Capturing lambdas share that invocation's target cell
+and therefore see its final value; a later evaluation creates fresh cells.
+Filters support the usual type narrowing. Result types are inferred from the
+element or key/value expressions, even for empty input. An annotation supplies
+context for empty nested lists, nullable references and typed lambdas.
+
+In `async def`, ordinary comprehensions may contain `await` in their iterable,
+filters, keys, values or elements. These run sequentially, with normal exception
+and cancellation cleanup; they do not implicitly start tasks concurrently.
+Async iteration (`async for`), set comprehensions, generator expressions and
+assignment expressions (`:=`) remain unsupported.
+
+Both compilers lower comprehensions to typed helper closures using the existing
+loop machinery. The first iterable (or nonliteral range bounds) is passed as an
+argument; outer bindings used inside are captured through the existing cells.
+Constructor captures also use cells, so escaping lambdas observe subsequent
+local assignments. The current constructor initialization rules and ordinary
+list/dictionary runtime helpers remain unchanged. See
+[the synchronous example](examples/comprehensions.py) and
+[the async example](examples/comprehensions_async.py).
+
 ## Dictionaries
 
 - **Types are monomorphized and invariant.** `dict[K, V]` has one fixed key type and one fixed value type. Literals infer those types using the same rules as lists; `{}` and `dict()` need a type annotation or another expected type. `dict(d)` and `d.copy()` make shallow copies.
@@ -471,7 +512,7 @@ def __exit__(self, exc_type: type[BaseException] | None,
 - **Evaluation order follows Python.** Key/value expressions in literals run in source order. An assignment evaluates its RHS before its receiver and key; augmented assignment reads the original value before evaluating its RHS. Default arguments are evaluated even when the key is present.
 - **Union:** `left | right` produces a shallow copy, and `left |= right` mutates and retains the left dictionary. Both require matching dictionary types; iterable pairs and mappings with different key/value types are rejected. Right-hand values win, existing key objects and positions are retained, and new keys append in right-hand order. Both operands are evaluated before copying or updating, so RHS mutations are visible. Augmented targets are evaluated once and written back after the merge, including captured locals, fields and indexed targets.
 - **Unpacking:** `{**base, "key": value, **overrides}` builds a new shallow dictionary. Each unpack is copied at its position in source order, before later expressions run or await; later values replace earlier ones without moving existing keys. Only dictionaries with matching key/value types are accepted. An annotation supplies the type context; otherwise the first literal group or unpack determines it. A leading unpack of an untyped empty literal therefore needs an annotation. This does not add `**kwargs` or iterable-pair construction.
-- **Not yet supported:** dictionary comprehensions, `fromkeys`, construction/update from iterable pairs or keyword arguments, or set operations/equality on dictionary views. Dictionary values cannot have the bare type `None`; annotate an optional reference type instead.
+- **Not yet supported:** `fromkeys`, construction/update from iterable pairs or keyword arguments, or set operations/equality on dictionary views. Dictionary values cannot have the bare type `None`; annotate an optional reference type instead.
 
 ## Tuples
 

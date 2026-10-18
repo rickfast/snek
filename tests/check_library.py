@@ -46,6 +46,25 @@ def internal() -> i32:
 '''
 EXPORTS = ["add", "big", "single", "double", "flip", "text", "count", "show", "fail"]
 
+COMPREHENSION_SOURCE = '''from snek import i32, host
+from typing import Callable
+@host("later")
+async def later(value: i32) -> i32:
+    pass
+def squares(n: i32) -> list[i32]:
+    return [i * i for i in range(n) if i % 2 == 0]
+def labels(n: i32) -> dict[str, i32]:
+    return {str(i % 2): i for i in range(n)}
+def callbacks(n: i32) -> list[Callable[[], i32]]:
+    return [lambda: i for i in range(n)]
+async def collect(n: i32) -> list[i32]:
+    try:
+        return [await later(i) for i in range(n)]
+    finally:
+        print("cleanup")
+'''
+COMPREHENSION_EXPORTS = ["squares", "labels", "callbacks", "collect"]
+
 LIST_SOURCE = '''from snek import i32, HostObject, host, checkpoint
 @host("edit")
 def edit(items: list[str], before: str, after: str) -> list[str]:
@@ -918,6 +937,30 @@ ASYNC_EXPORTS = ["read_text", "wait", "number", "scalar", "load", "recover", "fl
 
 
 class LibraryTests(unittest.TestCase):
+    def test_comprehension_handles_async_order_and_cancellation(self):
+        self.src.write_text(COMPREHENSION_SOURCE, encoding="utf-8")
+        self.build(COMPREHENSION_EXPORTS)
+        self.node('''
+let output = "", calls = [];
+const lib = await instantiate(bytes, {stdout: x => {output += x;}, imports: {
+  later: async x => {calls.push(x); return x + 10;},
+}});
+assert.deepEqual(lib.squares(6).toArray(), [0, 4, 16]);
+assert.deepEqual(lib.labels(5).entries(), [["0", 4], ["1", 3]]);
+const first = lib.callbacks(3), second = lib.callbacks(5);
+assert.equal(first.get(0)(), 2); assert.equal(second.get(0)(), 4); assert.equal(first.get(1)(), 2);
+assert.deepEqual((await lib.collect(3)).toArray(), [10, 11, 12]);
+assert.deepEqual(calls, [0, 1, 2]); assert.equal(output, "cleanup\\n");
+const controller = new AbortController();
+let aborted = "";
+const pending = await instantiate(bytes, {stdout: x => {aborted += x;}, imports: {
+  later: x => {controller.abort(); return new Promise(() => {});},
+}});
+await assert.rejects(pending.collect(3, {signal: controller.signal}), e => e.name === "SnekCancelledError");
+assert.equal(aborted, "cleanup\\n");
+assert.deepEqual(pending.squares(3).toArray(), [0, 4]);
+''')
+
     def setUp(self):
         directory = tempfile.TemporaryDirectory(prefix="snek-library-")
         self.addCleanup(directory.cleanup)

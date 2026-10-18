@@ -77,6 +77,26 @@ class ModuleTests(unittest.TestCase):
         })
         self.compare(b"42 9\n")
 
+    def test_comprehension_scopes_preserve_imports_and_initialization_locals(self):
+        self.files({
+            "main.py": '''from snek import i32
+from helpers import value, items
+def show() -> None:
+    print([value + 1 for value in items()], value())
+    print([[value + inner for inner in range(2)] for value in items()])
+show()
+for x in range(2):
+    print([x for x in range(x + 1)], x)
+''',
+            "helpers.py": '''from snek import i32
+def value() -> i32:
+    return 9
+def items() -> list[i32]:
+    return [1, 2]
+''',
+        })
+        self.compare(b"[2, 3] 9\n[[1, 2], [2, 3]]\n[0] 0\n[0, 1] 1\n")
+
     def test_standard_library_aliases_are_per_module(self):
         self.files({
             "main.py": 'from left import show\nfrom right import count\nshow()\nprint(count())\n',

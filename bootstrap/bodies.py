@@ -7,7 +7,7 @@ from __future__ import annotations
 from snek import i32, i64
 from bootstrap.parser import Node, missing, scalar, sequence, string, parse_at
 from bootstrap.formats import body_format
-from bootstrap.scopes import BodyScope, body_scope, scope_walk, add_name
+from bootstrap.scopes import BodyScope, body_scope, scope_body, scope_walk, add_name, comprehension_loop
 from bootstrap.declarations import DeclType, DeclParam, DeclSignature, DeclField, Declarations, declaration_error, docstring, named, integer_text, floating, float_key, direct_yield
 
 
@@ -59,13 +59,24 @@ def refers_self(node: Node) -> bool:
 def rename_body(node: Node, names: dict[str, str]) -> Node:
     out = Node(node.kind, node.text, node.line, node.column)
     out.keys = node.keys.copy()
+    inner = names
+    if node.kind == "Lambda":
+        parameters: list[str] = []
+        args = node.get("args")
+        for arg in args.get("posonlyargs").items + args.get("args").items + args.get("kwonlyargs").items:
+            parameters.append(arg.get("arg").text)
+        for arg in [args.get("vararg"), args.get("kwarg")]:
+            if arg.kind != "none": parameters.append(arg.get("arg").text)
+        inner = {}
+        for name in names:
+            if name not in parameters: inner[name] = names[name]
     for index in range(len(node.items)):
         child = node.items[index]
         if ((node.kind == "Name" and node.keys[index] == "id")
                 or (node.kind == "ExceptHandler" and node.keys[index] == "name")) and child.text in names:
             out.items.append(string(names[child.text]))
         else:
-            out.items.append(rename_body(child, names))
+            out.items.append(rename_body(child, inner if node.kind == "Lambda" and node.keys[index] == "body" else names))
     return out
 
 
@@ -109,6 +120,9 @@ def numeric_join(a: DeclType, b: DeclType) -> DeclType:
 
 
 def bound_names(node: Node, out: list[str]) -> None:
+    if node.kind in ("ListComp", "DictComp"):
+        bound_names(node.get("generators").items[0].get("iter"), out)
+        return
     if node.kind in ("FunctionDef", "AsyncFunctionDef", "ClassDef", "Lambda"):
         if node.kind != "Lambda":
             name = node.get("name").text
@@ -389,6 +403,8 @@ class BodyContext:
     scope: BodyScope
     nested_sigs: dict[str, DeclSignature]
     pending: list[PendingClosure]
+    comp_hint: DeclType
+    comp_result: str
 
     def __init__(self, name: str, sig: DeclSignature) -> None:
         self.function = BodyFunction(name, sig)
@@ -409,6 +425,8 @@ class BodyContext:
         self.scope = BodyScope(missing())
         self.nested_sigs = {}
         self.pending = []
+        self.comp_hint = DeclType("unknown")
+        self.comp_result = ""
         for param in sig.params:
             self.types[param.name] = param.ty
             self.bound.append(param.name)
@@ -635,9 +653,9 @@ class BodyChecker:
                 declaration_error("cannot infer captured variable '" + name + "'; add a local type annotation", scope.node)
             self.ctx.types[name] = parent.types[name]
             self.ctx.flow.assigned[name] = True
-        self.prepare(scope.node.get("body"))
+        self.prepare(scope_body(scope.node))
         nodes: list[Node] = []
-        scope_walk(scope.node.get("body"), nodes)
+        scope_walk(scope_body(scope.node), nodes)
         for node in nodes:
             if node.kind in ("FunctionDef", "AsyncFunctionDef"):
                 sig = self.decl.signature(node, False)
@@ -744,6 +762,93 @@ class BodyChecker:
         self.finish_pending(pending, self.ctx)
         return value
 
+    def comprehension_parameter(self, node: Node, sig: DeclSignature, arguments: list[BodyExpr]) -> Node:
+        value = self.expr(node, DeclType("unknown"))
+        name = "comp.arg." + str(len(sig.params))
+        sig.params.append(DeclParam(name, value.ty, missing()))
+        arguments.append(value)
+        return Node("Name", "", node.line, node.column).put("id", string(name))
+
+    def comprehension(self, node: Node, expected: DeclType) -> BodyExpr:
+        parent = self.ctx
+        generators = node.get("generators").items
+        for gen in generators:
+            if gen.get("is_async").text != "0":
+                declaration_error("async for comprehensions are not supported yet", node)
+        sig = DeclSignature()
+        arguments: list[BodyExpr] = []
+        first = generators[0].get("iter")
+        if first.kind == "Call" and named(first.get("func"), "range") and "range" not in parent.bound and "range" not in parent.types:
+            args: list[Node] = []
+            original = first.get("args").items
+            for index in range(len(original)):
+                arg = original[index]
+                args.append(self.comprehension_parameter(arg, sig, arguments) if index < 2 and not number_node(arg) else arg)
+            first = (Node("Call", "", first.line, first.column).put("func", Node("Name").put("id", string("comp.range")))
+                     .put("args", sequence(args)).put("keywords", first.get("keywords")))
+        else:
+            first = self.comprehension_parameter(first, sig, arguments)
+        scope = BodyScope(node)
+        if parent.initializing:
+            outer: list[str] = []
+            for name in parent.types: outer.append(name)
+            scope = body_scope(node, outer)
+            for name in scope.free:
+                add_name(parent.scope.cells, name)
+        else:
+            scope = parent.scope.child(node)
+        name = "closure." + str(self.nclosures)
+        self.nclosures += 1
+        child = BodyContext(name, sig)
+        child.async_body = parent.async_body
+        child.function.machine = child.async_body
+        child.comp_hint = inner_type(expected)
+        self.ctx = child
+        self.prepare_scope(scope, parent)
+        loop = self.statement(comprehension_loop(node, first))
+        ty = child.types[child.comp_result]
+        empty = BodyExpr("ListLit" if ty.kind == "list" else "DictLit", ty, node)
+        value = BodyExpr("LocalGet", ty, node, child.comp_result)
+        value.declared = ty
+        child.function.body = [BodyStmt("SetLocal", node, child.comp_result).add(empty)] + loop.stmts + [BodyStmt("Return", node).add(value)]
+        sig.ret = DeclType("Coroutine").add(ty) if child.async_body else ty
+        child.result_type = ty
+        child.function.closure_type = callable_type(sig)
+        self.finish_closures()
+        self.functions.append(child.function)
+        self.ctx = parent
+        closure = BodyExpr("Closure", callable_type(sig), node, name)
+        for free in sorted(scope.free):
+            closure.add(self.cell_ref(free, parent.types[free], node))
+        call = BodyExpr("CallValue", sig.ret, node).add(closure)
+        for argument in arguments: call.add(argument)
+        return BodyExpr("Await", ty, node).add(call) if child.async_body else call
+
+    def comprehension_emit(self, node: Node) -> BodyBlock:
+        literal = node.get("value")
+        hint = self.ctx.comp_hint
+        nodes = literal.get("elts").items if literal.kind == "List" else [literal.get("keys").items[0], literal.get("values").items[0]]
+        hints: list[DeclType] = hint.args if hint.kind in ("list", "dict") else []
+        values: list[BodyExpr] = []
+        ty = DeclType("list" if literal.kind == "List" else "dict")
+        for index in range(len(nodes)):
+            item = nodes[index]
+            expected = hints[index] if index < len(hints) else DeclType("unknown")
+            value = self.expr(item, expected)
+            target = value.ty if expected.kind == "unknown" else expected
+            if target.kind == "None":
+                declaration_error("cannot infer comprehension element type; add an annotation", item)
+            values.append(self.coerce(value, target, item))
+            ty.add(target)
+        if ty.kind == "dict" and not ty.args[0].hashable():
+            declaration_error("dictionary key type is not hashable: " + ty.args[0].display(), node)
+        self.ctx.comp_result = self.ctx.temp(ty, node)
+        recv = self.ctx.get(self.ctx.comp_result, node)
+        operation = BodyExpr("ListAppend", DeclType("None"), node).add(recv).add(values[0]) if ty.kind == "list" else BodyExpr("DictOp", DeclType("None"), node, "set").add(recv).add(values[0]).add(values[1])
+        result = BodyBlock()
+        result.stmts.append(BodyStmt("ExprStmt", node).add(operation))
+        return result
+
     def cell_ref(self, name: str, ty: DeclType, node: Node) -> BodyExpr:
         cell = DeclType("Cell").add(ty)
         value = BodyExpr("LocalGet", cell, node, "cell." + name)
@@ -806,7 +911,7 @@ class BodyChecker:
         params: list[str] = []
         for param in self.ctx.function.sig.params:
             params.append(param.name)
-        if self.ctx.function.owner != "":
+        if self.ctx.function.owner != "" and not self.ctx.initializing:
             params.append("self")
         prefix: list[BodyStmt] = []
         for name in sorted(list(cells)):
@@ -878,7 +983,7 @@ class BodyChecker:
     def prepare(self, node: Node) -> None:
         # Explicit annotations apply throughout the lexical scope, including
         # earlier assignments. They do not make a value definitely assigned.
-        if node.kind in ("FunctionDef", "AsyncFunctionDef", "ClassDef", "Lambda"):
+        if node.kind in ("FunctionDef", "AsyncFunctionDef", "ClassDef", "Lambda", "ListComp", "DictComp"):
             return
         if node.kind == "AnnAssign" and node.get("target").kind == "Name":
             if node.get("target").get("id").text in self.ctx.scope.free:
@@ -1080,6 +1185,8 @@ class BodyChecker:
             return self.defer_closure(node, sig)
         if node.kind in ("List", "Tuple", "Dict"):
             return self.collection(node, inner_type(expected))
+        if node.kind in ("ListComp", "DictComp"):
+            return self.comprehension(node, expected)
         if node.kind == "Attribute":
             return self.attribute(node)
         if node.kind == "Subscript":
@@ -2313,6 +2420,7 @@ class BodyChecker:
         if not terminated:
             self.construct(name, assigned, cls.node)
             self.ctx.function.body.append(BodyStmt("Return", cls.node).add(self.ctx.get("self", cls.node)))
+        self.finish_closures()
         self.functions.append(self.ctx.function)
 
     def construct(self, name: str, assigned: dict[str, str], node: Node) -> None:
@@ -2650,6 +2758,8 @@ class BodyChecker:
 
     def statement(self, node: Node) -> BodyBlock:
         result = BodyBlock()
+        if node.kind == "ComprehensionEmit":
+            return self.comprehension_emit(node)
         if node.kind in ("FunctionDef", "AsyncFunctionDef"):
             if self.ctx.initializing:
                 declaration_error("closures in __init__ are not supported yet; use an ordinary method", node)
@@ -2748,7 +2858,7 @@ class BodyChecker:
             result.terminated = infinite and not direct_break(node.get("body"))
         elif node.kind == "For":
             it = node.get("iter")
-            if it.kind == "Call" and named(it.get("func"), "range") and "range" not in self.ctx.bound:
+            if it.kind == "Call" and (named(it.get("func"), "comp.range") or (named(it.get("func"), "range") and "range" not in self.ctx.bound)):
                 return self.range_loop(node)
             return self.collection_loop(node)
         elif node.kind in ("Break", "Continue"):
@@ -3047,7 +3157,7 @@ class BodyChecker:
 
     def range_loop(self, node: Node) -> BodyBlock:
         it = node.get("iter")
-        if (it.kind != "Call" or not named(it.get("func"), "range") or "range" in self.ctx.bound
+        if (it.kind != "Call" or not (named(it.get("func"), "comp.range") or (named(it.get("func"), "range") and "range" not in self.ctx.bound))
                 or node.get("target").kind != "Name"):
             body_unsupported("for loops except range() with a local target", node)
         if len(node.get("orelse").items) != 0 or len(it.get("keywords").items) != 0:
