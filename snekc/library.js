@@ -64,6 +64,7 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
   let wasm, busy = false, activeTask = null, errorText = "";
   const callbackStates = callbackSignatures.map(() => ({toWasm: new WeakMap(), toJS: new WeakMap()}));
   const listStates = listSignatures.map(() => ({toWasm: new WeakMap(), toJS: new WeakMap()}));
+  const dictStates = dictSignatures.map(() => ({toWasm: new WeakMap(), toJS: new WeakMap()}));
   // The private field roots the GC object even if the API object is discarded.
   // A fresh private brand per instance rejects foreign handles, and a single
   // identity map preserves wrappers across base/derived boundary types.
@@ -198,9 +199,10 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
     throw new SnekLoadError("Unable to instantiate Snek library. Use the .wasm and .js files from the same --library build.", { cause });
   }
   wasm = instance.exports;
-  if (wasm.__snek_abi?.value !== 5 || !(wasm.__snek_yielded instanceof WebAssembly.Global) || !(wasm.memory instanceof WebAssembly.Memory) || !(wasm.__snek_length instanceof WebAssembly.Global) ||
+  if (wasm.__snek_abi?.value !== 6 || !(wasm.__snek_yielded instanceof WebAssembly.Global) || !(wasm.memory instanceof WebAssembly.Memory) || !(wasm.__snek_length instanceof WebAssembly.Global) ||
       ["__snek_init", "__snek_reset", "__snek_alloc", "__snek_mark", "__snek_restore",
         ...listSignatures.flatMap((_, i) => ["len", "get", "set", "append", "pop"].map(op => `__snek_list_${op}_${i}`)),
+        ...dictSignatures.flatMap((_, i) => ["len", "next", "get", "contains", "set", "delete", "clear", "copy", "keys_at", "values_at"].map(op => `__snek_dict_${op}_${i}`)),
         ...classSignatures.map((_, i) => `__snek_class_test_${i}`),
         ...callbackSignatures.flatMap(([, , , isAsync], i) =>
         [`__snek_wrap_${i}`, `__snek_call_${i}`, ...(isAsync ? [`__snek_step___snek_callback_${i}`, `__snek_result___snek_callback_${i}`] : [])]), ...signatures.flatMap(([name, , , isAsync]) =>
@@ -228,9 +230,9 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
     finally { finish(); }
   }
   // These operations cannot call user Snek code. A host callback may use its
-  // list arguments while a Wasm step is active, without resetting that step's
+  // collection arguments while a Wasm step is active, without resetting that step's
   // scratch strings, output, yielded flag, or pending request ownership.
-  function listOperation(action) {
+  function collectionOperation(action) {
     if (!busy) return enter(action);
     const mark = wasm.__snek_mark(), length = wasm.__snek_length.value;
     try { return action(); }
@@ -259,6 +261,12 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
     const list = listSignatures.findIndex(([signature]) => signature === type);
     if (list !== -1) {
       const raw = listStates[list].toWasm.get(value);
+      if (!raw) throw new TypeError(`expected ${type} handle from this Snek instance`);
+      return [raw];
+    }
+    const dict = dictSignatures.findIndex(([signature]) => signature === type);
+    if (dict !== -1) {
+      const raw = dictStates[dict].toWasm.get(value);
       if (!raw) throw new TypeError(`expected ${type} handle from this Snek instance`);
       return [raw];
     }
@@ -339,14 +347,14 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
           return i;
         };
         wrapped = Object.freeze({
-          get length() { return listOperation(size); },
-          get(i) { return listOperation(() => lift(element, wasm[`__snek_list_get_${list}`](value, index(i)))); },
-          set(i, item) { return listOperation(() => {
+          get length() { return collectionOperation(size); },
+          get(i) { return collectionOperation(() => lift(element, wasm[`__snek_list_get_${list}`](value, index(i)))); },
+          set(i, item) { return collectionOperation(() => {
             const lowered = lower(element, item);
             wasm[`__snek_list_set_${list}`](value, index(i), ...lowered);
           }); },
-          append(item) { return listOperation(() => wasm[`__snek_list_append_${list}`](value, ...lower(element, item))); },
-          pop() { return listOperation(() => {
+          append(item) { return collectionOperation(() => wasm[`__snek_list_append_${list}`](value, ...lower(element, item))); },
+          pop() { return collectionOperation(() => {
             if (size() === 0) throw new RangeError("pop from empty list");
             return lift(element, wasm[`__snek_list_pop_${list}`](value));
           }); },
@@ -355,6 +363,45 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
             for (let i = 0, length = size(); i < length; i++) items.push(wrapped.get(i));
             return items;
           },
+        });
+        state.toJS.set(value, wrapped);
+        state.toWasm.set(wrapped, value);
+      }
+      return wrapped;
+    }
+    const dict = dictSignatures.findIndex(([signature]) => signature === result);
+    if (dict !== -1) {
+      const state = dictStates[dict];
+      let wrapped = state.toJS.get(value);
+      if (!wrapped) {
+        const [, keyType, valueType] = dictSignatures[dict];
+        const call = (op, ...args) => wasm[`__snek_dict_${op}_${dict}`](value, ...args);
+        wrapped = Object.freeze({
+          get size() { return collectionOperation(() => call("len")); },
+          get(key) { return collectionOperation(() => {
+            const args = lower(keyType, key);
+            return call("contains", ...args) ? lift(valueType, call("get", ...args)) : undefined;
+          }); },
+          has(key) { return collectionOperation(() => Boolean(call("contains", ...lower(keyType, key)))); },
+          set(key, item) { return collectionOperation(() => call("set", ...lower(keyType, key), ...lower(valueType, item))); },
+          delete(key) { return collectionOperation(() => {
+            const args = lower(keyType, key);
+            if (!call("contains", ...args)) return false;
+            call("delete", ...args);
+            return true;
+          }); },
+          clear() { return collectionOperation(() => call("clear")); },
+          entries() { return collectionOperation(() => {
+            // Copy entries before lifting values: a HostObject's then getter
+            // may run JS that mutates the original dictionary.
+            const snapshot = call("copy"), items = [];
+            for (let i = wasm[`__snek_dict_next_${dict}`](snapshot, 0); i !== -1;
+                 i = wasm[`__snek_dict_next_${dict}`](snapshot, i + 1)) {
+              const key = lift(keyType, wasm[`__snek_dict_keys_at_${dict}`](snapshot, i));
+              items.push([key, lift(valueType, wasm[`__snek_dict_values_at_${dict}`](snapshot, i))]);
+            }
+            return items;
+          }); },
         });
         state.toJS.set(value, wrapped);
         state.toWasm.set(wrapped, value);

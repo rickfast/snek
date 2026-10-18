@@ -350,6 +350,7 @@ reject `gather`, just as they reject `wait_all`.
 | `HostObject | None` | `object | null` |
 | Snek class `C` / `C | None` | Opaque `SnekObject<"module.C">` / handle or `null` |
 | `list[T]` with supported elements | Live, GC-managed `SnekList<T>` handle |
+| `dict[K, V]` with supported keys/values | Live, GC-managed `SnekDict<K, V>` handle |
 | `Callable[[T, ...], R]` | Typed synchronous function, or async function when `R` is a `Coroutine` |
 | `None` return | `void` / `undefined` |
 
@@ -360,7 +361,7 @@ Float infinities, NaN and signed zero follow Wasm arithmetic. JavaScript strings
 must contain valid Unicode scalar values: lone UTF-16 surrogates are rejected.
 
 Strings are copied into the GC heap before user code runs and copied back for
-JavaScript results. Supported Snek lists cross as live handles and Snek class
+JavaScript results. Supported Snek lists and dictionaries cross as live handles and Snek class
 instances cross as opaque handles; other collections stay internal. `HostObject` passes a JavaScript-owned
 external reference without copying it, and `Callable` exposes a JavaScript
 function backed by a GC-managed closure.
@@ -418,7 +419,7 @@ provide transaction isolation.
 Create lists in Snek, then pass their handles back. JavaScript arrays, lookalike
 objects, handles for different element types, and handles from another instance
 are rejected. Handles are not transferable between workers; send `toArray()` data
-instead. Dictionary/tuple handles and optional lists are not supported yet.
+instead. Tuple handles and optional lists are not supported yet.
 Supported lists can also be parameters and
 results of [typed callbacks](#typed-callbacks).
 
@@ -479,6 +480,52 @@ Host functions may inspect and mutate callback lists during a Snek call, but mus
 defer invoking Snek callbacks until the synchronous step returns. Callback values
 cannot be nullable. Callback parameters/results may themselves be callbacks;
 see [higher-order callbacks](#higher-order-callbacks).
+
+## Snek-owned dictionary handles
+
+`dict[K, V]` crosses as a live `SnekDict<K, V>` handle when `K` is `str`, `bool`,
+`i32`, or `i64` and `V` is a supported boundary type. Values can include nested
+dictionaries, lists, callbacks, class handles, and nullable class/`HostObject`
+references. Dictionaries also work inside lists and callback signatures, in
+sync/async exports, and in host imports.
+
+```python
+from snek import i32
+
+def counts() -> dict[str, i32]:
+    return {"snake": 1}
+```
+
+```javascript
+const counts = lib.counts();
+counts.set("snake", 2);
+counts.set("python", 1);
+console.log(counts.get("snake")); // 2
+console.log(counts.entries()); // [["snake", 2], ["python", 1]]
+```
+
+The handle provides readonly `size`, `get(key)`, `has(key)`, `set(key, value)`,
+`delete(key)`, `clear()`, and `entries()`. `get()` returns `undefined` for a missing
+key, unlike Snek's throwing `d[key]`; `delete()` returns whether a key was removed.
+`set()` and `clear()` return `undefined`. Keys and values are checked at runtime
+and in generated TypeScript. In particular, `i64` keys require `bigint`.
+
+`entries()` returns an insertion-ordered, shallow snapshot of `[key, value]` pairs.
+Updating a key keeps its position; deleting and reinserting moves it to the end.
+Snapshot values retain the usual object, collection, and function identity.
+Removing an entry does not invalidate a retained value. Ordinary handle passing
+does not copy the dictionary.
+
+Host callbacks may inspect and mutate dictionaries during a Snek step; these
+operations do not execute user Snek code. Changing a dictionary's size while Snek
+iterates it still raises Snek's normal `RuntimeError`. Concurrent invocations
+sharing a dictionary see each other's changes; this is not a transaction API.
+
+Both key and value types are invariant. JavaScript `Map`s, plain objects,
+wrongly typed handles, and handles from another instance are rejected. There is
+no implicit conversion or manual disposal. Tuple keys, nullable keys, optional
+dictionaries, and tuple values remain unsupported at the library boundary even
+where the language supports them internally.
 
 ## Snek-owned class handles
 
@@ -645,9 +692,9 @@ greet("browser"); // Hello, browser
 
 Callback arguments and results can be numbers, booleans, strings, `HostObject`,
 or `HostObject | None`, Snek class/nullable class handles, plus supported `list[T]`
-handles (including nested lists);
+and `dict[K, V]` handles (including nested collections);
 results can also be `None`. Callbacks may also accept and return other callbacks,
-and lists can contain callbacks. Collections other than supported lists and
+and lists and dictionaries can contain callbacks. Collections other than supported lists/dictionaries and
 optional callbacks are not supported. Callbacks with these result types
 are synchronous: returning a Promise is an error, including for `None` results.
 The generated TypeScript uses `undefined` for a `None` callback result to catch
@@ -696,7 +743,7 @@ Callback arguments and returned functions use the existing identity maps and
 retain captured values. Generated TypeScript checks every nested signature.
 Async factories declare `Coroutine[None, None, Callable[...]]` results and return
 Promises of functions; an async factory can itself accept or return async callbacks.
-Higher-order functions can also be elements of supported lists.
+Higher-order functions can also be values in supported lists and dictionaries.
 
 The synchronous re-entry rule still applies. While Snek is calling a JavaScript
 function, that function may retain or return a received Snek callback, but cannot
@@ -728,7 +775,7 @@ Their JavaScript wrappers return Promises, and calls can overlap with other asyn
 invocations. Passing a returned closure back into the same instance preserves its
 identity. Host declarations may accept or return async callbacks as well.
 
-Async callback results use the same scalar/string/object-handle/list types as sync
+Async callback results use the same scalar/string/object-handle/collection types as sync
 callbacks, plus `None`. `Coroutine[None, None, None]` maps to `PromiseLike<void>`.
 Returning a bare value is rejected. Promise rejections, synchronous throws, and
 invalid resolved values become catchable Snek `RuntimeError`s; awaited `finally`
@@ -795,7 +842,7 @@ functions appear on the returned, frozen API object.
 ## Current limits
 
 Exports must be entry-module functions with the boundary types above (or coroutines
-returning those types). Collections other than the supported list handles,
+returning those types). Collections other than the supported list/dictionary handles,
 optional types other than `HostObject`/class references, generators and raw coroutine objects cannot cross
 the boundary. Libraries can use these internally where supported by the language,
 but cannot perform async module initialization or use WASI services such as

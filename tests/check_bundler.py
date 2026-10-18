@@ -19,6 +19,7 @@ from check_library import LIST_CALLBACK_SOURCE, LIST_CALLBACK_EXPORTS
 from check_library import CLASS_VALUE_SOURCE, CLASS_VALUE_EXPORTS
 from check_library import CALLBACK_LIST_SOURCE, CALLBACK_LIST_EXPORTS
 from check_library import HIGHER_CALLBACK_SOURCE, HIGHER_CALLBACK_EXPORTS
+from check_library import DICT_SOURCE, DICT_EXPORTS
 
 EXAMPLE = ROOT / "examples/vite"
 SERVER = '''
@@ -31,6 +32,29 @@ console.log(JSON.stringify({url: server.resolvedUrls.local[0]}));
 '''
 
 TYPES = '''
+import {type SnekLibrary as DictLibrary, type SnekDict} from "./generated/dicts.js";
+declare const dicts: DictLibrary;
+const mapping: SnekDict<string, string> = dicts.words();
+const maybeWord: string | undefined = mapping.get("key");
+const entries: [string, string][] = mapping.entries();
+mapping.set("key", "value"); mapping.delete("key"); mapping.clear();
+dicts.integers().set(1, 2n);
+dicts.apply(items => items, mapping);
+dicts.apply_async(async items => items, mapping);
+// @ts-expect-error dictionary key types are checked
+mapping.get(1);
+// @ts-expect-error dictionary value types are checked
+mapping.set("key", 1);
+// @ts-expect-error missing keys produce undefined
+const definitelyWord: string = mapping.get("key");
+// @ts-expect-error JS Maps cannot impersonate Snek dictionaries
+dicts.echo(new Map<string, string>());
+// @ts-expect-error dictionaries are invariant in their values
+const widenedValues: SnekDict<string, string | null> = mapping;
+// @ts-expect-error dictionaries are invariant in their keys
+const widenedKeys: SnekDict<string | number, string> = mapping;
+// @ts-expect-error async dictionary callback results require handles
+dicts.apply_async(async items => new Map(), mapping);
 import {type SnekLibrary as HigherLibrary} from "./generated/higher-callbacks.js";
 declare const higher: HigherLibrary;
 const decorated: string = higher.decorator("!")(text => text)("typed");
@@ -200,6 +224,10 @@ class BundlerTests(unittest.TestCase):
         print(f"Bundler browser: {engine} {cls.browser.version}; compiler: {cls.compiler}", flush=True)
 
     def compile(self, optimize):
+        source = self.root / "dicts.py"
+        source.write_text(DICT_SOURCE)
+        driver.build(source, self.root / "src/generated/dicts.wasm", optimize=optimize,
+                     compiler=self.compiler, library=True, exports=DICT_EXPORTS)
         source = self.root / "higher_callbacks.py"
         source.write_text(HIGHER_CALLBACK_SOURCE)
         driver.build(source, self.root / "src/generated/higher-callbacks.wasm", optimize=optimize,

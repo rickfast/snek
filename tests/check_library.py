@@ -354,6 +354,68 @@ def factories() -> list[Callable[[str], Callable[[str], str]]]:
 '''
 HIGHER_CALLBACK_EXPORTS = ["greeter", "decorator", "from_host", "select", "use", "async_factory", "use_async", "async_consumer", "async_decorator", "factories"]
 
+DICT_SOURCE = '''
+from typing import Callable, Coroutine
+from snek import i32, i64, HostObject, host, checkpoint
+
+@host("edit")
+def edit(values: dict[str, str]) -> dict[str, str]:
+    pass
+@host("later")
+async def later(values: dict[str, str]) -> dict[str, str]:
+    pass
+def words() -> dict[str, str]:
+    return {"first": "one", "second": "two"}
+def echo(values: dict[str, str]) -> dict[str, str]:
+    return values
+def read(values: dict[str, str], key: str) -> str:
+    return values[key]
+def write(values: dict[str, str], key: str, text: str) -> None:
+    values[key] = text
+def upper(values: dict[str, str], key: str) -> str:
+    return values[key].upper()
+def from_host(values: dict[str, str]) -> dict[str, str]:
+    return edit(values)
+def iterating(values: dict[str, str]) -> None:
+    for key in values:
+        edit(values)
+async def delayed(values: dict[str, str]) -> dict[str, str]:
+    await checkpoint()
+    return await later(values)
+def integers() -> dict[i32, i64]:
+    return {1: i64(2)}
+def wide() -> dict[i64, str]:
+    return {i64(1): "one"}
+def flags() -> dict[bool, str]:
+    return {True: "yes", False: "no"}
+def nested() -> dict[str, dict[str, str]]:
+    shared = words()
+    return {"a": shared, "b": shared}
+def lists() -> dict[str, list[str]]:
+    return {"a": ["item"]}
+def in_list() -> list[dict[str, str]]:
+    return [words()]
+def objects(value: HostObject) -> dict[str, HostObject | None]:
+    return {"object": value, "null": None}
+def functions(prefix: str) -> dict[str, Callable[[str], str]]:
+    def fn(text: str) -> str:
+        return prefix + text
+    return {"fn": fn}
+def apply(fn: Callable[[dict[str, str]], dict[str, str]], values: dict[str, str]) -> dict[str, str]:
+    return fn(values)
+async def apply_async(fn: Callable[[dict[str, str]], Coroutine[None, None, dict[str, str]]], values: dict[str, str]) -> dict[str, str]:
+    return await fn(values)
+class Box:
+    value: i32
+    def __init__(self, value: i32) -> None:
+        self.value = value
+def boxes() -> dict[str, Box | None]:
+    return {"box": Box(7), "none": None}
+def box_value(value: Box) -> i32:
+    return value.value
+'''
+DICT_EXPORTS = ["words", "echo", "read", "write", "upper", "from_host", "iterating", "delayed", "integers", "wide", "flags", "nested", "lists", "in_list", "objects", "functions", "apply", "apply_async", "boxes", "box_value"]
+
 OBJECT_SOURCE = '''from snek import HostObject, host, checkpoint
 from typing import Callable, Iterator
 @host("lookup")
@@ -721,6 +783,85 @@ const second = await instantiate(await WebAssembly.compile(bytes));
 assert.equal(second.add(2, 3), 5);
 ''')
 
+    def test_dictionary_handles(self):
+        self.src.write_text(DICT_SOURCE)
+        self.build(DICT_EXPORTS)
+        self.node('''
+const options = {imports: {edit: x => x, later: async x => x}};
+const lib = await instantiate(bytes, options), foreign = await instantiate(bytes, options);
+const words = lib.words();
+assert.ok(Object.isFrozen(words)); assert.equal(lib.echo(words), words);
+assert.equal(words.size, 2); assert.equal(words.get("missing"), undefined);
+assert.equal(words.has("missing"), false); assert.equal(words.delete("missing"), false);
+words.set("first", "updated");
+assert.deepEqual(words.entries(), [["first", "updated"], ["second", "two"]]);
+assert.equal(words.delete("first"), true); words.set("first", "last");
+assert.deepEqual(words.entries(), [["second", "two"], ["first", "last"]]);
+lib.write(words, "Snek", "visible"); assert.equal(words.get("Snek"), "visible");
+words.set("straße 🐍", "straße 🐍"); assert.equal(lib.upper(words, "straße 🐍"), "STRASSE 🐍");
+for (let i = 0; i < 200; i++) words.set("key" + i, "value" + i);
+for (let i = 0; i < 100; i++) words.delete("key" + i);
+assert.equal(words.get("key199"), "value199");
+for (const wrong of [{}, new Map(), foreign.words(), lib.integers()]) assert.throws(() => lib.echo(wrong), /handle from this Snek instance/);
+assert.throws(() => words.set(1, "wrong"), /expected str/);
+assert.throws(() => words.set("wrong", 1), /expected str/);
+assert.throws(() => lib.read(words, "missing"), SnekError);
+const snapshot = words.entries(); words.clear();
+assert.equal(words.size, 0); assert.deepEqual(words.entries(), []); assert.ok(snapshot.length > 0);
+words.set("again", "works"); assert.equal(lib.read(words, "again"), "works");
+const ints = lib.integers(); ints.set(-2147483648, 9007199254740993n); assert.equal(ints.get(-2147483648), 9007199254740993n);
+assert.throws(() => ints.set(2147483648, 0n), /i32 out of range/);
+const wide = lib.wide(); wide.set(9007199254740993n, "wide"); assert.equal(wide.get(9007199254740993n), "wide");
+assert.throws(() => wide.get(1), /expected bigint/);
+assert.deepEqual(lib.flags().entries(), [[true, "yes"], [false, "no"]]);
+''')
+
+    def test_dictionary_composition_and_hosts(self):
+        self.src.write_text(DICT_SOURCE)
+        self.build(DICT_EXPORTS)
+        self.node('''
+const lib = await instantiate(bytes, {imports: {
+  edit: values => {values.set("host", "x".repeat(200000)); assert.equal(values.entries().length, 3); return values;},
+  later: async values => {values.set("later", "async"); return values;},
+}});
+const words = lib.words(); assert.equal(lib.from_host(words), words);
+assert.equal(words.get("host").length, 200000);
+assert.deepEqual(await Promise.all([lib.delayed(words), lib.delayed(words)]), [words, words]);
+assert.equal(words.get("later"), "async");
+assert.equal(lib.apply(values => {values.set("callback", "yes"); return values;}, words), words);
+assert.equal(await lib.apply_async(async values => values, words), words);
+await assert.rejects(lib.apply_async(async () => new Map(), words), SnekError);
+const nested = lib.nested(), child = nested.get("a");
+assert.equal(child, nested.get("b")); assert.equal(nested.entries()[0][1], child);
+nested.clear(); assert.equal(child.get("first"), "one");
+const lists = lib.lists(); lists.get("a").append("appended"); assert.deepEqual(lists.get("a").toArray(), ["item", "appended"]);
+assert.equal(lib.in_list().get(0).get("first"), "one");
+const functions = lib.functions("captured:"); const fn = functions.get("fn"); functions.clear(); assert.equal(fn("alive"), "captured:alive");
+const js = text => text.toUpperCase(); functions.set("JS", js); assert.equal(functions.get("JS"), js);
+const boxes = lib.boxes(), box = boxes.get("box"); assert.equal(lib.box_value(box), 7); assert.equal(boxes.get("none"), null);
+assert.throws(() => boxes.set("wrong", {}), /handle from this Snek instance/);
+const object = {}, objects = lib.objects(object); assert.equal(objects.get("object"), object); assert.equal(objects.get("null"), null);
+// Snapshot lifting may execute a getter; its mutation cannot change the snapshot.
+Object.defineProperty(object, "then", {get() {objects.clear(); return undefined;}});
+assert.deepEqual(objects.entries(), [["object", object], ["null", null]]); assert.equal(objects.size, 0);
+const iterating = await instantiate(bytes, {imports: {edit: x => {x.set("new key", "mutation"); return x;}, later: async x => x}});
+const changed = iterating.words();
+assert.throws(() => iterating.iterating(changed), /dictionary changed size during iteration/);
+changed.clear(); changed.set("after", "cleanup"); assert.deepEqual(changed.entries(), [["after", "cleanup"]]);
+''')
+
+    def test_dictionary_only_in_callback_signature(self):
+        self.src.write_text('from typing import Callable\ndef apply(fn: Callable[[dict[str, str]], dict[str, str]], values: dict[str, str]) -> dict[str, str]:\n    return fn(values)\n')
+        self.build(["apply"])
+        self.node('const lib = await instantiate(bytes); assert.throws(() => lib.apply(x => x, new Map()), /handle from this Snek instance/);')
+
+    def test_unsupported_dictionary_boundaries(self):
+        for ty in ("dict[tuple[str, str], str]", "dict[str | None, str]", "dict[str, tuple[str, str]]", "dict[str, str] | None"):
+            for host in (False, True):
+                with self.subTest(ty=ty, host=host):
+                    self.src.write_text('from snek import host\n' + ('@host("f")\n' if host else '') + f'def f(value: {ty}) -> None:\n    pass\n')
+                    with self.assertRaises(Exception): self.build(["f"])
+
     def test_higher_order_callbacks(self):
         self.src.write_text(HIGHER_CALLBACK_SOURCE)
         self.build(HIGHER_CALLBACK_EXPORTS)
@@ -1029,7 +1170,7 @@ assert.equal(lib.echo(value), value); assert.equal(lib.read(value), 42);
 
     def test_class_handles_reject_unsupported_boundary_shapes(self):
         base = 'from typing import Callable\nfrom snek import host\nclass Box:\n    pass\n'
-        for ty in ("dict[str, Box]", "list[Callable[[], Box] | None]", "Callable[[Callable[[], dict[str, Box]]], Box]", "list[Box] | None"):
+        for ty in ("dict[tuple[str, str], Box]", "list[Callable[[], Box] | None]", "Callable[[Callable[[], dict[tuple[str, str], Box]]], Box]", "list[Box] | None"):
             for host in (False, True):
                 self.src.write_text(base + ('@host("f")\n' if host else '') + f'def f(value: {ty}) -> None:\n    pass\n')
                 with self.subTest(ty=ty, host=host), self.assertRaises(Exception):
@@ -2116,7 +2257,7 @@ assert.equal(output, "loop cleaned\\n");
         self.node('''
 const original = WebAssembly.instantiate;
 try {
-  for (const version of [undefined, 1, 2, 3, 4, 6]) {
+  for (const version of [undefined, 1, 2, 3, 4, 5, 7]) {
     WebAssembly.instantiate = async (...args) => {
       const instance = await original(...args);
       return {exports: {...instance.exports, __snek_abi: version === undefined ? undefined : new WebAssembly.Global({value: "i32"}, version)}};

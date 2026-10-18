@@ -51,6 +51,7 @@ def library_boundary_types(exports: list[LibraryExport], hosts: list[LibraryExpo
         i += 1
         children: list[str] = []
         if ty.startswith("list["): children.append(library_list_element(ty))
+        elif ty.startswith("dict["): children = library_dict_types(ty)
         elif ty.startswith("Callable["): children = library_callback_types(ty)
         for child in children:
             child = library_callback_result(child)
@@ -132,7 +133,7 @@ def library_callback_types(ty: str) -> list[str]:
     types.append(ty[end + 3:-1])
     for i in range(len(types)):
         value = library_callback_result(types[i]) if i == len(types) - 1 else types[i]
-        if "[" in value and not (value.startswith("list[") or value.startswith("Callable[")):
+        if "[" in value and not (value.startswith("list[") or value.startswith("dict[") or value.startswith("Callable[")):
             raise ValueError("callback signatures cannot contain unsupported collections or bare coroutines: " + ty)
         if value != "None" or i != len(types) - 1: library_type(value)
     return types
@@ -161,13 +162,14 @@ def library_callback_heap(ty: str) -> str:
 def library_type(ty: str) -> str:
     if ty.startswith("class:"): return "(ref " + ("null " if ty.endswith(" | None") else "") + "$" + library_class_name(ty) + ")"
     if ty.startswith("list["): return "(ref " + library_list_heap(ty) + ")"
+    if ty.startswith("dict["): return "(ref $" + library_mangle(ty) + ")"
     if ty.startswith("Callable["): return "(ref " + library_callback_heap(ty) + ")"
     if ty == "HostObject": return "(ref extern)"
     if ty == "HostObject | None": return "(ref null extern)"
     if ty == "str": return "i32"
     if ty == "bool": return "i32"
     if ty in ("i32", "i64", "f32", "f64"): return ty
-    raise ValueError("library boundaries support only i32, i64, f32, f64, bool, str, object handles, supported list/Callable, and None returns; got " + ty)
+    raise ValueError("library boundaries support only i32, i64, f32, f64, bool, str, object handles, supported list/dict/Callable, and None returns; got " + ty)
 
 
 def library_list_element(ty: str) -> str:
@@ -178,10 +180,12 @@ def library_list_element(ty: str) -> str:
         library_list_element(elem)
     elif elem.startswith("Callable["):
         library_callback_types(elem)
+    elif elem.startswith("dict["):
+        library_dict_types(elem)
     elif elem.startswith("class:"):
         if library_class_name(elem) == "": raise ValueError("invalid library class element: " + ty)
     elif elem not in ("i32", "i64", "f32", "f64", "bool", "str", "HostObject", "HostObject | None"):
-        raise ValueError("library list elements must be scalar, string, object handles, supported callbacks or lists; got " + ty)
+        raise ValueError("library list elements must be scalar, string, object handles, supported callbacks, dictionaries or lists; got " + ty)
     return elem
 
 
@@ -189,7 +193,69 @@ def library_mangle(ty: str) -> str:
     if ty.startswith("class:"): return library_class_name(ty) + ("?" if ty.endswith(" | None") else "")
     if ty.startswith("list["): return "list<" + library_mangle(library_list_element(ty)) + ">"
     if ty.startswith("Callable["): return library_callback_heap(ty)[1:]
+    if ty.startswith("dict["):
+        types = library_dict_types(ty)
+        return "dict<" + library_mangle(types[0]) + "~" + library_mangle(types[1]) + ">"
     return "none" if ty == "None" else ty.replace(" | None", "?")
+
+
+def library_dict_types(ty: str) -> list[str]:
+    if not ty.startswith("dict[") or not ty.endswith("]"):
+        raise ValueError("invalid library dictionary type: " + ty)
+    # Boundary keys are scalar, so their canonical spelling contains no commas.
+    split = ty.find(", ")
+    key = ty[5:split]
+    if split < 0 or key not in ("str", "bool", "i32", "i64"):
+        raise ValueError("library dictionary keys must be str, bool, i32 or i64; got " + ty)
+    value = ty[split + 2:-1]
+    library_type(value)
+    return [key, value]
+
+
+def library_dicts(exports: list[LibraryExport], hosts: list[LibraryExport]) -> list[str]:
+    types: list[str] = []
+    for ty in library_boundary_types(exports, hosts):
+        if ty.startswith("dict["): types.append(ty)
+    return types
+
+
+def library_dict_operations() -> list[str]:
+    return ["get", "contains", "set", "delete", "clear", "copy", "keys_at", "values_at"]
+
+
+def library_dict_code(dicts: list[str]) -> str:
+    lines: list[str] = []
+    for i in range(len(dicts)):
+        types = library_dict_types(dicts[i])
+        heap = "$" + library_mangle(dicts[i])
+        param = " (param $dict (ref " + heap + "))"
+        d = "(local.get $dict)"
+        prefix = '__snek_dict_'
+        lines.append('(func (export "' + prefix + 'len_' + str(i) + '")' + param + ' (result i32) (struct.get ' + heap + ' $len ' + d + '))')
+        lines.append('(func (export "' + prefix + 'next_' + str(i) + '")' + param + ' (param $i i32) (result i32) (block $done (loop $scan (br_if $done (i32.ge_u (local.get $i) (struct.get ' + heap + ' $used ' + d + '))) (if (i32.eqz (ref.is_null (array.get ' + heap + '.entries (struct.get ' + heap + ' $entries ' + d + ') (local.get $i)))) (then (return (local.get $i)))) (local.set $i (i32.add (local.get $i) (i32.const 1))) (br $scan))) (i32.const -1))')
+        for op in library_dict_operations():
+            head = '(func (export "' + prefix + op + '_' + str(i) + '")' + param
+            args = d
+            result = types[1] if op in ("get", "values_at") else types[0] if op == "keys_at" else "bool" if op == "contains" else dicts[i] if op == "copy" else "None"
+            if op in ("keys_at", "values_at"):
+                head += " (param $index i32)"
+                args += " (local.get $index)"
+            elif op not in ("clear", "copy"):
+                count = 2 if op == "set" else 1
+                for p in range(count):
+                    name = "$p" + str(p)
+                    ty = types[p]
+                    head += " (param " + name + " " + library_type(ty) + ")"
+                    value = "(local.get " + name + ")"
+                    if ty == "str":
+                        head += " (param " + name + "n i32)"
+                        value = "(call $__snek_read " + value + " (local.get " + name + "n))"
+                    args += " " + value
+            if result != "None": head += " (result " + library_type(result) + ")"
+            body = "(call " + heap + "." + op + " " + args + ")"
+            if result == "str": body = "(call $__snek_write " + body + ")"
+            lines.append(head + " " + body + ")")
+    return "\n".join(lines)
 
 
 def library_list_heap(ty: str) -> str:
@@ -234,6 +300,9 @@ def library_list_code(lists: list[str]) -> str:
 def library_ts(ty: str) -> str:
     if ty.startswith("class:"): return "SnekObject<" + json_string(library_class_label(library_class_name(ty))) + ">" + (" | null" if ty.endswith(" | None") else "")
     if ty.startswith("list["): return "SnekList<" + library_ts(library_list_element(ty)) + ">"
+    if ty.startswith("dict["):
+        types = library_dict_types(ty)
+        return "SnekDict<" + library_ts(types[0]) + ", " + library_ts(types[1]) + ">"
     if ty.startswith("Coroutine["): return "PromiseLike<" + library_ts(library_callback_result(ty)) + ">"
     if ty.startswith("Callable["):
         types = library_callback_types(ty)
@@ -252,6 +321,7 @@ def library_ts(ty: str) -> str:
 def library_nullable(ty: str) -> str:
     if ty.startswith("class:"): return "(ref null $" + library_class_name(ty) + ")"
     if ty.startswith("list["): return "(ref null " + library_list_heap(ty) + ")"
+    if ty.startswith("dict["): return "(ref null $" + library_mangle(ty) + ")"
     if ty == "HostObject": return "(ref null extern)"
     if ty.startswith("Callable["): return "(ref null " + library_callback_heap(ty) + ")"
     return library_type(ty)
@@ -289,7 +359,7 @@ def library_sync_export(item: LibraryExport, head: str, args: list[str]) -> str:
     if item.ret == "str": call = "(call $__snek_write " + call + ")"
     if result != "": call = "(local.set $result " + call + ")"
     value = "(local.get $result)" if result != "" else ""
-    if item.ret == "HostObject" or item.ret.startswith("Callable[") or item.ret.startswith("list["): value = "(ref.as_non_null " + value + ")"
+    if item.ret == "HostObject" or item.ret.startswith("Callable[") or item.ret.startswith("list[") or item.ret.startswith("dict["): value = "(ref.as_non_null " + value + ")"
     if item.ret.startswith("class:") and not item.ret.endswith(" | None"): value = "(ref.as_non_null " + value + ")"
     return head + " (call $rt.uncaught (block $failed (result (ref $BaseException)) (try_table (catch $snek.exc $failed) " + call + ") (call $rt.flush) (return " + value + "))) (unreachable))"
 
@@ -406,7 +476,7 @@ def library_async_host(item: LibraryExport, index: i32) -> str:
     B = item.heap
     F = "$__snek_host_frame_" + str(index)
     result_type = "(ref null $str)" if item.ret == "str" else library_type(item.ret) if item.ret != "None" else ""
-    if item.ret == "HostObject" or item.ret.startswith("Callable[") or item.ret.startswith("list["): result_type = library_nullable(item.ret)
+    if item.ret == "HostObject" or item.ret.startswith("Callable[") or item.ret.startswith("list[") or item.ret.startswith("dict["): result_type = library_nullable(item.ret)
     if item.ret.startswith("class:"): result_type = library_nullable(item.ret)
     elem = Node("Type").put("none", Node("scalar", "true" if item.ret == "None" else "false")).put("storage", string(result_type))
     fields = machine_fields_wat(Node("Machine").put("heap", string(B)).put("elem", elem))
@@ -438,6 +508,7 @@ def library_async_host(item: LibraryExport, index: i32) -> str:
     if item.ret in ("HostObject", "HostObject | None"): default = " (ref.null extern)"
     if item.ret.startswith("Callable["): default = " (ref.null " + library_callback_heap(item.ret) + ")"
     if item.ret.startswith("list["): default = " (ref.null " + library_list_heap(item.ret) + ")"
+    if item.ret.startswith("dict["): default = " (ref.null $" + library_mangle(item.ret) + ")"
     if item.ret.startswith("class:"): default = " (ref.null $" + library_class_name(item.ret) + ")"
     finish = "(struct.set " + B + " $pc (local.get $a) (i32.const -1)) (struct.set " + B + " $busy (local.get $a) (i32.const 0)) " + clear
     take = "(call $__snek_result_" + str(index) + " (local.get $request))"
@@ -482,7 +553,7 @@ def library_async_export(item: LibraryExport, head: str, args: list[str]) -> str
         result = " (result " + library_type(item.ret) + ")"
         body = "(struct.get " + B + " $value " + value + ")"
         if item.ret == "str": body = "(call $__snek_write (ref.as_non_null " + body + "))"
-        elif item.ret == "HostObject" or item.ret.startswith("Callable[") or item.ret.startswith("list["): body = "(ref.as_non_null " + body + ")"
+        elif item.ret == "HostObject" or item.ret.startswith("Callable[") or item.ret.startswith("list[") or item.ret.startswith("dict["): body = "(ref.as_non_null " + body + ")"
         elif item.ret.startswith("class:") and not item.ret.endswith(" | None"): body = "(ref.as_non_null " + body + ")"
     lines.append('(func (export "__snek_result_' + item.name + '")' + parameter + result + " " + body + ")")
     return "\n".join(lines)
@@ -493,9 +564,10 @@ def library_code(exports: list[LibraryExport], hosts: list[LibraryExport], class
         raise ValueError("--library requires at least one --export FUNCTION")
     callbacks = library_callbacks(exports, hosts)
     lists = library_lists(exports, hosts)
+    dicts = library_dicts(exports, hosts)
     objects = library_class_types(exports, hosts)
     class_declarations = library_class_declarations(objects, classes)
-    lines: list[str] = [emit_library_runtime(), library_callback_code(callbacks, len(hosts)), library_list_code(lists), library_class_code(objects)]
+    lines: list[str] = [emit_library_runtime(), library_callback_code(callbacks, len(hosts)), library_list_code(lists), library_dict_code(dicts), library_class_code(objects)]
     signatures: list[str] = []
     declarations: list[str] = []
     seen: list[str] = []
@@ -555,14 +627,20 @@ def library_code(exports: list[LibraryExport], hosts: list[LibraryExport], class
     list_signatures: list[str] = []
     for ty in lists: list_signatures.append("[" + json_string(ty) + "," + json_string(library_list_element(ty)) + "]")
     class_signatures: list[str] = []
+    dict_signatures: list[str] = []
+    for ty in dicts:
+        types = library_dict_types(ty)
+        dict_signatures.append("[" + json_string(ty) + "," + json_string(types[0]) + "," + json_string(types[1]) + "]")
     for ty in objects: class_signatures.append("[" + json_string(ty) + "," + json_string(library_class_label(library_class_name(ty))) + "," + ("true" if ty.endswith(" | None") else "false") + "]")
     js = "// Generated by Snek. ES module; do not edit.\nconst signatures = [" + ",".join(signatures) + "];\nconst hostSignatures = [" + ",".join(host_signatures) + "];\nconst callbackSignatures = [" + ",".join(callback_signatures) + "];\nconst listSignatures = [" + ",".join(list_signatures) + "];\nconst classSignatures = [" + ",".join(class_signatures) + "];\n" + emit_library_javascript()
+    js = "const dictSignatures = [" + ",".join(dict_signatures) + "];\n" + js
     dts = "// Generated by Snek.\nexport interface SnekLibrary {\n" + "\n".join(declarations) + "\n}\n"
     dts += "export interface SnekImports {\n" + "\n".join(host_declarations) + "\n}\n"
     dts += "export interface LibraryOptions { stdout?: (text: string) => void; imports" + ("" if len(hosts) > 0 else "?") + ": SnekImports; }\n"
     dts += "export class SnekError extends Error {}\n"
     dts += class_declarations
     dts += "export interface SnekList<T> { readonly length: number; get(index: number): T; set: (index: number, value: T) => void; append: (value: T) => void; pop(): T; toArray(): T[]; }\n"
+    dts += "export interface SnekDict<K, V> { readonly size: number; get: (key: K) => V | undefined; has: (key: K) => boolean; set: (key: K, value: V) => void; delete: (key: K) => boolean; clear(): void; entries(): [K, V][]; }\n"
     dts += "export interface SnekCallOptions { signal?: AbortSignal; }\nexport class SnekCancelledError extends Error { constructor(reason?: unknown); }\n"
     dts += "export class SnekCompatibilityError extends Error {}\nexport class SnekLoadError extends Error {}\n"
     dts += "export function assertSupported(): void;\n"

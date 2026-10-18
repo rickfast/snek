@@ -114,10 +114,23 @@ def library_type_name(t: Type) -> str:
     if isinstance(inner, ClassT):
         return "class:" + inner.info.name + (" | None" if isinstance(t, OptionalT) else "")
     if isinstance(t, ListT): return "list[" + library_type_name(t.elem) + "]"
+    if isinstance(t, DictT): return "dict[" + library_type_name(t.key) + ", " + library_type_name(t.value) + "]"
     if isinstance(t, CoroutineT): return "Coroutine[None, None, " + library_type_name(t.elem) + "]"
     if isinstance(t, CallableT):
         return "Callable[[" + ", ".join(library_type_name(p) for p in t.params) + "], " + library_type_name(t.ret) + "]"
     return str(t)
+
+
+def prepare_library_collections(emitter, t: Type) -> None:
+    from bootstrap.library import library_dict_operations
+    if isinstance(t, DictT):
+        for op in library_dict_operations(): emitter.collection_op(t, op)
+        prepare_library_collections(emitter, t.value)
+    elif isinstance(t, (ListT, CoroutineT)):
+        prepare_library_collections(emitter, t.elem)
+    elif isinstance(t, CallableT):
+        for param in t.params: prepare_library_collections(emitter, param)
+        prepare_library_collections(emitter, t.ret)
 
 
 def mangle(t: Type) -> str:
@@ -1475,7 +1488,7 @@ def emit_module(module: ir.Module, component: bool = False, *, graph_factory=Non
         from .machine_bridge import WasmMachineBackend
         machine_backend = WasmMachineBackend(Path(os.environ["SNEK_MACHINE_EMITTER"]))
     selected = []
-    from bootstrap.library import LibraryExport, LibraryClass, library_code, library_target, library_host_imports, library_host_wrapper, library_callbacks, library_callback_imports, library_callback_async, library_lists
+    from bootstrap.library import LibraryExport, LibraryClass, library_code, library_target, library_host_imports, library_host_wrapper, library_callbacks, library_callback_imports, library_callback_async, library_lists, library_dicts
     hosts = [LibraryExport(f.host, f.name, [library_type_name(t) for _, t in f.params],
                           library_type_name(f.ret.elem) if isinstance(f.ret, CoroutineT) else library_type_name(f.ret),
                           "$" + mangle(f.ret) if isinstance(f.ret, CoroutineT) else "")
@@ -1493,10 +1506,16 @@ def emit_module(module: ir.Module, component: bool = False, *, graph_factory=Non
             selected.append(LibraryExport(name, function.name, [library_type_name(t) for _, t in function.params],
                                           library_type_name(function.ret.elem) if isinstance(function.ret, CoroutineT) else library_type_name(function.ret),
                                           "$" + mangle(function.ret) if isinstance(function.ret, CoroutineT) else ""))
-        if any("str" in item.params for item in selected) or any(item.ret == "str" or item.heap for item in hosts) or library_callbacks(selected, hosts) or library_lists(selected, hosts):
+        if any("str" in item.params for item in selected) or any(item.ret == "str" or item.heap for item in hosts) or library_callbacks(selected, hosts) or library_lists(selected, hosts) or library_dicts(selected, hosts):
             # Do not mutate the checked IR: command emission can reuse it.
             module = replace(module, unicode=replace(module.unicode, dynamic=True))
     emitter = Emitter(module, component=component, graph_factory=graph_factory, machine_backend=machine_backend)
+    if exports:
+        targets = {item.target for item in selected + hosts}
+        for function in module.funcs:
+            if function.name in targets:
+                for _, ty in function.params: prepare_library_collections(emitter, ty)
+                prepare_library_collections(emitter, function.ret)
     wat = emitter.emit()
     if emitter.host_objects and not exports:
         raise ValueError("HostObject requires a --library build")

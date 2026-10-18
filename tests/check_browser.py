@@ -22,6 +22,7 @@ from check_library import LIST_CALLBACK_SOURCE, LIST_CALLBACK_EXPORTS
 from check_library import CLASS_VALUE_SOURCE, CLASS_VALUE_EXPORTS
 from check_library import CALLBACK_LIST_SOURCE, CALLBACK_LIST_EXPORTS
 from check_library import HIGHER_CALLBACK_SOURCE, HIGHER_CALLBACK_EXPORTS
+from check_library import DICT_SOURCE, DICT_EXPORTS
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -89,6 +90,10 @@ class BrowserTests(unittest.TestCase):
         for name, optimize in (("higher-callbacks", False), ("higher-callbacks-optimized", True)):
             driver.build(source, root / (name + ".wasm"), optimize=optimize,
                          compiler=compiler, library=True, exports=HIGHER_CALLBACK_EXPORTS)
+        source.write_text(DICT_SOURCE)
+        for name, optimize in (("dicts", False), ("dicts-optimized", True)):
+            driver.build(source, root / (name + ".wasm"), optimize=optimize,
+                         compiler=compiler, library=True, exports=DICT_EXPORTS)
         source.write_text(CLASS_VALUE_SOURCE)
         for name, optimize in (("classes", False), ("classes-optimized", True)):
             driver.build(source, root / (name + ".wasm"), optimize=optimize,
@@ -123,6 +128,35 @@ class BrowserTests(unittest.TestCase):
         self.page = context.new_page()
         self.page.set_default_timeout(15000)
         self.page.goto(self.url)
+
+    def test_dictionary_handles(self):
+        for target in ("dicts", "dicts-optimized"):
+            with self.subTest(target=target):
+                result = self.page.evaluate('''async target => {
+                  const {instantiate, SnekError} = await import(`/${target}.js`);
+                  const options = {imports: {edit: x => {x.set("host", "edited"); return x;}, later: async x => x}};
+                  const lib = await instantiate(`/${target}.wasm`, options), foreign = await instantiate(`/${target}.wasm`, options);
+                  const words = lib.words(); words.delete("first"); words.set("first", "last");
+                  const ordered = words.entries();
+                  const same = lib.echo(words) === words && lib.from_host(words) === words && await lib.delayed(words) === words &&
+                    await lib.apply_async(async x => x, words) === words;
+                  const nested = lib.nested(); const alias = nested.get("a") === nested.get("b");
+                  words.set("unicode", "straße 🐍");
+                  const text = lib.upper(words, "unicode");
+                  const fn = lib.functions("callback:").get("fn");
+                  let invalid = false, wrongInstance = false;
+                  try {await lib.apply_async(async () => new Map(), words);} catch (e) {invalid = e instanceof SnekError;}
+                  try {lib.echo(foreign.words());} catch (e) {wrongInstance = e instanceof TypeError;}
+                  const object = {}, objects = lib.objects(object);
+                  Object.defineProperty(object, "then", {get() {objects.clear(); return undefined;}});
+                  const snapshot = objects.entries();
+                  return {ordered, same, alias, text, callback: fn("works"), invalid, wrongInstance,
+                    snapshot: snapshot.length === 2 && snapshot[0][1] === object && snapshot[1][1] === null,
+                    cleared: objects.size, missing: words.get("absent") === undefined};
+                }''', target)
+                self.assertEqual(result, {"ordered": [["second", "two"], ["first", "last"]], "same": True,
+                    "alias": True, "text": "STRASSE 🐍", "callback": "callback:works", "invalid": True,
+                    "wrongInstance": True, "snapshot": True, "cleared": 0, "missing": True})
 
     def test_higher_order_callbacks(self):
         for target in ("higher-callbacks", "higher-callbacks-optimized"):

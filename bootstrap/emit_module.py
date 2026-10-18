@@ -11,19 +11,26 @@ from bootstrap.emit_runtime import emit_collection_helpers, emit_keyed_builtin, 
 from bootstrap.emit_host import emit_host_helpers, emit_host_core_imports, emit_io_helpers, emit_component_imports
 from bootstrap.emit_suspension import OwnedMachine, owned_has_await, owned_machine_types, owned_machine_helpers, owned_runtime_machines, owned_runtime_machine
 from bootstrap.tasks import wait_all_code
-from bootstrap.library import LibraryExport, LibraryClass, library_target, library_code, library_host_imports, library_host_wrapper, library_callbacks, library_callback_imports, library_callback_async, library_lists
+from bootstrap.library import LibraryExport, LibraryClass, library_target, library_code, library_host_imports, library_host_wrapper, library_callbacks, library_callback_imports, library_callback_async, library_lists, library_dicts, library_dict_operations
 
 
 def owned_library_type(ty: DeclType) -> str:
     inner = inner_type(ty)
     if inner.kind == "class": return "class:" + inner.name + (" | None" if ty.kind == "optional" else "")
     if ty.kind == "list": return "list[" + owned_library_type(ty.args[0]) + "]"
+    if ty.kind == "dict": return "dict[" + owned_library_type(ty.args[0]) + ", " + owned_library_type(ty.args[1]) + "]"
     if ty.kind == "Coroutine": return "Coroutine[None, None, " + owned_library_type(ty.args[0]) + "]"
     if ty.kind == "Callable":
         params: list[str] = []
         for arg in ty.args[:-1]: params.append(owned_library_type(arg))
         return "Callable[[" + ", ".join(params) + "], " + owned_library_type(ty.args[-1]) + "]"
     return ty.display()
+
+
+def owned_library_collections(e: SourceEmitter, ty: DeclType) -> None:
+    if ty.kind == "dict":
+        for op in library_dict_operations(): e.operation(ty, op)
+    for arg in ty.args: owned_library_collections(e, arg)
 
 
 def emit_closures(e: SourceEmitter) -> str:
@@ -152,7 +159,13 @@ def emit_source_module(checked: BodyChecker, prelude_source: str, component: boo
         if cls.builtin:
             funcs.append(f"(func ${name}.__new__ (param $__msg (ref null $str)) (result (ref ${name})) (struct.new ${name} (global.get ${name}.vt.inst) (local.get $__msg) (ref.null $str)))")
     main_async = False
+    targets: list[str] = []
+    if exports is not None:
+        for name in exports: targets.append(library_target(name, entry) if entry != "" else name)
     for f in checked.functions:
+        if f.sig.host != "" or f.name in targets:
+            for param in f.sig.params: owned_library_collections(e, param.ty)
+            owned_library_collections(e, f.sig.ret)
         if f.sig.host != "":
             if exports is None or len(exports) == 0 or component:
                 raise ValueError("host imports require a --library build")
@@ -249,7 +262,7 @@ def emit_source_module(checked: BodyChecker, prelude_source: str, component: boo
         library = library_code(selected, host_functions, class_types)
         callbacks = library_callbacks(selected, host_functions)
         imports += "\n" + library_callback_imports(callbacks, len(host_functions))
-        if len(callbacks) > 0 or len(library_lists(selected, host_functions)) > 0: unicode_dynamic = True
+        if len(callbacks) > 0 or len(library_lists(selected, host_functions)) > 0 or len(library_dicts(selected, host_functions)) > 0: unicode_dynamic = True
         start = start.replace('(export "_start")', '(export "__snek_init")')
     # Host strings are open-world input, even when every source literal is ASCII.
     imports += "\n" + library_host_imports(host_functions, e.types.host_objects, library_callback_async(callbacks))

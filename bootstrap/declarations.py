@@ -182,6 +182,8 @@ class DeclType:
         if self.kind == "class" or (self.kind == "optional" and self.args[0].kind == "class"): return True
         if self.kind == "list":
             return self.args[0].kind != "None" and self.args[0].host_boundary()
+        if self.kind == "dict":
+            return self.args[0].kind in ("str", "bool", "i32", "i64") and self.args[1].kind != "None" and self.args[1].host_boundary()
         if self.kind == "Callable":
             for i in range(len(self.args)):
                 arg = self.args[i]

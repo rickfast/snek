@@ -93,6 +93,18 @@ without executing user code, so hosts may register callbacks during a Snek call.
 Invoking a Snek callback still requires leaving the active synchronous step.
 Optional lists and optional callbacks are not yet part of this boundary.
 
+Library dictionaries use `SnekDict<K, V>` handles with invariant keys and values.
+Boundary keys are `str`, `bool`, `i32`, or `i64`; values recursively support the
+other boundary types. Private wrappers reuse the ordinary ordered-dictionary
+helpers. The emitters register those helpers only for dictionary types reachable
+through exported or host signatures, including nested callback signatures.
+`get`/`delete` check membership first and return `undefined`/`false` when absent.
+`entries()` copies the dictionary before lifting values, so a JavaScript getter
+that mutates the original cannot corrupt the snapshot. Snapshot values are
+shallow. Dictionary operations use the same borrowed scratch-frame mechanism
+as lists, and Snek's iterator invalidation checks still apply to host mutations.
+The loader requires bridge ABI 6 and verifies every generated dictionary helper.
+
 Class boundaries use opaque `SnekObject` handles. A per-instance JavaScript
 private brand validates ownership; the private field strongly roots the WasmGC
 reference even after the public API is discarded. One weak identity map spans
