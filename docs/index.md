@@ -17,6 +17,7 @@ garbage-collected objects, and catchable exceptions. No Python interpreter in
 your compiled program.
 
 [Start building](learn/installation.md){ .md-button .md-button--primary }
+[Try it in your browser](learn/playground.md){ .md-button }
 [Read the language guide](language/index.md){ .md-button }
 </div>
 <img src="logo.png" alt="A blue snake and a yellow snake playing together in a wooden sandbox" width="640" height="512">

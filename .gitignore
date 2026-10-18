@@ -21,4 +21,5 @@ bootstrap/build/
 native/target/
 dist/
 site/
+docs/assets/playground/generated/
 .venv-docs/

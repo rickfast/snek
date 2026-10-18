@@ -72,6 +72,9 @@ def check_links(directory):
         raise AssertionError("Missing client-side search index")
     if any((directory / name).exists() for name in ("tools", "overrides", "requirements.txt", "requirements.in")):
         raise AssertionError("Documentation build tooling leaked into the published site")
+    compiler = directory / "assets/playground/generated/compiler.wasm"
+    if not compiler.is_file() or compiler.read_bytes() != (ROOT / "bootstrap/build/compiler.wasm").read_bytes():
+        raise AssertionError("Missing or stale playground compiler; run docs/tools/prepare_playground.py before building")
     print(f"{len(pages)} HTML pages; {checked} local links/assets/anchors verified")
 
 

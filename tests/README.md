@@ -15,6 +15,15 @@ Both compilers, raw/optimized output, subdirectory and relative deployment bases
 async fetch, Unicode, bigint and bundled workers run in the selected browser.
 The browser CI matrix runs this suite in Chromium, Firefox and WebKit as well.
 
+The `playground` suite needs the verified compiler bootstrap, documentation
+dependencies and a Playwright engine. It stages the compiler, builds a temporary
+documentation site under `/snek/`, and executes the real editor and worker.
+Tests cover every preset, stdin, diagnostics, output/source limits, Stop and
+timeout recovery, Wasm download, failed compiler fetch, mobile layout and keyboard
+execution. It also checks that no source is uploaded and stale compiler assets
+are rejected. All three browser engines run this suite in CI; Chromium gates
+the Pages deployment too.
+
 `check_library.py` executes generated JavaScript bindings in Node against the
 reference and self-hosted compilers, raw and optimized (the `reference` and
 `selfhost` suites). The `native` suite also runs it against the standalone CLI.
@@ -43,6 +52,7 @@ python tests/run_suites.py reference bootstrap
 | --- | --- | --- |
 | `browser` | Both compilers' raw/optimized libraries, host interop and workers | Playwright engine, Binaryen, full compiler proof |
 | `bundler` | Vite dev/production, TypeScript, asset bases and worker chunks | Browser prerequisites, Node 25.9, `npm ci --prefix examples/vite` |
+| `playground` | Browser-based compiler, execution, limits and recovery | Playwright, docs dependencies, verified compiler bootstrap |
 | `fast` | Pure compiler/encoding invariants, benchmark/tooling regressions, suite policy | Node 24+, Python Wasmtime, wasm-tools oracle |
 | `tooling` | Portable benchmark, profile, lazy runtime and runner regressions | Python |
 | `reference` | Full raw/O3 example and negative corpus, byte I/O, formatting, string fusion | Runtime, Binaryen, Python Wasmtime |

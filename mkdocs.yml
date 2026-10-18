@@ -79,6 +79,7 @@ nav:
   - Home: index.md
   - Learn:
       - Start here: learn/index.md
+      - Try Snek: learn/playground.md
       - Installation: learn/installation.md
       - Your first program: learn/first-program.md
       - A small word counter: learn/word-counter.md

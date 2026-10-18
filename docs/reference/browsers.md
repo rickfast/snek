@@ -162,10 +162,10 @@ SNEK_BROWSER=chromium python tests/run_suites.py bundler
 
 ## Remaining browser work
 
-First-class browser support remains an active roadmap item:
+The first-class browser milestone is complete:
 
 - Implemented: capability checks, loading diagnostics, engine CI, worker example,
   typed host imports with a DOM example, Promise-based async interop with a fetch example,
-  and tested Vite/TypeScript bundling.
-- Next: an interactive documentation playground.
+  tested Vite/TypeScript bundling, and an [interactive documentation playground](../learn/playground.md)
+  that compiles and runs programs locally in a worker.
 - Later: opaque object handles, callbacks crossing the boundary, and task concurrency.

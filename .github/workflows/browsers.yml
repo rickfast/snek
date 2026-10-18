@@ -37,6 +37,7 @@ jobs:
       - name: Install pinned browser and optimizer dependencies
         run: |
           python -m pip install -r tests/requirements-browser.txt
+          python -m pip install --require-hashes -r docs/requirements.txt
           python -m playwright install --with-deps "$SNEK_BROWSER"
           npm install --prefix "$RUNNER_TEMP/snek-tools" --no-audit --no-fund binaryen@132.0.0
           echo "SNEK_WASM_OPT=$RUNNER_TEMP/snek-tools/node_modules/.bin/wasm-opt" >> "$GITHUB_ENV"
@@ -45,4 +46,4 @@ jobs:
       - name: Install locked bundler example dependencies
         run: npm ci --prefix examples/vite --no-audit --no-fund
       - name: Both compilers, raw and optimized, main thread and worker
-        run: python tests/run_suites.py browser bundler
+        run: python tests/run_suites.py browser bundler playground

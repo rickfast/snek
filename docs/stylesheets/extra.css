@@ -45,3 +45,13 @@
   .snek-paths { grid-template-columns: 1fr; gap: .6rem; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; } }
+.snek-playground { border: 1px solid var(--md-default-fg-color--lightest); border-radius: .4rem; padding: 1rem; }
+.snek-playground label { display: block; font-size: .72rem; font-weight: 650; margin-bottom: .35rem; }
+.snek-playground textarea { display: block; width: 100%; resize: vertical; padding: .75rem; background: var(--md-code-bg-color); color: var(--md-code-fg-color); font: .72rem/1.55 var(--md-code-font); border: 1px solid var(--md-default-fg-color--lightest); border-radius: .2rem; tab-size: 4; }
+.snek-playground textarea:focus-visible, .snek-playground select:focus-visible, .snek-playground button:focus-visible { outline: 2px solid var(--md-accent-fg-color); outline-offset: 2px; }
+.snek-playground-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin: .75rem 0; }
+.snek-playground-toolbar select { max-width: 100%; padding: .5rem; color: var(--md-default-fg-color); background: var(--md-default-bg-color); border: 1px solid var(--md-default-fg-color--light); border-radius: .2rem; }
+.snek-playground .md-button { cursor: pointer; margin: 0; }
+.snek-playground button:disabled { opacity: .5; cursor: default; }
+.snek-playground #snek-output { min-height: 6rem; max-height: 24rem; overflow: auto; padding: .75rem; background: var(--md-code-bg-color); white-space: pre-wrap; overflow-wrap: anywhere; font: .72rem/1.55 var(--md-code-font); }
+#snek-editor-help, #snek-details { font-size: .65rem; color: var(--md-default-fg-color--light); }

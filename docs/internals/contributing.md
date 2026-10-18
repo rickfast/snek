@@ -26,6 +26,8 @@ python -m venv .venv-docs
 source .venv-docs/bin/activate
 # Windows PowerShell instead: .venv-docs\Scripts\Activate.ps1
 python -m pip install --require-hashes -r docs/requirements.txt
+python bootstrap/bootstrap_compiler.py
+python docs/tools/prepare_playground.py
 python -m mkdocs serve
 ```
 
@@ -37,8 +39,11 @@ python docs/tools/check.py
 ```
 
 The docs dependencies are separate from Snek's development/runtime dependencies.
-The static output is in ignored `site/`; no compiler bootstrap or Rust build is
-needed to build documentation. Fonts, styling, and search run locally in the
+The static output is in ignored `site/`. The playground requires a verified compiler
+bootstrap (Node 24+ or a supported Wasmtime runtime); no Rust build is needed.
+Re-run the bootstrap and playground preparation after compiler changes. Preparation
+checks source and binary hashes against the fixed-point proof before copying assets.
+Fonts, styling, and search run locally in the
 published site, without analytics or a search service.
 
 ## Where to edit
@@ -52,8 +57,10 @@ text. Renaming an included heading without updating its selector fails the build
 Tutorial code lives in `docs/examples/*.snek`. The `<!-- example: hello.snek -->`
 directive includes that exact file in a page. The checker compiles each tutorial
 through both reference-parser choices, executes it under CPython, and validates
-the generated site's internal links, anchors, and local assets. It does not claim
-to run the full compiler regression suite.
+the generated site's internal links, anchors, and local assets. The `playground`
+suite runs the real generated site in Playwright, including its self-hosted compiler,
+termination, diagnostics and download. It does not claim to run the full compiler
+regression suite.
 
 ## Deployment
 

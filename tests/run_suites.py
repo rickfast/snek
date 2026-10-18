@@ -35,6 +35,7 @@ CHECKS = {
     )
 }
 CHECKS.update({
+    "playground": Check("check_playground.py", ("browser", "docs", "compiler")),
     "bundler": Check("check_bundler.py", ("browser", "bundler", "node", "optimizer")),
     "selfhost-bundler": Check("check_bundler.py", ("browser", "bundler", "node", "optimizer", "runtime", "compiler"), "snek"),
     "browser": Check("check_browser.py", ("browser", "optimizer")),
@@ -75,6 +76,7 @@ CHECKS.update({
 })
 
 SUITES = {
+    "playground": ("playground",),
     "bundler": ("bundler", "selfhost-bundler"),
     "browser": ("browser", "selfhost-browser"),
     "fast": ("suites", "closures", "keyed_builtins", "lazy_runtime", "wasm", "benchmarks", "native_bench", "compiler_profile", "tooling", "linker", "emission_pipeline", "cli", "runtime_abi", "body_context"),
@@ -142,6 +144,9 @@ def prerequisites(requirements):
             for package in ("vite", "typescript"):
                 if not (ROOT / "examples/vite/node_modules" / package / "package.json").is_file():
                     raise RuntimeError("run npm ci --prefix examples/vite first")
+        elif requirement == "docs":
+            if importlib.util.find_spec("mkdocs") is None:
+                raise RuntimeError("install docs/requirements.txt first")
         elif requirement == "optimizer":
             try:
                 optimizer = driver.find_wasm_opt()
