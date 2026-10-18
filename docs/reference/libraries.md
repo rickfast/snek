@@ -348,6 +348,7 @@ reject `gather`, just as they reject `wait_all`.
 | `str` | `string`, copied as UTF-8 |
 | `HostObject` | `object`, opaque GC-managed JavaScript reference |
 | `HostObject | None` | `object | null` |
+| Snek class `C` / `C | None` | Opaque `SnekObject<"module.C">` / handle or `null` |
 | `list[T]` with supported elements | Live, GC-managed `SnekList<T>` handle |
 | `Callable[[T, ...], R]` | Typed synchronous function, or async function when `R` is a `Coroutine` |
 | `None` return | `void` / `undefined` |
@@ -359,8 +360,8 @@ Float infinities, NaN and signed zero follow Wasm arithmetic. JavaScript strings
 must contain valid Unicode scalar values: lone UTF-16 surrogates are rejected.
 
 Strings are copied into the GC heap before user code runs and copied back for
-JavaScript results. Supported Snek lists cross as live handles, while other
-collections and class instances stay internal. `HostObject` passes a JavaScript-owned
+JavaScript results. Supported Snek lists cross as live handles and Snek class
+instances cross as opaque handles; other collections stay internal. `HostObject` passes a JavaScript-owned
 external reference without copying it, and `Callable` exposes a JavaScript
 function backed by a GC-managed closure.
 Temporary linear memory is reused after each call, so callers never free values;
@@ -415,7 +416,7 @@ provide transaction isolation.
 Create lists in Snek, then pass their handles back. JavaScript arrays, lookalike
 objects, handles for different element types, and handles from another instance
 are rejected. Handles are not transferable between workers; send `toArray()` data
-instead. Dictionary/tuple/class handles, callback elements and
+instead. Dictionary/tuple handles, class or callback list elements, and
 optional lists are not supported yet. Supported lists can also be parameters and
 results of [typed callbacks](#typed-callbacks).
 
@@ -445,6 +446,57 @@ Nested handles also work in host callbacks, async returns, and `gather()` result
 There is no automatic recursive array conversion: choose explicitly which levels
 to copy, as above. Nullability is currently supported only for `HostObject`
 elements, not for child lists themselves.
+
+## Snek-owned class handles
+
+Snek-created class instances can cross direct export and `@host` boundaries,
+including async parameters/results and nullable references:
+
+```python
+from snek import i32
+
+class Counter:
+    value: i32
+
+    def __init__(self, value: i32) -> None:
+        self.value = value
+
+def make_counter(value: i32) -> Counter:
+    return Counter(value)
+
+def increment(counter: Counter) -> i32:
+    counter.value += 1
+    return counter.value
+```
+
+```javascript
+const counter = lib.make_counter(10);
+console.log(lib.increment(counter)); // 11
+```
+
+Export both functions when building. JavaScript receives a frozen opaque handle,
+not a copy of the object's fields. The handle keeps the GC object alive without
+`free()` or `dispose()`. Fields, methods and constructors are not exposed
+automatically: use explicitly exported functions to create or manipulate objects.
+
+Returning the same object preserves JavaScript identity, including through a
+base-class annotation. Derived objects satisfy base-class parameters, and Snek
+method dispatch still uses the actual class. Unrelated classes, lookalike JS
+objects and handles from another instance are rejected. `C | None` accepts `null`,
+not `undefined`. Async host results use the same validation rules; invalid resolved
+handles become catchable Snek `RuntimeError`s.
+
+Generated `SnekObject` types are nominal and preserve the inheritance hierarchy.
+Prefer inference, or `ReturnType<typeof lib.make_counter>`, when naming a handle
+type in application code. The explicit type uses its module-qualified class name,
+such as `SnekObject<"counters.Counter">` for a class in `counters.py`. TypeScript
+permits derived-to-base assignment, but not implicit downcasts or plain objects.
+Runtime instance ownership is checked even when TypeScript types match.
+
+Handles are not transferable to another worker. They can be stored by JavaScript
+host callbacks, but calling an export during an active synchronous step is still
+forbidden. Class types inside lists or `Callable` boundary signatures are not
+supported yet; those types remain usable internally in Snek.
 
 ## Opaque JavaScript objects
 
@@ -501,8 +553,8 @@ including collection membership/equality. Nullable values support `is None`
 narrowing. Representations such as `str(value)` and `list.index(value)` remain
 unsupported because an opaque object has no Snek representation.
 
-`HostObject` requires a library build. It does not export Snek classes or
-collections, provide a DOM API, make an object transferable to another worker,
+`HostObject` requires a library build. It is separate from Snek-owned class/list
+handles and does not provide a DOM API, make an object transferable to another worker,
 or permit synchronous re-entry. The Vite example passes a DOM
 element through its `identity` export and verifies that it is the same object.
 
@@ -649,8 +701,8 @@ functions appear on the returned, frozen API object.
 ## Current limits
 
 Exports must be entry-module functions with the boundary types above (or coroutines
-returning those types). Collections other than the supported list handles, Snek classes,
-other optional types, generators and raw coroutine objects cannot cross
+returning those types). Collections other than the supported list handles,
+optional types other than `HostObject`/class references, generators and raw coroutine objects cannot cross
 the boundary. Libraries can use these internally where supported by the language,
 but cannot perform async module initialization or use WASI services such as
 stdin, environment variables, clocks and randomness. Unsupported signatures and

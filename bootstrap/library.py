@@ -21,6 +21,63 @@ class LibraryExport:
         self.heap = heap
 
 
+class LibraryClass:
+    name: str
+    base: str
+
+    def __init__(self, name: str, base: str) -> None:
+        self.name = name
+        self.base = base
+
+
+def library_class_name(ty: str) -> str:
+    if not ty.startswith("class:"): return ""
+    return ty[6:-7] if ty.endswith(" | None") else ty[6:]
+
+
+def library_class_label(name: str) -> str:
+    return name[6:].replace("~", ".").replace(":", ".") if name.startswith("@user:") else name
+
+
+def library_class_types(exports: list[LibraryExport], hosts: list[LibraryExport]) -> list[str]:
+    types: list[str] = []
+    for item in exports + hosts:
+        for ty in item.params + [item.ret]:
+            if ty.startswith("class:") and ty not in types: types.append(ty)
+    return types
+
+
+def library_class_code(types: list[str]) -> str:
+    lines: list[str] = []
+    for i in range(len(types)):
+        name = library_class_name(types[i])
+        lines.append('(func (export "__snek_class_test_' + str(i) + '") (param $value (ref any)) (result i32) (ref.test (ref $' + name + ') (local.get $value)))')
+    return "\n".join(lines)
+
+
+def library_class_declarations(types: list[str], classes: list[LibraryClass]) -> str:
+    bases: dict[str, str] = {}
+    for cls in classes: bases[cls.name] = cls.base
+    names: list[str] = []
+    for ty in types:
+        name = library_class_name(ty)
+        while name != "" and name not in names:
+            if name not in bases: raise ValueError("unknown library class: " + name)
+            names.append(name)
+            name = bases[name]
+    lines: list[str] = []
+    for name in names:
+        parents: list[str] = []
+        base = bases[name]
+        while base != "":
+            parents.append(json_string(library_class_label(base)))
+            base = bases[base]
+        lines.append("  " + json_string(library_class_label(name)) + ": " + (" | ".join(parents) if len(parents) > 0 else "never") + ";")
+    return ("declare const snekClassType: unique symbol;\nexport interface SnekClassParents {\n" + "\n".join(lines) + "\n}\n"
+            + "interface SnekHandle<T> { readonly [snekClassType]: (type: T) => void; }\n"
+            + "export type SnekObject<T extends keyof SnekClassParents> = SnekHandle<T | SnekClassParents[T]>;\n")
+
+
 def library_target(name: str, entry: str) -> str:
     if len(name) == 0 or not (name[0].isalpha() or name[0] == "_"):
         raise ValueError("library export must be a function name: " + name)
@@ -84,6 +141,7 @@ def library_callback_heap(ty: str) -> str:
 
 
 def library_type(ty: str) -> str:
+    if ty.startswith("class:"): return "(ref " + ("null " if ty.endswith(" | None") else "") + "$" + library_class_name(ty) + ")"
     if ty.startswith("list["): return "(ref " + library_list_heap(ty) + ")"
     if ty.startswith("Callable["): return "(ref " + library_callback_heap(ty) + ")"
     if ty == "HostObject": return "(ref extern)"
@@ -91,7 +149,7 @@ def library_type(ty: str) -> str:
     if ty == "str": return "i32"
     if ty == "bool": return "i32"
     if ty in ("i32", "i64", "f32", "f64"): return ty
-    raise ValueError("library boundaries support only i32, i64, f32, f64, bool, str, HostObject, HostObject | None, supported list/Callable, and None returns; got " + ty)
+    raise ValueError("library boundaries support only i32, i64, f32, f64, bool, str, object handles, supported list/Callable, and None returns; got " + ty)
 
 
 def library_list_element(ty: str) -> str:
@@ -154,6 +212,7 @@ def library_list_code(lists: list[str]) -> str:
 
 
 def library_ts(ty: str) -> str:
+    if ty.startswith("class:"): return "SnekObject<" + json_string(library_class_label(library_class_name(ty))) + ">" + (" | null" if ty.endswith(" | None") else "")
     if ty.startswith("list["): return "SnekList<" + library_ts(library_list_element(ty)) + ">"
     if ty.startswith("Coroutine["): return "PromiseLike<" + library_ts(library_callback_result(ty)) + ">"
     if ty.startswith("Callable["):
@@ -171,6 +230,7 @@ def library_ts(ty: str) -> str:
 
 
 def library_nullable(ty: str) -> str:
+    if ty.startswith("class:"): return "(ref null $" + library_class_name(ty) + ")"
     if ty.startswith("list["): return "(ref null " + library_list_heap(ty) + ")"
     if ty == "HostObject": return "(ref null extern)"
     if ty.startswith("Callable["): return "(ref null " + library_callback_heap(ty) + ")"
@@ -213,6 +273,7 @@ def library_sync_export(item: LibraryExport, head: str, args: list[str]) -> str:
     if result != "": call = "(local.set $result " + call + ")"
     value = "(local.get $result)" if result != "" else ""
     if item.ret == "HostObject" or item.ret.startswith("Callable[") or item.ret.startswith("list["): value = "(ref.as_non_null " + value + ")"
+    if item.ret.startswith("class:") and not item.ret.endswith(" | None"): value = "(ref.as_non_null " + value + ")"
     return head + " (call $rt.uncaught (block $failed (result (ref $BaseException)) (try_table (catch $snek.exc $failed) " + call + ") (call $rt.flush) (return " + value + "))) (unreachable))"
 
 
@@ -329,6 +390,7 @@ def library_async_host(item: LibraryExport, index: i32) -> str:
     F = "$__snek_host_frame_" + str(index)
     result_type = "(ref null $str)" if item.ret == "str" else library_type(item.ret) if item.ret != "None" else ""
     if item.ret == "HostObject" or item.ret.startswith("Callable[") or item.ret.startswith("list["): result_type = library_nullable(item.ret)
+    if item.ret.startswith("class:"): result_type = library_nullable(item.ret)
     elem = Node("Type").put("none", Node("scalar", "true" if item.ret == "None" else "false")).put("storage", string(result_type))
     fields = machine_fields_wat(Node("Machine").put("heap", string(B)).put("elem", elem))
     params = ""
@@ -359,6 +421,7 @@ def library_async_host(item: LibraryExport, index: i32) -> str:
     if item.ret in ("HostObject", "HostObject | None"): default = " (ref.null extern)"
     if item.ret.startswith("Callable["): default = " (ref.null " + library_callback_heap(item.ret) + ")"
     if item.ret.startswith("list["): default = " (ref.null " + library_list_heap(item.ret) + ")"
+    if item.ret.startswith("class:"): default = " (ref.null $" + library_class_name(item.ret) + ")"
     finish = "(struct.set " + B + " $pc (local.get $a) (i32.const -1)) (struct.set " + B + " $busy (local.get $a) (i32.const 0)) " + clear
     take = "(call $__snek_result_" + str(index) + " (local.get $request))"
     if item.ret == "str":
@@ -403,16 +466,19 @@ def library_async_export(item: LibraryExport, head: str, args: list[str]) -> str
         body = "(struct.get " + B + " $value " + value + ")"
         if item.ret == "str": body = "(call $__snek_write (ref.as_non_null " + body + "))"
         elif item.ret == "HostObject" or item.ret.startswith("Callable[") or item.ret.startswith("list["): body = "(ref.as_non_null " + body + ")"
+        elif item.ret.startswith("class:") and not item.ret.endswith(" | None"): body = "(ref.as_non_null " + body + ")"
     lines.append('(func (export "__snek_result_' + item.name + '")' + parameter + result + " " + body + ")")
     return "\n".join(lines)
 
 
-def library_code(exports: list[LibraryExport], hosts: list[LibraryExport]) -> str:
+def library_code(exports: list[LibraryExport], hosts: list[LibraryExport], classes: list[LibraryClass]) -> str:
     if len(exports) == 0:
         raise ValueError("--library requires at least one --export FUNCTION")
     callbacks = library_callbacks(exports, hosts)
     lists = library_lists(exports, hosts)
-    lines: list[str] = [emit_library_runtime(), library_callback_code(callbacks, len(hosts)), library_list_code(lists)]
+    objects = library_class_types(exports, hosts)
+    class_declarations = library_class_declarations(objects, classes)
+    lines: list[str] = [emit_library_runtime(), library_callback_code(callbacks, len(hosts)), library_list_code(lists), library_class_code(objects)]
     signatures: list[str] = []
     declarations: list[str] = []
     seen: list[str] = []
@@ -471,11 +537,14 @@ def library_code(exports: list[LibraryExport], hosts: list[LibraryExport]) -> st
         callback_signatures.append("[" + json_string(ty) + ",[" + ",".join(args_json) + "]," + json_string(library_callback_result(types[-1])) + "," + ("true" if types[-1].startswith("Coroutine[") else "false") + "]")
     list_signatures: list[str] = []
     for ty in lists: list_signatures.append("[" + json_string(ty) + "," + json_string(library_list_element(ty)) + "]")
-    js = "// Generated by Snek. ES module; do not edit.\nconst signatures = [" + ",".join(signatures) + "];\nconst hostSignatures = [" + ",".join(host_signatures) + "];\nconst callbackSignatures = [" + ",".join(callback_signatures) + "];\nconst listSignatures = [" + ",".join(list_signatures) + "];\n" + emit_library_javascript()
+    class_signatures: list[str] = []
+    for ty in objects: class_signatures.append("[" + json_string(ty) + "," + json_string(library_class_label(library_class_name(ty))) + "," + ("true" if ty.endswith(" | None") else "false") + "]")
+    js = "// Generated by Snek. ES module; do not edit.\nconst signatures = [" + ",".join(signatures) + "];\nconst hostSignatures = [" + ",".join(host_signatures) + "];\nconst callbackSignatures = [" + ",".join(callback_signatures) + "];\nconst listSignatures = [" + ",".join(list_signatures) + "];\nconst classSignatures = [" + ",".join(class_signatures) + "];\n" + emit_library_javascript()
     dts = "// Generated by Snek.\nexport interface SnekLibrary {\n" + "\n".join(declarations) + "\n}\n"
     dts += "export interface SnekImports {\n" + "\n".join(host_declarations) + "\n}\n"
     dts += "export interface LibraryOptions { stdout?: (text: string) => void; imports" + ("" if len(hosts) > 0 else "?") + ": SnekImports; }\n"
     dts += "export class SnekError extends Error {}\n"
+    dts += class_declarations
     dts += "export interface SnekList<T> { readonly length: number; get(index: number): T; set: (index: number, value: T) => void; append: (value: T) => void; pop(): T; toArray(): T[]; }\n"
     dts += "export interface SnekCallOptions { signal?: AbortSignal; }\nexport class SnekCancelledError extends Error { constructor(reason?: unknown); }\n"
     dts += "export class SnekCompatibilityError extends Error {}\nexport class SnekLoadError extends Error {}\n"

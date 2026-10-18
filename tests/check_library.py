@@ -157,6 +157,76 @@ async def combine_async(fn: Callable[[list[list[str]], str], Coroutine[None, Non
 '''
 LIST_CALLBACK_EXPORTS = ["words", "rows", "make", "make_async", "apply", "apply_async", "roundtrip", "roundtrip_async", "factory", "visit", "combine", "combine_async"]
 
+CLASS_SOURCE = '''from snek import i32, host, checkpoint
+from typing import Callable
+class Counter:
+    value: i32
+    def __init__(self, value: i32) -> None:
+        self.value = value
+    def step(self) -> i32:
+        self.value += 1
+        return self.value
+class DoubleCounter(Counter):
+    def step(self) -> i32:
+        self.value += 2
+        return self.value
+class GrandCounter(DoubleCounter):
+    pass
+class Other:
+    value: i32
+    def __init__(self, value: i32) -> None:
+        self.value = value
+class Lookalike:
+    value: i32
+    def __init__(self, value: i32) -> None:
+        self.value = value
+@host("store")
+def store(value: Counter) -> Counter:
+    pass
+@host("optional")
+def optional(value: Counter | None) -> Counter | None:
+    pass
+@host("later")
+async def later(value: Counter) -> Counter:
+    pass
+def make(value: i32) -> Counter:
+    return Counter(value)
+def derived(value: i32) -> DoubleCounter:
+    return DoubleCounter(value)
+def grand(value: i32) -> GrandCounter:
+    return GrandCounter(value)
+def other(value: i32) -> Other:
+    return Other(value)
+def lookalike(value: i32) -> Lookalike:
+    return Lookalike(value)
+def read_other(value: Other) -> i32:
+    return value.value
+def echo(value: Counter) -> Counter:
+    return value
+def as_base(value: DoubleCounter) -> Counter:
+    return value
+def require_derived(value: DoubleCounter) -> DoubleCounter:
+    return value
+def increment(value: Counter) -> i32:
+    return value.step()
+def read(value: Counter) -> i32:
+    return value.value
+def nullable(value: Counter | None) -> Counter | None:
+    return optional(value)
+def from_host(value: Counter) -> Counter:
+    return store(value)
+async def hold(value: Counter) -> Counter:
+    return await later(value)
+async def optional_async(value: Counter | None) -> Counter | None:
+    await checkpoint()
+    return value
+def reader(value: Counter) -> Callable[[], i32]:
+    def get() -> i32:
+        return value.value
+    return get
+'''
+CLASS_EXPORTS = ["make", "derived", "grand", "other", "lookalike", "read_other", "echo", "as_base", "require_derived", "increment", "read", "nullable", "from_host", "hold", "optional_async", "reader"]
+
 OBJECT_SOURCE = '''from snek import HostObject, host, checkpoint
 from typing import Callable, Iterator
 @host("lookup")
@@ -480,8 +550,8 @@ class LibraryTests(unittest.TestCase):
         return driver.build(self.src, out, optimize=OPTIMIZE, compiler=self.compiler,
                             library=True, exports=exports, **kwargs)
 
-    def node(self, script):
-        result = subprocess.run([shutil.which("node") or "node", "--input-type=module", "-e",
+    def node(self, script, *, gc=False):
+        result = subprocess.run([shutil.which("node") or "node", *(["--expose-gc"] if gc else []), "--input-type=module", "-e",
             'import assert from "node:assert/strict";\n'
             'import {readFile} from "node:fs/promises";\n'
             'import {instantiate, SnekError} from "./output.js";\n'
@@ -523,6 +593,129 @@ assert.ok(Object.isFrozen(lib));
 const second = await instantiate(await WebAssembly.compile(bytes));
 assert.equal(second.add(2, 3), 5);
 ''')
+
+    def test_class_handles_identity_subtypes_and_lifetime(self):
+        self.src.write_text(CLASS_SOURCE)
+        built = self.build(CLASS_EXPORTS)
+        self.assertIn('SnekObject<"entry.Counter">', built.dts_path.read_text())
+        self.node('''
+const options = {imports: {store: x => x, optional: x => x, later: async x => x}};
+const lib = await instantiate(bytes, options);
+const base = lib.make(10), child = lib.derived(20), other = lib.other(30);
+const grand = lib.grand(40);
+assert.equal(lib.require_derived(grand), grand);
+assert.equal(lib.echo(grand), grand);
+assert.equal(lib.increment(grand), 42);
+assert.equal(lib.read_other(other), 30);
+assert.throws(() => lib.read_other(lib.lookalike(30)), /Other handle/);
+assert.equal(lib.echo(base), base);
+assert.equal(lib.echo(child), child);
+assert.equal(lib.as_base(child), child);
+assert.equal(lib.require_derived(lib.as_base(child)), child);
+assert.equal(lib.increment(base), 11);
+assert.equal(lib.increment(child), 22); // virtual dispatch through a base parameter
+assert.equal(lib.read(child), 22);
+assert.equal(lib.nullable(null), null);
+assert.equal(lib.nullable(child), child);
+assert(Object.isFrozen(child)); assert.deepEqual(Object.keys(child), []);
+assert.equal(Object.getPrototypeOf(child), null);
+assert.deepEqual(Object.getOwnPropertySymbols(child), []);
+assert.equal(child.value, undefined);
+const read = lib.reader(child);
+lib.increment(child); assert.equal(read(), 24);
+for (const value of [null, undefined, {}, 12, base, other]) {
+  assert.throws(() => lib.require_derived(value), /DoubleCounter handle from this Snek instance/);
+}
+assert.throws(() => lib.nullable(undefined), /Counter handle/);
+assert.throws(() => lib.echo(other), /Counter handle/);
+const foreign = await instantiate(bytes, options);
+assert.throws(() => lib.echo(foreign.make(1)), /handle from this Snek instance/);
+assert.equal(await lib.optional_async(null), null);
+assert.equal(await lib.optional_async(child), child);
+assert.equal(lib.from_host(child), child);
+assert.equal(await lib.hold(child), child);
+''')
+
+    def test_class_handle_roots_opaque_fields_without_api(self):
+        self.src.write_text('''from snek import HostObject
+class Holder:
+    value: HostObject
+    def __init__(self, value: HostObject) -> None:
+        self.value = value
+def make(value: HostObject) -> Holder:
+    return Holder(value)
+''')
+        self.build(["make"])
+        self.node('''
+let handle, weak;
+await (async () => {
+  const lib = await instantiate(bytes);
+  const value = {alive: true};
+  weak = new WeakRef(value);
+  handle = lib.make(value);
+})();
+for (let i = 0; i < 6; i++) {
+  await new Promise(resolve => setImmediate(resolve));
+  globalThis.gc();
+}
+assert.equal(weak.deref()?.alive, true);
+assert(Object.isFrozen(handle));
+''', gc=True)
+
+    def test_class_handles_host_validation_and_overlapping_calls(self):
+        self.src.write_text(CLASS_SOURCE)
+        self.build(CLASS_EXPORTS)
+        self.node('''
+const pending = [];
+let stored;
+const lib = await instantiate(bytes, {imports: {
+  store(value) {stored = value; return value;}, optional: x => x,
+  later: value => new Promise(resolve => pending.push(() => resolve(value))),
+}});
+const a = lib.make(1), b = lib.derived(2);
+assert.equal(lib.from_host(a), a); assert.equal(stored, a);
+const pa = lib.hold(a), pb = lib.hold(b);
+assert.equal(lib.increment(a), 2); assert.equal(lib.increment(b), 4);
+pending[1](); pending[0]();
+assert.equal(await pa, a); assert.equal(await pb, b);
+const invalid = await instantiate(bytes, {imports: {store: () => ({}), optional: () => undefined, later: async () => a}});
+assert.throws(() => invalid.from_host(invalid.make(0)), /Counter handle/);
+assert.throws(() => invalid.nullable(null), /Counter handle/);
+await assert.rejects(invalid.hold(invalid.make(0)), SnekError);
+assert.equal(invalid.read(invalid.make(3)), 3);
+''')
+
+    def test_class_handles_across_modules(self):
+        (self.root / "models.py").write_text('''from snek import i32
+class Counter:
+    value: i32
+    def __init__(self, value: i32) -> None:
+        self.value = value
+class Child(Counter):
+    pass
+''')
+        self.src.write_text('''from snek import i32
+from models import Counter as Base, Child
+def make() -> Child:
+    return Child(42)
+def echo(value: Base) -> Base:
+    return value
+def read(value: Base) -> i32:
+    return value.value
+''')
+        self.build(["make", "echo", "read"])
+        self.node('''
+const lib = await instantiate(bytes), value = lib.make();
+assert.equal(lib.echo(value), value); assert.equal(lib.read(value), 42);
+''')
+
+    def test_class_handles_reject_nested_boundary_shapes(self):
+        base = 'from typing import Callable\nfrom snek import host\nclass Box:\n    pass\n'
+        for ty in ("list[Box]", "Callable[[Box], Box]", "Callable[[], Box | None]"):
+            for host in (False, True):
+                self.src.write_text(base + ('@host("f")\n' if host else '') + f'def f(value: {ty}) -> None:\n    pass\n')
+                with self.subTest(ty=ty, host=host), self.assertRaises(Exception):
+                    self.build(["f"])
 
     def test_list_callback_values_and_identity(self):
         self.src.write_text(LIST_CALLBACK_SOURCE)
@@ -1605,7 +1798,7 @@ assert.equal(output, "loop cleaned\\n");
         self.node('''
 const original = WebAssembly.instantiate;
 try {
-  for (const version of [undefined, 1, 2, 3, 5]) {
+  for (const version of [undefined, 1, 2, 3, 4, 6]) {
     WebAssembly.instantiate = async (...args) => {
       const instance = await original(...args);
       return {exports: {...instance.exports, __snek_abi: version === undefined ? undefined : new WebAssembly.Global({value: "i32"}, version)}};

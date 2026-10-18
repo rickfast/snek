@@ -16,6 +16,7 @@ sys.path.insert(0, str(ROOT))
 from snekc import driver
 from check_library import LIST_SOURCE, LIST_EXPORTS, NESTED_LIST_SOURCE, NESTED_LIST_EXPORTS
 from check_library import LIST_CALLBACK_SOURCE, LIST_CALLBACK_EXPORTS
+from check_library import CLASS_SOURCE, CLASS_EXPORTS
 
 EXAMPLE = ROOT / "examples/vite"
 SERVER = '''
@@ -28,6 +29,25 @@ console.log(JSON.stringify({url: server.resolvedUrls.local[0]}));
 '''
 
 TYPES = '''
+import {type SnekLibrary as ClassLibrary, type SnekObject} from "./generated/classes.js";
+declare const classes: ClassLibrary;
+const base = classes.make(1), derived = classes.derived(2);
+const asBase: SnekObject<"classes.Counter"> = derived;
+const asDerived: ReturnType<typeof classes.derived> = classes.grand(3);
+classes.read(classes.grand(3));
+classes.read(derived);
+classes.nullable(null);
+const optionalObject: Promise<SnekObject<"classes.Counter"> | null> = classes.optional_async(null);
+// @ts-expect-error base handles cannot be implicitly downcast
+classes.require_derived(base);
+// @ts-expect-error unrelated classes remain distinct
+classes.read(classes.other(1));
+// @ts-expect-error plain objects cannot impersonate a handle
+classes.read({});
+// @ts-expect-error nullable handles need narrowing
+classes.read(classes.nullable(base));
+// @ts-expect-error fields remain private to Snek
+derived.value;
 import {type SnekLibrary as ListCallbackLibrary} from "./generated/list-callbacks.js";
 declare const listCallbacks: ListCallbackLibrary;
 const transformed: SnekList<string> = listCallbacks.apply(items => items, listCallbacks.words());
@@ -130,6 +150,10 @@ class BundlerTests(unittest.TestCase):
         print(f"Bundler browser: {engine} {cls.browser.version}; compiler: {cls.compiler}", flush=True)
 
     def compile(self, optimize):
+        source = self.root / "classes.py"
+        source.write_text(CLASS_SOURCE)
+        driver.build(source, self.root / "src/generated/classes.wasm", optimize=optimize,
+                     compiler=self.compiler, library=True, exports=CLASS_EXPORTS)
         source = self.root / "lists.py"
         source.write_text(LIST_SOURCE)
         driver.build(source, self.root / "src/generated/lists.wasm", optimize=optimize,

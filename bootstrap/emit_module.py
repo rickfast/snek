@@ -11,7 +11,13 @@ from bootstrap.emit_runtime import emit_collection_helpers, emit_keyed_builtin, 
 from bootstrap.emit_host import emit_host_helpers, emit_host_core_imports, emit_io_helpers, emit_component_imports
 from bootstrap.emit_suspension import OwnedMachine, owned_has_await, owned_machine_types, owned_machine_helpers, owned_runtime_machines, owned_runtime_machine
 from bootstrap.tasks import wait_all_code
-from bootstrap.library import LibraryExport, library_target, library_code, library_host_imports, library_host_wrapper, library_callbacks, library_callback_imports, library_callback_async, library_lists
+from bootstrap.library import LibraryExport, LibraryClass, library_target, library_code, library_host_imports, library_host_wrapper, library_callbacks, library_callback_imports, library_callback_async, library_lists
+
+
+def owned_library_type(ty: DeclType) -> str:
+    inner = inner_type(ty)
+    if inner.kind == "class": return "class:" + inner.name + (" | None" if ty.kind == "optional" else "")
+    return ty.display()
 
 
 def emit_closures(e: SourceEmitter) -> str:
@@ -146,11 +152,11 @@ def emit_source_module(checked: BodyChecker, prelude_source: str, component: boo
                 raise ValueError("host imports require a --library build")
             params: list[str] = []
             for param in f.sig.params:
-                params.append(param.ty.display())
+                params.append(owned_library_type(param.ty))
                 e.types.valtype(param.ty)
             if f.sig.ret.kind != "None": e.types.valtype(f.sig.ret)
             async_host = f.sig.ret.kind == "Coroutine"
-            item = LibraryExport(f.sig.host, f.name, params, f.sig.ret.args[0].display() if async_host else f.sig.ret.display(), e.types.heap(f.sig.ret) if async_host else "")
+            item = LibraryExport(f.sig.host, f.name, params, owned_library_type(f.sig.ret.args[0]) if async_host else owned_library_type(f.sig.ret), e.types.heap(f.sig.ret) if async_host else "")
             funcs.append(library_host_wrapper(item, len(host_functions)))
             host_functions.append(item)
             continue
@@ -224,14 +230,17 @@ def emit_source_module(checked: BodyChecker, prelude_source: str, component: boo
                         raise ValueError("library exports cannot be generators: " + name)
                     params: list[str] = []
                     for param in function.sig.params:
-                        params.append(param.ty.display())
+                        params.append(owned_library_type(param.ty))
                         if param.ty.kind == "str": unicode_dynamic = True
                     async_export = function.sig.ret.kind == "Coroutine"
-                    selected.append(LibraryExport(name, function.name, params, function.sig.ret.args[0].display() if async_export else function.sig.ret.display(), e.types.heap(function.sig.ret) if async_export else ""))
+                    selected.append(LibraryExport(name, function.name, params, owned_library_type(function.sig.ret.args[0]) if async_export else owned_library_type(function.sig.ret), e.types.heap(function.sig.ret) if async_export else ""))
                     found = True
                     break
             if not found: raise ValueError("library export must name a function defined in the entry module: " + name)
-        library = library_code(selected, host_functions)
+        class_types: list[LibraryClass] = []
+        for class_name in checked.decl.class_order:
+            class_types.append(LibraryClass(class_name, checked.decl.classes[class_name].base))
+        library = library_code(selected, host_functions, class_types)
         callbacks = library_callbacks(selected, host_functions)
         imports += "\n" + library_callback_imports(callbacks, len(host_functions))
         if len(callbacks) > 0 or len(library_lists(selected, host_functions)) > 0: unicode_dynamic = True

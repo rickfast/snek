@@ -64,6 +64,21 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
   let wasm, busy = false, activeTask = null, errorText = "";
   const callbackStates = callbackSignatures.map(() => ({toWasm: new WeakMap(), toJS: new WeakMap()}));
   const listStates = listSignatures.map(() => ({toWasm: new WeakMap(), toJS: new WeakMap()}));
+  // The private field roots the GC object even if the API object is discarded.
+  // A fresh private brand per instance rejects foreign handles, and a single
+  // identity map preserves wrappers across base/derived boundary types.
+  const classHandles = new WeakMap();
+  class SnekObjectHandle {
+    #value;
+    constructor(value) {
+      this.#value = value;
+      Object.setPrototypeOf(this, null);
+      Object.freeze(this);
+    }
+    static unwrap(value) {
+      return value !== null && typeof value === "object" && #value in value ? value.#value : undefined;
+    }
+  }
   const imports = { wasi_snapshot_preview1: {
     fd_write(fd, iovs, count, written) {
       let total = 0;
@@ -183,9 +198,10 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
     throw new SnekLoadError("Unable to instantiate Snek library. Use the .wasm and .js files from the same --library build.", { cause });
   }
   wasm = instance.exports;
-  if (wasm.__snek_abi?.value !== 4 || !(wasm.__snek_yielded instanceof WebAssembly.Global) || !(wasm.memory instanceof WebAssembly.Memory) || !(wasm.__snek_length instanceof WebAssembly.Global) ||
+  if (wasm.__snek_abi?.value !== 5 || !(wasm.__snek_yielded instanceof WebAssembly.Global) || !(wasm.memory instanceof WebAssembly.Memory) || !(wasm.__snek_length instanceof WebAssembly.Global) ||
       ["__snek_init", "__snek_reset", "__snek_alloc", "__snek_mark", "__snek_restore",
         ...listSignatures.flatMap((_, i) => ["len", "get", "set", "append", "pop"].map(op => `__snek_list_${op}_${i}`)),
+        ...classSignatures.map((_, i) => `__snek_class_test_${i}`),
         ...callbackSignatures.flatMap(([, , , isAsync], i) =>
         [`__snek_wrap_${i}`, `__snek_call_${i}`, ...(isAsync ? [`__snek_step___snek_callback_${i}`, `__snek_result___snek_callback_${i}`] : [])]), ...signatures.flatMap(([name, , , isAsync]) =>
         isAsync ? [name, `__snek_step_${name}`, `__snek_result_${name}`] : [name])]
@@ -231,6 +247,15 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
     }
   }
   function lower(type, value) {
+    const object = classSignatures.findIndex(([signature]) => signature === type);
+    if (object !== -1) {
+      const [, name, nullable] = classSignatures[object];
+      if (value === null && nullable) return [null];
+      const raw = SnekObjectHandle.unwrap(value);
+      if (!raw || !wasm[`__snek_class_test_${object}`](raw))
+        throw new TypeError(`expected ${name} handle from this Snek instance${nullable ? " or null" : ""}`);
+      return [raw];
+    }
     const list = listSignatures.findIndex(([signature]) => signature === type);
     if (list !== -1) {
       const raw = listStates[list].toWasm.get(value);
@@ -289,6 +314,16 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
   enter(() => wasm.__snek_init());
   const api = Object.create(null);
   function lift(result, value) {
+    const object = classSignatures.findIndex(([signature]) => signature === result);
+    if (object !== -1) {
+      if (value === null) return null;
+      let wrapped = classHandles.get(value);
+      if (!wrapped) {
+        wrapped = new SnekObjectHandle(value);
+        classHandles.set(value, wrapped);
+      }
+      return wrapped;
+    }
     const list = listSignatures.findIndex(([signature]) => signature === result);
     if (list !== -1) {
       const state = listStates[list];

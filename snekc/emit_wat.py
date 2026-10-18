@@ -109,6 +109,13 @@ def wat_string(data: bytes) -> str:
     return '"' + "".join(out) + '"'
 
 
+def library_type_name(t: Type) -> str:
+    inner = strip_optional(t)
+    if isinstance(inner, ClassT):
+        return "class:" + inner.info.name + (" | None" if isinstance(t, OptionalT) else "")
+    return str(t)
+
+
 def mangle(t: Type) -> str:
     """Name fragment for a monomorphized type: list[list[Node | None]] -> list<list<Node?>>.
     `<`, `>` and `?` are legal in WAT names but not in Python identifiers, so these never
@@ -1464,9 +1471,9 @@ def emit_module(module: ir.Module, component: bool = False, *, graph_factory=Non
         from .machine_bridge import WasmMachineBackend
         machine_backend = WasmMachineBackend(Path(os.environ["SNEK_MACHINE_EMITTER"]))
     selected = []
-    from bootstrap.library import LibraryExport, library_code, library_target, library_host_imports, library_host_wrapper, library_callbacks, library_callback_imports, library_callback_async, library_lists
-    hosts = [LibraryExport(f.host, f.name, [str(t) for _, t in f.params],
-                          str(f.ret.elem) if isinstance(f.ret, CoroutineT) else str(f.ret),
+    from bootstrap.library import LibraryExport, LibraryClass, library_code, library_target, library_host_imports, library_host_wrapper, library_callbacks, library_callback_imports, library_callback_async, library_lists
+    hosts = [LibraryExport(f.host, f.name, [library_type_name(t) for _, t in f.params],
+                          library_type_name(f.ret.elem) if isinstance(f.ret, CoroutineT) else library_type_name(f.ret),
                           "$" + mangle(f.ret) if isinstance(f.ret, CoroutineT) else "")
              for f in module.funcs if f.host]
     if hosts and (not exports or component):
@@ -1479,8 +1486,8 @@ def emit_module(module: ir.Module, component: bool = False, *, graph_factory=Non
                 raise ValueError("library export must name a function defined in the entry module: " + name)
             if function.machine and not isinstance(function.ret, CoroutineT):
                 raise ValueError("library exports cannot be generators: " + name)
-            selected.append(LibraryExport(name, function.name, [str(t) for _, t in function.params],
-                                          str(function.ret.elem) if isinstance(function.ret, CoroutineT) else str(function.ret),
+            selected.append(LibraryExport(name, function.name, [library_type_name(t) for _, t in function.params],
+                                          library_type_name(function.ret.elem) if isinstance(function.ret, CoroutineT) else library_type_name(function.ret),
                                           "$" + mangle(function.ret) if isinstance(function.ret, CoroutineT) else ""))
         if any("str" in item.params for item in selected) or any(item.ret == "str" or item.heap for item in hosts) or library_callbacks(selected, hosts) or library_lists(selected, hosts):
             # Do not mutate the checked IR: command emission can reuse it.
@@ -1497,5 +1504,6 @@ def emit_module(module: ir.Module, component: bool = False, *, graph_factory=Non
         imports = library_host_imports(hosts, emitter.host_objects, library_callback_async(callbacks)) + "\n" + library_callback_imports(callbacks, len(hosts))
         wat = wat.replace("(module\n", "(module\n" + imports + "\n", 1)
         wrappers = "\n".join(library_host_wrapper(item, i) for i, item in enumerate(hosts))
-        wat = wat.rstrip()[:-1] + wrappers + "\n" + library_code(selected, hosts) + "\n)\n"
+        classes = [LibraryClass(cls.name, cls.base.name if cls.base else "") for cls in module.classes]
+        wat = wat.rstrip()[:-1] + wrappers + "\n" + library_code(selected, hosts, classes) + "\n)\n"
     return wat

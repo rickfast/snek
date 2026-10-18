@@ -19,6 +19,7 @@ from check_library import WAIT_ALL_SOURCE, WAIT_ALL_EXPORTS
 from check_library import LIST_SOURCE, LIST_EXPORTS
 from check_library import NESTED_LIST_SOURCE, NESTED_LIST_EXPORTS
 from check_library import LIST_CALLBACK_SOURCE, LIST_CALLBACK_EXPORTS
+from check_library import CLASS_SOURCE, CLASS_EXPORTS
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -78,6 +79,10 @@ class BrowserTests(unittest.TestCase):
         for name, optimize in (("list-callbacks", False), ("list-callbacks-optimized", True)):
             driver.build(source, root / (name + ".wasm"), optimize=optimize,
                          compiler=compiler, library=True, exports=LIST_CALLBACK_EXPORTS)
+        source.write_text(CLASS_SOURCE)
+        for name, optimize in (("classes", False), ("classes-optimized", True)):
+            driver.build(source, root / (name + ".wasm"), optimize=optimize,
+                         compiler=compiler, library=True, exports=CLASS_EXPORTS)
         shutil.copyfile(ROOT / "examples/library/worker.mjs", root / "worker.mjs")
         driver.build(ROOT / "examples/library/host_demo.py", root / "host_demo.wasm", optimize=False,
                      compiler=compiler, library=True, exports=["increment"])
@@ -108,6 +113,31 @@ class BrowserTests(unittest.TestCase):
         self.page = context.new_page()
         self.page.set_default_timeout(15000)
         self.page.goto(self.url)
+
+    def test_class_handles(self):
+        for target in ("classes", "classes-optimized"):
+            with self.subTest(target=target):
+                result = self.page.evaluate('''async target => {
+                  const {instantiate} = await import(`/${target}.js`);
+                  const options = {imports: {store: x => x, optional: x => x, later: async x => x}};
+                  const lib = await instantiate(`/${target}.wasm`, options);
+                  const base = lib.make(10), child = lib.derived(20);
+                  const same = lib.echo(child) === child && lib.as_base(child) === child &&
+                    lib.from_host(child) === child && await lib.hold(child) === child;
+                  const counts = [lib.increment(base), lib.increment(child)];
+                  const rejected = [];
+                  const foreign = await instantiate(`/${target}.wasm`, options);
+                  for (const invalid of [base, lib.other(1), foreign.derived(1), {}]) {
+                    try {lib.require_derived(invalid); rejected.push(false);}
+                    catch (e) {rejected.push(e instanceof TypeError);}
+                  }
+                  let lookalike = false;
+                  try {lib.read_other(lib.lookalike(1));} catch (e) {lookalike = e instanceof TypeError;}
+                  return {same, counts, rejected, lookalike, opaque: Object.isFrozen(child) && Object.keys(child).length === 0,
+                    optional: await lib.optional_async(null)};
+                }''', target)
+                self.assertEqual(result, {"same": True, "counts": [11, 22], "rejected": [True] * 4,
+                    "lookalike": True, "opaque": True, "optional": None})
 
     def test_list_callback_boundaries(self):
         for target in ("list-callbacks", "list-callbacks-optimized"):

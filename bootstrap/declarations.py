@@ -179,6 +179,7 @@ class DeclType:
         return self.kind not in ("i32", "i64", "f32", "f64", "bool", "None")
 
     def host_boundary(self) -> bool:
+        if self.kind == "class" or (self.kind == "optional" and self.args[0].kind == "class"): return True
         if self.kind == "list":
             if self.args[0].kind == "list": return self.args[0].host_boundary()
             return self.args[0].kind in ("i32", "i64", "f32", "f64", "bool", "str", "HostObject") or self.args[0].display() == "HostObject | None"
@@ -186,7 +187,7 @@ class DeclType:
             for i in range(len(self.args)):
                 arg = self.args[i]
                 if i == len(self.args) - 1 and arg.kind == "Coroutine": arg = arg.args[0]
-                if arg.kind == "Callable" or (arg.kind == "None" and i != len(self.args) - 1) or not arg.host_boundary():
+                if arg.kind in ("Callable", "class") or (arg.kind == "optional" and arg.args[0].kind == "class") or (arg.kind == "None" and i != len(self.args) - 1) or not arg.host_boundary():
                     return False
             return True
         return self.kind in ("i32", "i64", "f32", "f64", "bool", "str", "HostObject", "None") or self.display() == "HostObject | None"
@@ -715,9 +716,9 @@ class Declarations:
         if host != "":
             for param in sig.params:
                 if not param.ty.host_boundary():
-                    declaration_error("host boundaries require scalar, string, HostObject, or supported list/Callable parameters", node)
+                    declaration_error("host boundaries require scalar, string, object handles, or supported list/Callable parameters", node)
             if not sig.ret.host_boundary():
-                declaration_error("host boundaries require scalar, string, HostObject, supported list/Callable, or None returns", node)
+                declaration_error("host boundaries require scalar, string, object handles, supported list/Callable, or None returns", node)
         yields = direct_yield(node.get("body"))
         if node.kind == "AsyncFunctionDef":
             if yields:

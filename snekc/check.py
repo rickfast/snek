@@ -681,9 +681,9 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
             ret = self.resolve_type(node.returns)
         if host:
             if any(not host_boundary(t) for _, t in params):
-                raise CompileError("host boundaries require scalar, string, HostObject, or supported list/Callable parameters", node)
+                raise CompileError("host boundaries require scalar, string, object handles, or supported list/Callable parameters", node)
             if not host_boundary(ret):
-                raise CompileError("host boundaries require scalar, string, HostObject, supported list/Callable, or None returns", node)
+                raise CompileError("host boundaries require scalar, string, object handles, supported list/Callable, or None returns", node)
         yields = any(isinstance(n, (ast.Yield, ast.YieldFrom)) for n in scope_walk(body_nodes(node)))
         if isinstance(node, ast.AsyncFunctionDef):
             if yields:
