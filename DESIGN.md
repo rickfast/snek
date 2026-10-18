@@ -103,7 +103,16 @@ through exported or host signatures, including nested callback signatures.
 that mutates the original cannot corrupt the snapshot. Snapshot values are
 shallow. Dictionary operations use the same borrowed scratch-frame mechanism
 as lists, and Snek's iterator invalidation checks still apply to host mutations.
-The loader requires bridge ABI 6 and verifies every generated dictionary helper.
+The loader verifies every generated dictionary helper.
+
+Fixed-shape tuples use immutable `SnekTuple<T>` handles. Per-field private getters
+retain each field's concrete Wasm type, including mixed scalar and reference
+fields, and preserve the ordinary handle/function identity maps. A handle's
+getter closure strongly roots its GC tuple. `toArray()` returns a frozen shallow
+copy; fields are immutable but referenced collections remain live. TypeScript
+uses positional tuple types plus an invariant private brand to match Snek's
+exact-shape assignment rules. JavaScript indices are nonnegative safe integers.
+The loader requires bridge ABI 7 and verifies the generated tuple getters.
 
 Class boundaries use opaque `SnekObject` handles. A per-instance JavaScript
 private brand validates ownership; the private field strongly roots the WasmGC

@@ -23,6 +23,7 @@ from check_library import CLASS_VALUE_SOURCE, CLASS_VALUE_EXPORTS
 from check_library import CALLBACK_LIST_SOURCE, CALLBACK_LIST_EXPORTS
 from check_library import HIGHER_CALLBACK_SOURCE, HIGHER_CALLBACK_EXPORTS
 from check_library import DICT_SOURCE, DICT_EXPORTS
+from check_library import TUPLE_SOURCE, TUPLE_EXPORTS
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -94,6 +95,10 @@ class BrowserTests(unittest.TestCase):
         for name, optimize in (("dicts", False), ("dicts-optimized", True)):
             driver.build(source, root / (name + ".wasm"), optimize=optimize,
                          compiler=compiler, library=True, exports=DICT_EXPORTS)
+        source.write_text(TUPLE_SOURCE)
+        for name, optimize in (("tuples", False), ("tuples-optimized", True)):
+            driver.build(source, root / (name + ".wasm"), optimize=optimize,
+                         compiler=compiler, library=True, exports=TUPLE_EXPORTS)
         source.write_text(CLASS_VALUE_SOURCE)
         for name, optimize in (("classes", False), ("classes-optimized", True)):
             driver.build(source, root / (name + ".wasm"), optimize=optimize,
@@ -128,6 +133,29 @@ class BrowserTests(unittest.TestCase):
         self.page = context.new_page()
         self.page.set_default_timeout(15000)
         self.page.goto(self.url)
+
+    def test_tuple_handles(self):
+        for target in ("tuples", "tuples-optimized"):
+            with self.subTest(target=target):
+                result = self.page.evaluate('''async target => {
+                  const {instantiate, SnekError} = await import(`/${target}.js`);
+                  const options = {imports: {inspect: x => {x.toArray(); return x;}, later: async x => x}};
+                  const lib = await instantiate(`/${target}.wasm`, options), foreign = await instantiate(`/${target}.wasm`, options);
+                  const pair = lib.pair("browser 🐍"), composed = lib.composed();
+                  const same = lib.echo(pair) === pair && lib.from_host(pair) === pair && await lib.delayed(pair) === pair &&
+                    await lib.apply_async(async x => x, pair) === pair && lib.in_dict(pair).get("tuple") === pair;
+                  let invalid = false, wrongInstance = false, bounds = false;
+                  try {await lib.apply_async(async x => x.toArray(), pair);} catch(e) {invalid = e instanceof SnekError;}
+                  try {lib.echo(foreign.pair("foreign"));} catch(e) {wrongInstance = e instanceof TypeError;}
+                  try {pair.get(-1);} catch(e) {bounds = e instanceof RangeError;}
+                  composed.get(0).append("live"); composed.get(1).set("key", "edited");
+                  return {same, invalid, wrongInstance, bounds, copied: pair.toArray(), frozen: Object.isFrozen(pair.toArray()),
+                    empty: lib.empty().toArray(), singleton: lib.singleton().toArray(), nested: composed.get(4).toArray(),
+                    list: composed.get(0).toArray(), dict: composed.get(1).get("key"), callback: composed.get(2)("works")};
+                }''', target)
+                self.assertEqual(result, {"same": True, "invalid": True, "wrongInstance": True, "bounds": True,
+                    "copied": ["browser 🐍", 7], "frozen": True, "empty": [], "singleton": ["one"],
+                    "nested": ["nested", 7], "list": ["item", "live"], "dict": "edited", "callback": "tuple:works"})
 
     def test_dictionary_handles(self):
         for target in ("dicts", "dicts-optimized"):

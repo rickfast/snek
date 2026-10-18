@@ -65,6 +65,7 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
   const callbackStates = callbackSignatures.map(() => ({toWasm: new WeakMap(), toJS: new WeakMap()}));
   const listStates = listSignatures.map(() => ({toWasm: new WeakMap(), toJS: new WeakMap()}));
   const dictStates = dictSignatures.map(() => ({toWasm: new WeakMap(), toJS: new WeakMap()}));
+  const tupleStates = tupleSignatures.map(() => ({toWasm: new WeakMap(), toJS: new WeakMap()}));
   // The private field roots the GC object even if the API object is discarded.
   // A fresh private brand per instance rejects foreign handles, and a single
   // identity map preserves wrappers across base/derived boundary types.
@@ -199,10 +200,11 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
     throw new SnekLoadError("Unable to instantiate Snek library. Use the .wasm and .js files from the same --library build.", { cause });
   }
   wasm = instance.exports;
-  if (wasm.__snek_abi?.value !== 6 || !(wasm.__snek_yielded instanceof WebAssembly.Global) || !(wasm.memory instanceof WebAssembly.Memory) || !(wasm.__snek_length instanceof WebAssembly.Global) ||
+  if (wasm.__snek_abi?.value !== 7 || !(wasm.__snek_yielded instanceof WebAssembly.Global) || !(wasm.memory instanceof WebAssembly.Memory) || !(wasm.__snek_length instanceof WebAssembly.Global) ||
       ["__snek_init", "__snek_reset", "__snek_alloc", "__snek_mark", "__snek_restore",
         ...listSignatures.flatMap((_, i) => ["len", "get", "set", "append", "pop"].map(op => `__snek_list_${op}_${i}`)),
         ...dictSignatures.flatMap((_, i) => ["len", "next", "get", "contains", "set", "delete", "clear", "copy", "keys_at", "values_at"].map(op => `__snek_dict_${op}_${i}`)),
+        ...tupleSignatures.flatMap(([, fields], i) => fields.map((_, field) => `__snek_tuple_get_${i}_${field}`)),
         ...classSignatures.map((_, i) => `__snek_class_test_${i}`),
         ...callbackSignatures.flatMap(([, , , isAsync], i) =>
         [`__snek_wrap_${i}`, `__snek_call_${i}`, ...(isAsync ? [`__snek_step___snek_callback_${i}`, `__snek_result___snek_callback_${i}`] : [])]), ...signatures.flatMap(([name, , , isAsync]) =>
@@ -267,6 +269,12 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
     const dict = dictSignatures.findIndex(([signature]) => signature === type);
     if (dict !== -1) {
       const raw = dictStates[dict].toWasm.get(value);
+      if (!raw) throw new TypeError(`expected ${type} handle from this Snek instance`);
+      return [raw];
+    }
+    const tuple = tupleSignatures.findIndex(([signature]) => signature === type);
+    if (tuple !== -1) {
+      const raw = tupleStates[tuple].toWasm.get(value);
       if (!raw) throw new TypeError(`expected ${type} handle from this Snek instance`);
       return [raw];
     }
@@ -402,6 +410,26 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
             }
             return items;
           }); },
+        });
+        state.toJS.set(value, wrapped);
+        state.toWasm.set(wrapped, value);
+      }
+      return wrapped;
+    }
+    const tuple = tupleSignatures.findIndex(([signature]) => signature === result);
+    if (tuple !== -1) {
+      const state = tupleStates[tuple];
+      let wrapped = state.toJS.get(value);
+      if (!wrapped) {
+        const [, fields] = tupleSignatures[tuple];
+        wrapped = Object.freeze({
+          length: fields.length,
+          get(index) { return collectionOperation(() => {
+            if (!Number.isSafeInteger(index)) throw new TypeError("tuple index must be a safe integer");
+            if (index < 0 || index >= fields.length) throw new RangeError("tuple index out of range");
+            return lift(fields[index], wasm[`__snek_tuple_get_${tuple}_${index}`](value));
+          }); },
+          toArray() { return Object.freeze(fields.map((_, index) => wrapped.get(index))); },
         });
         state.toJS.set(value, wrapped);
         state.toWasm.set(wrapped, value);

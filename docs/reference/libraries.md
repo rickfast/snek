@@ -351,6 +351,7 @@ reject `gather`, just as they reject `wait_all`.
 | Snek class `C` / `C | None` | Opaque `SnekObject<"module.C">` / handle or `null` |
 | `list[T]` with supported elements | Live, GC-managed `SnekList<T>` handle |
 | `dict[K, V]` with supported keys/values | Live, GC-managed `SnekDict<K, V>` handle |
+| `tuple[T, ...]` with a fixed supported shape | Immutable, GC-managed `SnekTuple<readonly [...]>` handle |
 | `Callable[[T, ...], R]` | Typed synchronous function, or async function when `R` is a `Coroutine` |
 | `None` return | `void` / `undefined` |
 
@@ -361,7 +362,7 @@ Float infinities, NaN and signed zero follow Wasm arithmetic. JavaScript strings
 must contain valid Unicode scalar values: lone UTF-16 surrogates are rejected.
 
 Strings are copied into the GC heap before user code runs and copied back for
-JavaScript results. Supported Snek lists and dictionaries cross as live handles and Snek class
+JavaScript results. Supported Snek lists, dictionaries and tuples cross as handles and Snek class
 instances cross as opaque handles; other collections stay internal. `HostObject` passes a JavaScript-owned
 external reference without copying it, and `Callable` exposes a JavaScript
 function backed by a GC-managed closure.
@@ -419,7 +420,7 @@ provide transaction isolation.
 Create lists in Snek, then pass their handles back. JavaScript arrays, lookalike
 objects, handles for different element types, and handles from another instance
 are rejected. Handles are not transferable between workers; send `toArray()` data
-instead. Tuple handles and optional lists are not supported yet.
+instead. Optional lists are not supported yet.
 Supported lists can also be parameters and
 results of [typed callbacks](#typed-callbacks).
 
@@ -524,8 +525,47 @@ sharing a dictionary see each other's changes; this is not a transaction API.
 Both key and value types are invariant. JavaScript `Map`s, plain objects,
 wrongly typed handles, and handles from another instance are rejected. There is
 no implicit conversion or manual disposal. Tuple keys, nullable keys, optional
-dictionaries, and tuple values remain unsupported at the library boundary even
-where the language supports them internally.
+dictionaries remain unsupported at the library boundary even where the language
+supports them internally.
+
+## Snek-owned tuple handles
+
+Fixed-shape tuples use immutable `SnekTuple` handles. Empty and single-element
+tuples are supported, as are nested tuples containing supported collections,
+class handles, host objects, and callbacks. Tuples can also appear in lists,
+dictionary values, sync/async callbacks, host imports, and exported results.
+
+```python
+from snek import i32
+
+def result() -> tuple[str, i32]:
+    return ("ready", 7)
+```
+
+```javascript
+const result = lib.result();
+console.log(result.length); // 2
+console.log(result.get(0)); // "ready"; TypeScript infers string
+console.log(result.get(1)); // 7; TypeScript infers number
+const [status, count] = result.toArray();
+```
+
+The readonly `length` has the tuple's literal length in TypeScript. `get(index)`
+requires a nonnegative safe integer; invalid integer indices throw `RangeError`,
+and non-integers throw `TypeError`. Unlike Snek indexing, this JavaScript API does
+not accept negative indices. A literal index retains its positional field type;
+a dynamic index produces the union of field types.
+
+`toArray()` makes a frozen, shallow array copy, typed as a readonly tuple.
+Nested collection handles remain live and retain identity; tuple immutability
+does not freeze their contents. Retaining a tuple handle keeps its GC fields alive.
+Returning the same tuple from an instance returns the same handle.
+
+Tuple field types must match exactly, including nested shapes. Arrays, lookalike
+objects, differently typed tuples, and tuples from another instance are rejected;
+array copies cannot be passed back as tuple handles. There are no setters or
+manual lifetime calls. Optional tuples, bare `None` fields, unsupported field
+types, and tuple dictionary keys remain unsupported at the boundary.
 
 ## Snek-owned class handles
 
@@ -691,10 +731,10 @@ greet("browser"); // Hello, browser
 ```
 
 Callback arguments and results can be numbers, booleans, strings, `HostObject`,
-or `HostObject | None`, Snek class/nullable class handles, plus supported `list[T]`
-and `dict[K, V]` handles (including nested collections);
+or `HostObject | None`, Snek class/nullable class handles, plus supported `list[T]`,
+`dict[K, V]`, and fixed-shape tuple handles (including nested collections);
 results can also be `None`. Callbacks may also accept and return other callbacks,
-and lists and dictionaries can contain callbacks. Collections other than supported lists/dictionaries and
+and supported collections can contain callbacks. Unsupported collection shapes and
 optional callbacks are not supported. Callbacks with these result types
 are synchronous: returning a Promise is an error, including for `None` results.
 The generated TypeScript uses `undefined` for a `None` callback result to catch
@@ -842,7 +882,7 @@ functions appear on the returned, frozen API object.
 ## Current limits
 
 Exports must be entry-module functions with the boundary types above (or coroutines
-returning those types). Collections other than the supported list/dictionary handles,
+returning those types). Collections other than the supported list/dictionary/tuple handles,
 optional types other than `HostObject`/class references, generators and raw coroutine objects cannot cross
 the boundary. Libraries can use these internally where supported by the language,
 but cannot perform async module initialization or use WASI services such as

@@ -20,6 +20,7 @@ from check_library import CLASS_VALUE_SOURCE, CLASS_VALUE_EXPORTS
 from check_library import CALLBACK_LIST_SOURCE, CALLBACK_LIST_EXPORTS
 from check_library import HIGHER_CALLBACK_SOURCE, HIGHER_CALLBACK_EXPORTS
 from check_library import DICT_SOURCE, DICT_EXPORTS
+from check_library import TUPLE_SOURCE, TUPLE_EXPORTS
 
 EXAMPLE = ROOT / "examples/vite"
 SERVER = '''
@@ -32,6 +33,30 @@ console.log(JSON.stringify({url: server.resolvedUrls.local[0]}));
 '''
 
 TYPES = '''
+import {type SnekLibrary as TupleLibrary, type SnekTuple} from "./generated/tuples.js";
+declare const tuples: TupleLibrary;
+const pair = tuples.pair("typed");
+const tupleText: string = pair.get(0);
+const tupleNumber: number = pair.get(1);
+const tupleLength: 2 = pair.length;
+const tupleArray: readonly [string, number] = pair.toArray();
+tuples.apply(value => value, pair);
+tuples.apply_async(async value => value, pair);
+tuples.composed().get(0).append("live");
+// @ts-expect-error tuple copies are readonly
+pair.toArray()[0] = "changed";
+// @ts-expect-error tuple field types are positional
+const wrongField: string = pair.get(1);
+// @ts-expect-error arrays cannot impersonate tuple handles
+tuples.echo(["typed", 7]);
+// @ts-expect-error tuple field types must match exactly, without widening
+const widenedTuple: SnekTuple<readonly [string | number, number]> = pair;
+// @ts-expect-error tuple shape must match
+tuples.echo(tuples.singleton());
+// @ts-expect-error callback results require handles, not tuple copies
+tuples.apply(value => value.toArray(), pair);
+// @ts-expect-error length is readonly
+pair.length = 3;
 import {type SnekLibrary as DictLibrary, type SnekDict} from "./generated/dicts.js";
 declare const dicts: DictLibrary;
 const mapping: SnekDict<string, string> = dicts.words();
@@ -224,6 +249,10 @@ class BundlerTests(unittest.TestCase):
         print(f"Bundler browser: {engine} {cls.browser.version}; compiler: {cls.compiler}", flush=True)
 
     def compile(self, optimize):
+        source = self.root / "tuples.py"
+        source.write_text(TUPLE_SOURCE)
+        driver.build(source, self.root / "src/generated/tuples.wasm", optimize=optimize,
+                     compiler=self.compiler, library=True, exports=TUPLE_EXPORTS)
         source = self.root / "dicts.py"
         source.write_text(DICT_SOURCE)
         driver.build(source, self.root / "src/generated/dicts.wasm", optimize=optimize,
