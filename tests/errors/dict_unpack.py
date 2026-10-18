@@ -1,6 +1,6 @@
-# error: dictionary unpacking (**d) is not supported
+# error: dictionary unpacking requires a dictionary
 def main() -> None:
-    d = {"key": 1}
+    d = [("key", 1)]
     copied = {**d}
 
 main()

@@ -266,10 +266,10 @@ class BrowserTests(unittest.TestCase):
                   const merged = lib.merge(left, right);
                   const copied = merged !== left && merged !== right && left.get("first") === "one";
                   const inplace = lib.merge_inplace(left, right) === left;
-                  return {copied, inplace, merged: merged.entries(), left: left.entries()};
+                  return {copied, inplace, merged: merged.entries(), left: left.entries(), unpacked: lib.unpack(left, right).entries()};
                 }''', target)
                 entries = [["first", "updated"], ["second", "two"], ["third", "three"]]
-                self.assertEqual(result, {"copied": True, "inplace": True, "merged": entries, "left": entries})
+                self.assertEqual(result, {"copied": True, "inplace": True, "merged": entries, "left": entries, "unpacked": entries})
 
     def test_dictionary_handles(self):
         for target in ("dicts", "dicts-optimized"):

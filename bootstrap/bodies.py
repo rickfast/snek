@@ -1798,7 +1798,7 @@ class BodyChecker:
         keys = node.get("keys").items
         for key in keys:
             if key.kind == "none":
-                declaration_error("dictionary unpacking is not supported", node)
+                return self.dict_unpack(node, expected)
         key_hint = expected.args[0] if expected.kind == "dict" else DeclType("unknown")
         value_hint = expected.args[1] if expected.kind == "dict" else DeclType("unknown")
         checked_keys = self.elements(keys, key_hint, node)
@@ -1810,6 +1810,34 @@ class BodyChecker:
         for index in range(len(keys)):
             result.add(checked_keys.args[index]).add(checked_values.args[index])
         return result
+
+    def dict_unpack(self, node: Node, expected: DeclType) -> BodyExpr:
+        keys = node.get("keys").items
+        values = node.get("values").items
+        parts: list[BodyExpr] = []
+        ty = expected if expected.kind == "dict" else DeclType("unknown")
+        index = 0
+        while index < len(keys):
+            start = index
+            if keys[index].kind == "none":
+                part = self.expr(values[index], ty)
+                index += 1
+            else:
+                while index < len(keys) and keys[index].kind != "none":
+                    index += 1
+                group = Node("Dict", "", node.line, node.column).put("keys", sequence(keys[start:index])).put("values", sequence(values[start:index]))
+                part = self.collection(group, ty)
+            if part.ty.kind != "dict":
+                declaration_error("dictionary unpacking requires a dictionary, got " + part.ty.display(), values[start])
+            if ty.kind == "unknown": ty = part.ty
+            if not part.ty.same(ty):
+                declaration_error("dictionary unpacking needs matching types, got " + ty.display() + " and " + part.ty.display(), values[start])
+            parts.append(part)
+        pre: list[BodyStmt] = []
+        result = self.capture(BodyExpr("DictLit", ty, node), pre)
+        for part in parts:
+            pre.append(BodyStmt("ExprStmt", node).add(BodyExpr("DictOp", DeclType("None"), node, "update").add(result).add(part)))
+        return self.sequence_expr(pre, result)
 
     def homogeneous(self, ty: DeclType, node: Node) -> DeclType:
         if len(ty.args) == 0:

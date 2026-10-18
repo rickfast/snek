@@ -12,7 +12,6 @@
   "dict_int_float.py": "expected f64; use a float literal or explicit conversion, not an integer literal",
   "dict_optional_read.py": "cannot index dict[str, i32] | None; narrow optional values first",
   "dict_setdefault_none.py": "dict.setdefault needs an explicit default for non-optional values",
-  "dict_unpack.py": "dictionary unpacking is not supported",
   "empty_list.py": "cannot infer collection element type; add an annotation",
   "except_non_exception.py": "except needs a class derived from BaseException",
   "exception_message_field.py": "ValueError has no accessible field 'message'",

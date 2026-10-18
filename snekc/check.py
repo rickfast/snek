@@ -2941,7 +2941,32 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
     def check_dict(self, node: ast.Dict, expected: Type | None) -> ir.Expr:
         expected = strip_optional(expected) if expected is not None else None
         if any(k is None for k in node.keys):
-            raise CompileError("dictionary unpacking (**d) is not supported yet", node)
+            parts: list[ir.Expr] = []
+            ty = expected if isinstance(expected, DictT) else None
+            index = 0
+            while index < len(node.keys):
+                start = index
+                if node.keys[index] is None:
+                    part = self.check_expr(node.values[index], ty)
+                    index += 1
+                else:
+                    while index < len(node.keys) and node.keys[index] is not None:
+                        index += 1
+                    group = ast.copy_location(ast.Dict(keys=node.keys[start:index], values=node.values[start:index]), node)
+                    part = self.check_dict(group, ty)
+                if not isinstance(part.ty, DictT):
+                    raise CompileError("dictionary unpacking requires a dictionary, got " + str(part.ty), node.values[start])
+                if ty is None:
+                    ty = part.ty
+                if part.ty != ty:
+                    raise CompileError("dictionary unpacking needs matching types, got " + str(ty) + " and " + str(part.ty), node.values[start])
+                parts.append(part)
+            assert ty is not None
+            tmp = self.ctx.temp(ty)
+            pre: list[ir.Stmt] = [ir.SetLocal(tmp, ir.DictLit(ty, []))]
+            for part in parts:
+                pre.append(ir.ExprStmt(ir.DictOp(NONE, "update", self.ctx.get(tmp), [part])))
+            return ir.Seq(ty, pre, self.ctx.get(tmp))
         if not node.keys:
             if not isinstance(expected, DictT):
                 raise CompileError("cannot infer the types of {}; annotate it: `d: dict[str, i32] = {}`", node)
