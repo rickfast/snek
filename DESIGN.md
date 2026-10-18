@@ -99,9 +99,19 @@ sleep until a request settles without starving a sibling at a checkpoint. No scr
 survive suspension. Sync exports and typed callbacks may run between steps, but
 synchronous re-entry remains rejected. Invocation roots are released on success and
 failure; an unresolved host Promise retains its frame. Async initialization,
-detached task spawning and public cancellation APIs remain unsupported. The CPython shim raises on a host call
+detached task spawning and Snek-side public cancellation APIs remain unsupported. The CPython shim raises on a host call
 unless the application replaces the declaration with a Python implementation.
 See the [library guide](docs/reference/libraries.md) for the public contract.
+
+Async exports accept a final `SnekCallOptions` with an optional `AbortSignal`.
+Cancellation wakes the invocation's single waiter and injects `GeneratorExit` once
+at the next root resume. Later resumes allow cleanup to await without reinjecting
+cancellation. The private step ABI distinguishes normal execution, initial
+cancellation and cleanup continuation; only cancellation mode consumes escaping
+`GeneratorExit`. After successful unwinding, JavaScript rejects with
+`SnekCancelledError` and retains the signal reason as its cause. Cleanup failures
+propagate normally. Host promises notify one invocation waiter on settlement,
+avoiding repeated race subscriptions on long-lived sibling requests.
 
 `HostObject` uses `(ref extern)` and its optional form uses `(ref null extern)`.
 Only JavaScript objects/functions (not primitives or thenables) may cross this

@@ -312,8 +312,12 @@ def library_async_export(item: LibraryExport, head: str, args: list[str]) -> str
     catch = " (call $rt.uncaught (block $failed (result (ref $BaseException)) (try_table (catch $snek.exc $failed) "
     lines: list[str] = []
     lines.append(head + " (result (ref " + B + ")) (local $task (ref " + B + "))" + catch + factory + " (return " + value + ")) (unreachable))) (unreachable))")
-    lines.append('(func (export "__snek_step_' + item.name + '")' + parameter + ' (result i32) (local $pending i32)' + catch
-                 + "(local.set $pending (call " + B + ".advance " + value + ")) (call $rt.flush) (return (local.get $pending))) (unreachable))) (unreachable))")
+    inject = "(if (result (ref null $BaseException)) (i32.eq (local.get $cancel) (i32.const 1)) (then (call $GeneratorExit.__new__ (ref.null $str))) (else (ref.null $BaseException)))"
+    lines.append('(func (export "__snek_step_' + item.name + '")' + parameter + ' (param $cancel i32) (result i32) (local $pending i32) (local $error (ref $BaseException))'
+                 + " (local.set $error (block $failed (result (ref $BaseException)) (try_table (catch $snek.exc $failed)"
+                 + " (local.set $pending (call " + B + ".resume " + value + " " + inject + ")) (call $rt.flush) (return (local.get $pending))) (unreachable)))"
+                 + " (if (i32.and (i32.ne (local.get $cancel) (i32.const 0)) (ref.test (ref $GeneratorExit) (local.get $error))) (then (call $rt.flush) (return (i32.const 0))))"
+                 + " (call $rt.uncaught (local.get $error)) (unreachable))")
     result = ""
     body = ""
     if item.ret != "None":
@@ -358,6 +362,7 @@ def library_code(exports: list[LibraryExport], hosts: list[LibraryExport]) -> st
             if item.ret != "None": library_type(item.ret)
             lines.append(library_async_export(item, head, args))
             signatures.append("[" + json_string(item.name) + ",[" + ",".join(types) + "]," + json_string(item.ret) + ",true]")
+            ts.append("options?: SnekCallOptions")
             declarations.append("  " + json_string(item.name) + "(" + ", ".join(ts) + "): Promise<" + library_ts(item.ret) + ">;")
             continue
         lines.append(library_sync_export(item, head, args))
@@ -390,6 +395,7 @@ def library_code(exports: list[LibraryExport], hosts: list[LibraryExport]) -> st
     dts += "export interface SnekImports {\n" + "\n".join(host_declarations) + "\n}\n"
     dts += "export interface LibraryOptions { stdout?: (text: string) => void; imports" + ("" if len(hosts) > 0 else "?") + ": SnekImports; }\n"
     dts += "export class SnekError extends Error {}\n"
+    dts += "export interface SnekCallOptions { signal?: AbortSignal; }\nexport class SnekCancelledError extends Error { constructor(reason?: unknown); }\n"
     dts += "export class SnekCompatibilityError extends Error {}\nexport class SnekLoadError extends Error {}\n"
     dts += "export function assertSupported(): void;\n"
     dts += "export function instantiate(source: BufferSource | WebAssembly.Module | Response | URL | string, options" + ("" if len(hosts) > 0 else "?") + ": LibraryOptions): Promise<SnekLibrary>;\n"

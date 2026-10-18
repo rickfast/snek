@@ -175,4 +175,5 @@ The first-class browser milestone is complete:
 - Concurrent JavaScript-driven async calls share one instance with isolated frames and host results. See [concurrent calls](libraries.md#concurrent-calls).
 - Snek-side [structured concurrency](libraries.md#structured-concurrency-with-wait_all) starts and unwinds sibling coroutines through `wait_all`.
 - Typed [`gather`](libraries.md#collecting-results-with-gather) collects child results in argument order with the same scoped cleanup.
-- Later: detached spawning and public cancellation.
+- Async exports accept an [`AbortSignal`](libraries.md#cancelling-an-async-export), with cooperative unwinding and awaited cleanup.
+- Later: detached spawning and component task groups.

@@ -299,6 +299,29 @@ class BrowserTests(unittest.TestCase):
                 self.assertIn("first failure", result[3])
                 self.assertEqual(result[4], "first|second")
 
+    def test_abort_signal_cleans_up_sibling_tasks(self):
+        for target in ("tasks", "tasks-optimized"):
+            with self.subTest(target=target):
+                result = self.page.evaluate('''async target => {
+                  const {instantiate, SnekCancelledError} = await import(`./${target}.js`);
+                  const events = [];
+                  const lib = await instantiate(`./${target}.wasm`, {imports: {
+                    read: name => new Promise(() => {}),
+                    cleanup: async name => {await new Promise(resolve => setTimeout(resolve, 1)); events.push(name);},
+                    report: text => {}
+                  }});
+                  const controller = new AbortController();
+                  const task = lib.gathered({signal: controller.signal});
+                  controller.abort("browser stop");
+                  let error;
+                  try {await task;} catch (e) {
+                    if (!(e instanceof SnekCancelledError)) throw e;
+                    error = [e.name, e.cause];
+                  }
+                  return [events.sort(), error];
+                }''', target)
+                self.assertEqual(result, [["a", "b"], ["SnekCancelledError", "browser stop"]])
+
     def test_concurrent_async_host_results(self):
         for target in ("async", "async-optimized"):
             with self.subTest(target=target):

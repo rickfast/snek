@@ -218,12 +218,48 @@ shared captured state can change across an `await`. Synchronous re-entry from a
 host function or stdout handler is still rejected. Scratch memory is reset between
 steps; no borrowed string buffers survive suspension.
 
-Async module initialization, detached task spawning, and a public cancellation API are not
-supported. `run()` is a command entry mechanism, not a way to block JavaScript
-waiting for a Promise. Start library coroutines through an async export. The
-application can own an `AbortController` inside its host implementation; a rejected
-fetch then follows normal Snek error/cleanup handling. An unsettled Promise retains
-its invocation's frame until the host settles it, but does not block other calls.
+Async module initialization and detached task spawning are not supported. `run()`
+is a command entry mechanism, not a way to block JavaScript waiting for a Promise.
+Start library coroutines through an async export. An unsettled Promise retains
+its invocation's frame until the host settles it or the invocation is cancelled,
+but does not block other calls.
+
+### Cancelling an async export
+
+Async exports accept an optional final `{signal}` argument after their Snek
+parameters:
+
+```javascript
+import {instantiate, SnekCancelledError} from "./async_demo.js";
+
+const controller = new AbortController();
+const pending = lib.load("./message.txt", {signal: controller.signal});
+controller.abort("user stopped loading");
+try {
+  await pending;
+} catch (error) {
+  if (!(error instanceof SnekCancelledError)) throw error;
+}
+```
+
+An already-aborted signal rejects before starting the coroutine. Otherwise the
+driver wakes a suspended call and injects `GeneratorExit` at its next resume,
+including through `wait_all` and `gather`. `finally` blocks can await cleanup. The
+Promise rejects with `SnekCancelledError` only after cleanup completes; its `cause`
+is the signal's reason. A cleanup failure instead propagates as its normal Snek
+or JavaScript error. Once cancellation is requested, suppressing `GeneratorExit`
+inside Snek does not turn the exported Promise into a success.
+
+Cancellation is cooperative: it cannot interrupt a running synchronous step.
+Cleanup that never completes keeps the call pending. Aborting after completion
+does nothing, and unrelated calls on the same instance are unaffected. Listeners
+are removed when the invocation finishes.
+
+This cancels the Snek invocation, not automatically its JavaScript operations.
+Pass the same signal to `fetch` in your host implementation, or abort resources
+from a cleanup host function, when the underlying work must also stop. Detached
+host results are ignored, and late rejections remain handled. Call options apply
+to exported async functions, not synchronous exports or arbitrary callback values.
 
 ### Structured concurrency with `wait_all`
 

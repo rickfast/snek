@@ -417,7 +417,7 @@ assert.equal(second.add(2, 3), 5);
         self.src.write_text(OBJECT_SOURCE)
         result = self.build(OBJECT_EXPORTS)
         self.assertIn('"echo"(arg0: object): object;', result.dts_path.read_text())
-        self.assertIn('"optional_async"(arg0: object | null): Promise<object | null>;', result.dts_path.read_text())
+        self.assertIn('"optional_async"(arg0: object | null, options?: SnekCallOptions): Promise<object | null>;', result.dts_path.read_text())
         self.node('''
 const a = {name: "a"}, b = {name: "b"};
 let touched, release, result = a;
@@ -902,7 +902,7 @@ assert.deepEqual(await Promise.all([lib.repeat(1), other.repeat(1)]), [20000, 20
     def test_async_exports_and_host_values(self):
         self.src.write_text(ASYNC_SOURCE)
         result = self.build(exports=ASYNC_EXPORTS)
-        self.assertIn('"load"(arg0: string): Promise<string>;', result.dts_path.read_text())
+        self.assertIn('"load"(arg0: string, options?: SnekCallOptions): Promise<string>;', result.dts_path.read_text())
         self.assertIn('"wait"(): PromiseLike<void>;', result.dts_path.read_text())
         self.node('''
 const events = [];
@@ -1126,12 +1126,109 @@ async def check(a: HostObject, b: HostObject) -> bool:
         self.build(["check"])
         self.node('const lib = await instantiate(bytes, {imports: {resolve: async value => value}}); assert.equal(await lib.check({}, {}), true);')
 
+    def test_abort_signal_unwinds_groups_and_awaits_cleanup(self):
+        self.src.write_text(WAIT_ALL_SOURCE)
+        result = self.build(WAIT_ALL_EXPORTS)
+        self.assertIn("options?: SnekCallOptions", result.dts_path.read_text())
+        self.node('''
+const {SnekCancelledError} = await import("./output.js");
+const requests = new Map(), cleanup = new Map(), events = [];
+const lib = await instantiate(bytes, {imports: {
+  read: name => new Promise((resolve, reject) => requests.set(name, {resolve, reject})),
+  cleanup: name => new Promise(resolve => cleanup.set(name, resolve)),
+  report: text => {events.push(text);}
+}});
+const already = new AbortController(); already.abort("before start");
+await assert.rejects(lib.pair({signal: already.signal}), e => e instanceof SnekCancelledError && e.cause === "before start");
+assert.equal(requests.size, 0);
+await assert.rejects(lib.pair(null), /call options/);
+await assert.rejects(lib.pair({signal: {}}), /AbortSignal/);
+await assert.rejects(lib.pair({signal: null}), /AbortSignal/);
+const control = new AbortController(), reason = new Error("user cancelled");
+let added = 0, removed = 0;
+const add = control.signal.addEventListener.bind(control.signal), remove = control.signal.removeEventListener.bind(control.signal);
+control.signal.addEventListener = (...args) => {added++; return add(...args);};
+control.signal.removeEventListener = (...args) => {removed++; return remove(...args);};
+let settled = false;
+const pending = lib.gathered({signal: control.signal});
+const rejected = assert.rejects(pending, error => error instanceof SnekCancelledError && error.cause === reason).then(() => {settled = true;});
+const unrelated = lib.duplicate();
+control.abort(reason);
+for (let i = 0; i < 30 && cleanup.size < 2; i++) await new Promise(resolve => setTimeout(resolve, 2));
+assert.ok(cleanup.has("a") && cleanup.has("b"));
+assert.equal(settled, false);
+cleanup.get("b")(); cleanup.get("a")();
+await rejected;
+assert.equal(added, 1); assert.equal(removed, 1);
+assert.ok(events.includes("done:a") && events.includes("done:b"));
+requests.get("a").reject(new Error("late rejection")); requests.get("b").resolve("late result");
+requests.get("reuse").resolve("unrelated");
+await new Promise(resolve => setTimeout(resolve, 0));
+cleanup.get("reuse")();
+assert.equal(await unrelated, "unrelated");
+''')
+
+    def test_abort_during_host_call_and_cleanup_failure(self):
+        self.src.write_text(ASYNC_SOURCE + '''
+async def cleanup_failure() -> None:
+    try:
+        await read_text("url")
+    finally:
+        await checkpoint()
+        raise ValueError("Snek cleanup failed")
+async def explicit_exit() -> None:
+    raise GeneratorExit()
+async def suppress() -> str:
+    try:
+        return await read_text("url")
+    except GeneratorExit:
+        return "suppressed"
+async def looping() -> None:
+    try:
+        while True:
+            await checkpoint()
+    finally:
+        print("loop cleaned")
+''')
+        self.build([*ASYNC_EXPORTS, "cleanup_failure", "explicit_exit", "suppress", "looping"])
+        self.node('''
+const {SnekCancelledError} = await import("./output.js");
+let controller = new AbortController(), fail = false, events = [], output = "";
+const lib = await instantiate(bytes, {stdout: text => output += text, imports: {
+  read_text: value => {controller.abort(); return new Promise(() => {});},
+  wait: async () => {events.push("wait");}, number: async value => value,
+  scalar: async (a, b, c, d) => c, render: text => {if (fail) throw new Error("cleanup failed"); events.push(text);}
+}});
+await assert.rejects(lib.load("url", {signal: controller.signal}), SnekCancelledError);
+assert.deepEqual(events, ["done"]);
+controller = new AbortController(); events = [];
+await assert.rejects(lib.recover({signal: controller.signal}), SnekCancelledError);
+assert.deepEqual(events, ["wait", "cleaned"]);
+controller = new AbortController(); fail = true;
+await assert.rejects(lib.load("url", {signal: controller.signal}), /cleanup failed/);
+fail = false;
+const complete = new AbortController();
+assert.equal(await lib.plain(41, {signal: complete.signal}), 42);
+complete.abort();
+assert.equal(await lib.plain(1), 2);
+controller = new AbortController();
+await assert.rejects(lib.cleanup_failure({signal: controller.signal}), error => error instanceof SnekError && error.message.includes("Snek cleanup failed"));
+await assert.rejects(lib.explicit_exit(), error => error instanceof SnekError && error.message.includes("GeneratorExit"));
+controller = new AbortController();
+await assert.rejects(lib.suppress({signal: controller.signal}), SnekCancelledError);
+controller = new AbortController();
+const looping = lib.looping({signal: controller.signal});
+controller.abort();
+await assert.rejects(looping, SnekCancelledError);
+assert.equal(output, "loop cleaned\\n");
+''')
+
     def test_library_abi_mismatch_is_rejected(self):
         self.build()
         self.node('''
 const original = WebAssembly.instantiate;
 try {
-  for (const version of [undefined, 1, 3]) {
+  for (const version of [undefined, 1, 2, 4]) {
     WebAssembly.instantiate = async (...args) => {
       const instance = await original(...args);
       return {exports: {...instance.exports, __snek_abi: version === undefined ? undefined : new WebAssembly.Global({value: "i32"}, version)}};

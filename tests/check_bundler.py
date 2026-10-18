@@ -29,6 +29,11 @@ TYPES = '''
 import {instantiate, type SnekLibrary} from "./generated/program.js";
 declare const library: SnekLibrary;
 const result: Promise<string> = library.load("url");
+const cancellable: Promise<string> = library.load("url", {signal: new AbortController().signal});
+// @ts-expect-error cancellation requires an AbortSignal
+library.load("url", {signal: {}});
+// @ts-expect-error synchronous exports do not take call options
+library.greet("name", {signal: new AbortController().signal});
 const exact: bigint = library.twice(1n);
 const opaque: object = library.identity(document.body);
 const greeting: string = library.apply(library.make_greeter(), "typed");

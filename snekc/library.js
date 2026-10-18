@@ -2,6 +2,10 @@ export class SnekError extends Error {
   constructor(message) { super(message); this.name = "SnekError"; }
 }
 
+export class SnekCancelledError extends Error {
+  constructor(reason) { super("Snek call cancelled", {cause: reason}); this.name = "SnekCancelledError"; }
+}
+
 export class SnekCompatibilityError extends Error {
   constructor(message) { super(message); this.name = "SnekCompatibilityError"; }
 }
@@ -139,18 +143,18 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
   });
   function startAsync(name, params, result, callback, values) {
     if (!activeTask) throw new Error("Async host imports require an async export; use await, not run()");
+    const owner = activeTask;
     const state = {name, result, settled: false, failed: false};
     activeTask.requests.add(state);
     try {
       const value = Reflect.apply(callback, undefined, liftArguments(params, values));
       if (value == null || typeof value.then !== "function")
         throw new TypeError(`Async host import ${name} must return a Promise/thenable`);
-      state.ready = Promise.resolve(value).then(
-        value => { state.value = value; state.settled = true; },
-        error => { state.error = error; state.failed = true; state.settled = true; });
+      Promise.resolve(value).then(
+        value => { state.value = value; state.settled = true; owner.wake?.(); },
+        error => { state.error = error; state.failed = true; state.settled = true; owner.wake?.(); });
     } catch (error) {
       state.error = error; state.failed = true; state.settled = true;
-      state.ready = Promise.resolve();
     }
     return state;
   }
@@ -176,7 +180,7 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
     throw new SnekLoadError("Unable to instantiate Snek library. Use the .wasm and .js files from the same --library build.", { cause });
   }
   wasm = instance.exports;
-  if (wasm.__snek_abi?.value !== 2 || !(wasm.__snek_yielded instanceof WebAssembly.Global) || !(wasm.memory instanceof WebAssembly.Memory) || !(wasm.__snek_length instanceof WebAssembly.Global) ||
+  if (wasm.__snek_abi?.value !== 3 || !(wasm.__snek_yielded instanceof WebAssembly.Global) || !(wasm.memory instanceof WebAssembly.Memory) || !(wasm.__snek_length instanceof WebAssembly.Global) ||
       ["__snek_init", "__snek_reset", "__snek_alloc", ...callbackSignatures.flatMap(([, , , isAsync], i) =>
         [`__snek_wrap_${i}`, `__snek_call_${i}`, ...(isAsync ? [`__snek_step___snek_callback_${i}`, `__snek_result___snek_callback_${i}`] : [])]), ...signatures.flatMap(([name, , , isAsync]) =>
         isAsync ? [name, `__snek_step_${name}`, `__snek_result_${name}`] : [name])]
@@ -287,19 +291,37 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
     if (result === "str") return decoder.decode(new Uint8Array(wasm.memory.buffer, value >>> 0, wasm.__snek_length.value >>> 0));
     return result === "bool" ? Boolean(value) : value;
   }
-  async function runAsync(name, result, create) {
-    const task = {requests: new Set()};
+  async function runAsync(name, result, create, options = () => undefined) {
+    const signal = options();
+    if (signal?.aborted) throw new SnekCancelledError(signal.reason);
+    const task = {requests: new Set(), cancelled: false, injected: false, wake: null};
+    const abort = () => {task.cancelled = true; if (!task.injected) task.wake?.();};
     let frame;
     try {
+      signal?.addEventListener("abort", abort, {once: true});
       frame = enterTask(task, create);
-      while (enterTask(task, () => wasm[`__snek_step_${name}`](frame))) {
-        if (task.requests.size && !task.runnable) await Promise.race([...task.requests].map(request => request.ready));
-        else await new Promise(resolve => setTimeout(resolve, 0)); // cooperative checkpoint
+      while (true) {
+        const mode = task.cancelled ? (task.injected ? 2 : 1) : 0;
+        if (mode === 1) task.injected = true;
+        if (!enterTask(task, () => wasm[`__snek_step_${name}`](frame, mode))) break;
+        if (task.cancelled && !task.injected) continue;
+        if (task.requests.size && !task.runnable) {
+          // One waiter per invocation, not repeated Promise.race handlers on a
+          // long-lived request while other children keep making progress.
+          await new Promise(resolve => {
+            task.wake = resolve;
+            if ([...task.requests].some(request => request.settled) || (task.cancelled && !task.injected)) resolve();
+          });
+          task.wake = null;
+        } else await new Promise(resolve => setTimeout(resolve, 0));
       }
+      if (task.cancelled) throw new SnekCancelledError(signal?.reason);
       return enterTask(task, () => lift(result, wasm[`__snek_result_${name}`](frame)));
     } finally {
       frame = null;
+      task.wake = null;
       task.requests.clear();
+      signal?.removeEventListener("abort", abort);
     }
   }
   for (const [name, params, result, isAsync] of signatures) {
@@ -311,7 +333,19 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
       api[name] = (...args) => enter(() => lift(result, wasm[name](...argumentsToWasm(args))));
       continue;
     }
-    api[name] = (...args) => runAsync(name, result, () => wasm[name](...argumentsToWasm(args)));
+    api[name] = (...args) => runAsync(name, result,
+      () => wasm[name](...argumentsToWasm(args.slice(0, params.length))), () => {
+        if (args.length !== params.length && args.length !== params.length + 1)
+          throw new TypeError(`${name} expects ${params.length} arguments and optional call options`);
+        const options = args[params.length];
+        if (options !== undefined && (options === null || typeof options !== "object" || Array.isArray(options)))
+          throw new TypeError("call options must be an object");
+        const signal = options?.signal;
+        if (signal !== undefined && (signal === null || typeof signal.aborted !== "boolean" ||
+            typeof signal.addEventListener !== "function" || typeof signal.removeEventListener !== "function"))
+          throw new TypeError("signal must be an AbortSignal");
+        return signal;
+      });
   }
   return Object.freeze(api);
 }

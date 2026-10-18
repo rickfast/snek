@@ -1,6 +1,6 @@
 ;; Call-scoped bridge arena. Library targets disallow WASI arena users.
 ;; Strings are copied into the GC heap; private JS drivers retain opaque GC frames.
-(global (export "__snek_abi") i32 (i32.const 2))
+(global (export "__snek_abi") i32 (i32.const 3))
 (export "__snek_yielded" (global $sm.yielded))
 (global $__snek_bump (mut i32) (i32.const 65536))
 (global $__snek_length (export "__snek_length") (mut i32) (i32.const 0))
