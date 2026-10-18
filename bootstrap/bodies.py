@@ -1131,6 +1131,10 @@ class BodyChecker:
         return [l, r]
 
     def binary(self, op: str, left: BodyExpr, right: BodyExpr, node: Node) -> BodyExpr:
+        if op == "BitOr" and left.ty.kind == "dict":
+            if not left.ty.same(right.ty):
+                declaration_error("dictionary union needs matching types, got " + left.ty.display() + " and " + right.ty.display(), node)
+            return BodyExpr("DictOp", left.ty, node, "ior" if node.kind == "AugAssign" else "union").add(left).add(right)
         if op == "Add" and left.ty.kind == "tuple" and right.ty.kind == "tuple":
             pre: list[BodyStmt] = []
             a = self.capture(left, pre)
@@ -2600,7 +2604,7 @@ class BodyChecker:
                                 "extend" if op == "Add" else "imul").add(current).add(value)))
             value = current
         else:
-            value = self.binary(op, current, self.expr(rhs, old.ty if number_node(rhs) else DeclType("unknown")), node)
+            value = self.binary(op, current, self.expr(rhs, old.ty if number_node(rhs) or (old.ty.kind == "dict" and rhs.kind == "Dict") else DeclType("unknown")), node)
             value = self.coerce(value, old.ty, node)
         if old.kind in ("LocalGet", "CapturedGet"):
             value = self.coerce(value, self.ctx.types[old.text], node)

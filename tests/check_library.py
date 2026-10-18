@@ -368,6 +368,11 @@ def words() -> dict[str, str]:
     return {"first": "one", "second": "two"}
 def echo(values: dict[str, str]) -> dict[str, str]:
     return values
+def merge(left: dict[str, str], right: dict[str, str]) -> dict[str, str]:
+    return left | right
+def merge_inplace(left: dict[str, str], right: dict[str, str]) -> dict[str, str]:
+    left |= right
+    return left
 def read(values: dict[str, str], key: str) -> str:
     return values[key]
 def write(values: dict[str, str], key: str, text: str) -> None:
@@ -414,7 +419,7 @@ def boxes() -> dict[str, Box | None]:
 def box_value(value: Box) -> i32:
     return value.value
 '''
-DICT_EXPORTS = ["words", "echo", "read", "write", "upper", "from_host", "iterating", "delayed", "integers", "wide", "flags", "nested", "lists", "in_list", "objects", "functions", "apply", "apply_async", "boxes", "box_value"]
+DICT_EXPORTS = ["words", "echo", "merge", "merge_inplace", "read", "write", "upper", "from_host", "iterating", "delayed", "integers", "wide", "flags", "nested", "lists", "in_list", "objects", "functions", "apply", "apply_async", "boxes", "box_value"]
 
 TUPLE_SOURCE = '''
 from typing import Callable, Coroutine
@@ -1178,6 +1183,21 @@ assert.equal(await lib.apply_async(async value => value, pair), pair);
 assert.throws(() => lib.apply(value => value.toArray(), pair), /handle from this Snek instance/);
 await assert.rejects(lib.apply_async(async value => value.toArray(), pair), SnekError);
 assert.equal(lib.echo(pair), pair);
+''')
+
+    def test_dictionary_union_handles(self):
+        self.src.write_text(DICT_SOURCE)
+        self.build(DICT_EXPORTS)
+        self.node('''
+const lib = await instantiate(bytes, {imports: {edit: value => value, later: async value => value}});
+const left = lib.words(), right = lib.words(); right.clear(); right.set("first", "replaced"); right.set("third", "three");
+const merged = lib.merge(left, right);
+assert.notEqual(merged, left); assert.notEqual(merged, right);
+assert.equal(left.get("first"), "one"); assert.equal(right.size, 2);
+assert.deepEqual(merged.entries(), [["first", "replaced"], ["second", "two"], ["third", "three"]]);
+assert.equal(lib.merge_inplace(left, right), left);
+assert.deepEqual(left.entries(), merged.entries());
+assert.equal(lib.merge_inplace(left, left), left);
 ''')
 
     def test_dictionary_handles(self):

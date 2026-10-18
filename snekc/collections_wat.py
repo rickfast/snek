@@ -308,6 +308,11 @@ class CollectionEmitter:
     (struct.set {D} $len {d} (i32.const 0)) (struct.set {D} $used {d} (i32.const 0))
     (struct.set {D} $slots {d} (array.new_default $u32s (i32.const 8)))
     (struct.set {D} $entries {d} (array.new_default {A} (i32.const 4))))"""
+        if op in ("union", "ior"):
+            update = self.collection_op(t, "update")
+            value = f"(call {self.collection_op(t, 'copy')} {d})" if op == "union" else d
+            return head + f""" (param $other (ref {D})) (result (ref {D})) (local $out (ref {D}))
+    (local.set $out {value}) (call {update} (local.get $out) (local.get $other)) (local.get $out))"""
         if op == "copy":
             update = self.collection_op(t, "update")
             return head + f""" (result (ref {D})) (local $out (ref {D}))

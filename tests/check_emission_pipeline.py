@@ -19,6 +19,22 @@ from snekc.wasm import encode
 
 
 class RepeatEmissionTests(unittest.TestCase):
+    def test_dictionary_union_survives_owned_bridge_and_repeat_emission(self):
+        import json
+        from bootstrap.body_bridge import to_module
+        from snekc.emit_wat import emit_module
+        owned = check((ROOT / "examples/dict_union.py").read_text())
+        before = owned.tree().json()
+        reference = to_module(json.loads(before))
+        prelude = (ROOT / "snekc/prelude.wat").read_text()
+        for build in (lambda: emit_source_module(owned, prelude), lambda: emit_module(reference)):
+            wat = build()
+            self.assertIn(".union", wat)
+            self.assertIn(".ior", wat)
+            self.assertEqual(build(), wat)
+            self.assertTrue(encode(wat).startswith(b"\0asm"))
+        self.assertEqual(owned.tree().json(), before)
+
     def test_library_schema_matches_across_emitters(self):
         import json
         from bootstrap.body_bridge import to_module

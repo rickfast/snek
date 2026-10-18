@@ -363,6 +363,10 @@ def emit_dict_helper(self: SourceEmitter, t: DeclType, op: str) -> str:
         return head + f' (param $k {K}){params}{result}\n    ' + '\n    '.join(body) + ')'
     if op == 'clear':
         return head + f'\n    (struct.set {D} $len {d} (i32.const 0)) (struct.set {D} $used {d} (i32.const 0))\n    (struct.set {D} $slots {d} (array.new_default $u32s (i32.const 8)))\n    (struct.set {D} $entries {d} (array.new_default {A} (i32.const 4))))'
+    if op in ('union', 'ior'):
+        update = self.operation(t, 'update')
+        value = f"(call {self.operation(t, 'copy')} {d})" if op == 'union' else d
+        return head + f' (param $other (ref {D})) (result (ref {D})) (local $out (ref {D}))\n    (local.set $out {value}) (call {update} (local.get $out) (local.get $other)) (local.get $out))'
     if op == 'copy':
         update = self.operation(t, 'update')
         return head + f' (result (ref {D})) (local $out (ref {D}))\n    (local.set $out (call {D}.new)) (call {update} (local.get $out) {d}) (local.get $out))'

@@ -1836,7 +1836,7 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
             return self.check_expr(node, other)
         if isinstance(node, ast.List) and not node.elts and isinstance(other, ListT):
             return self.check_expr(node, other)  # xs + []
-        if isinstance(node, ast.Dict) and not node.keys and isinstance(other, DictT):
+        if isinstance(node, ast.Dict) and isinstance(other, DictT):
             return self.check_expr(node, other)
         return self.check_expr(node)
 
@@ -2021,6 +2021,10 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
         raise CompileError(f"undefined name '{n}'", node)
 
     def arith(self, op: ast.operator, l: ir.Expr, r: ir.Expr, node: ast.AST) -> ir.Expr:
+        if isinstance(op, ast.BitOr) and isinstance(l.ty, DictT):
+            if l.ty != r.ty:
+                raise CompileError(f"dictionary union needs matching types, got {l.ty} and {r.ty}", node)
+            return ir.DictOp(l.ty, "ior" if isinstance(node, ast.AugAssign) else "union", l, [r])
         info = ARITH_OPS.get(type(op))
         if info is None:
             sym = "**" if isinstance(op, ast.Pow) else type(op).__name__
