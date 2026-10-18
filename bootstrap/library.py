@@ -41,17 +41,30 @@ def library_callback_types(ty: str) -> list[str]:
     types: list[str] = params.split(", ") if params != "" else []
     types.append(ty[end + 3:-1])
     for i in range(len(types)):
-        value = types[i]
+        value = library_callback_result(types[i]) if i == len(types) - 1 else types[i]
         if "[" in value:
             raise ValueError("callback signatures cannot contain collections, nested callbacks, or coroutines: " + ty)
         if value != "None" or i != len(types) - 1: library_type(value)
     return types
 
 
+def library_callback_result(ty: str) -> str:
+    return ty[22:-1] if ty.startswith("Coroutine[None, None, ") and ty.endswith("]") else ty
+
+
+def library_callback_async(callbacks: list[str]) -> bool:
+    for ty in callbacks:
+        if library_callback_types(ty)[-1].startswith("Coroutine["): return True
+    return False
+
+
 def library_callback_heap(ty: str) -> str:
     types = library_callback_types(ty)
     parts: list[str] = []
-    for value in types: parts.append("none" if value == "None" else value.replace(" | None", "?"))
+    for value in types:
+        inner = library_callback_result(value)
+        part = "none" if inner == "None" else inner.replace(" | None", "?")
+        parts.append("coro<" + part + ">" if value.startswith("Coroutine[") else part)
     return "$callable<" + "~".join(parts[:-1]) + ":" + parts[-1] + ">"
 
 
@@ -66,6 +79,7 @@ def library_type(ty: str) -> str:
 
 
 def library_ts(ty: str) -> str:
+    if ty.startswith("Coroutine["): return "PromiseLike<" + library_ts(library_callback_result(ty)) + ">"
     if ty.startswith("Callable["):
         types = library_callback_types(ty)
         params: list[str] = []
@@ -102,9 +116,13 @@ def library_callback_imports(callbacks: list[str], offset: i32) -> str:
         types = library_callback_types(callbacks[i])
         params = " (param (ref extern))"
         for ty in types[:-1]: params += " (param " + ("i32 i32" if ty == "str" else library_type(ty)) + ")"
-        ret = types[-1]
+        ret = library_callback_result(types[-1])
         result = "" if ret == "None" else " (result " + ("i32 i32" if ret == "str" else library_type(ret)) + ")"
-        lines.append('(import "snek_callback" "' + str(i) + '" (func $__snek_host_' + str(offset + i) + params + result + '))')
+        if types[-1].startswith("Coroutine["):
+            lines.append('(import "snek_callback_async" "' + str(i) + '" (func $__snek_host_' + str(offset + i) + params + '))')
+            lines.append('(import "snek_callback_result" "' + str(i) + '" (func $__snek_result_' + str(offset + i) + result + '))')
+        else:
+            lines.append('(import "snek_callback" "' + str(i) + '" (func $__snek_host_' + str(offset + i) + params + result + '))')
     return "\n".join(lines)
 
 
@@ -127,7 +145,10 @@ def library_callback_code(callbacks: list[str], offset: i32) -> str:
         ty = callbacks[i]
         types = library_callback_types(ty)
         params = types[:-1]
-        ret = types[-1]
+        ret = library_callback_result(types[-1])
+        async_heap = ""
+        if types[-1].startswith("Coroutine["):
+            async_heap = "$coro<" + ("none" if ret == "None" else ret.replace(" | None", "?")) + ">"
         heap = library_callback_heap(ty)
         prefix = "$__snek_callback_" + str(i)
         env = prefix + ".env"
@@ -151,14 +172,16 @@ def library_callback_code(callbacks: list[str], offset: i32) -> str:
             elif params[p] == "bool": value = "(i32.ne " + value + " (i32.const 0))"
             args.append(value)
         result = "" if ret == "None" else " (result " + ("(ref $str)" if ret == "str" else library_type(ret)) + ")"
+        if async_heap != "": result = " (result (ref " + async_heap + "))"
         lines.append("(func " + prefix + ".step (type " + heap + ".sig) (param $env (ref $env<>))" + typed + result + " (call " + prefix + ".host (struct.get " + env + " 0 (ref.cast (ref " + env + ") (local.get $env)))" + values + "))")
-        lines.append(library_host_wrapper(LibraryExport("callback", prefix[1:] + ".host", ["HostObject"] + params, ret), offset + i))
+        lines.append(library_host_wrapper(LibraryExport("callback " + str(i), prefix[1:] + ".host", ["HostObject"] + params, ret, async_heap), offset + i))
         lines.append("(func " + prefix + ".invoke (param $closure (ref " + heap + "))" + typed + result + " (call_ref " + heap + ".sig (struct.get " + heap + " $env (local.get $closure))" + values + " (struct.get " + heap + " $fn (local.get $closure))))")
-        lines.append(library_sync_export(LibraryExport("callback", prefix[1:] + ".invoke", [], ret), head, args))
+        item = LibraryExport("__snek_callback_" + str(i), prefix[1:] + ".invoke", [], ret, async_heap)
+        lines.append(library_async_export(item, head, args) if async_heap != "" else library_sync_export(item, head, args))
     return "\n".join(lines)
 
 
-def library_host_imports(hosts: list[LibraryExport], objects: bool = False) -> str:
+def library_host_imports(hosts: list[LibraryExport], objects: bool = False, async_callbacks: bool = False) -> str:
     lines: list[str] = []
     if objects:
         lines.append('(import "snek_object" "same" (func $__snek_object_same (param (ref null extern) (ref null extern)) (result i32)))')
@@ -180,9 +203,11 @@ def library_host_imports(hosts: list[LibraryExport], objects: bool = False) -> s
             lines.append('(import "snek_host" ' + json_string(item.name) + ' (func $__snek_host_' + str(index) + params + result + '))')
     for item in hosts:
         if item.heap != "":
-            lines.append('(import "snek_async" "status" (func $__snek_async_status (result i32)))')
-            lines.append('(import "snek_async" "error" (func $__snek_async_error (result i32 i32)))')
+            async_callbacks = True
             break
+    if async_callbacks:
+        lines.append('(import "snek_async" "status" (func $__snek_async_status (result i32)))')
+        lines.append('(import "snek_async" "error" (func $__snek_async_error (result i32 i32)))')
     return "\n".join(lines)
 
 
@@ -353,7 +378,7 @@ def library_code(exports: list[LibraryExport], hosts: list[LibraryExport]) -> st
         types = library_callback_types(ty)
         args_json: list[str] = []
         for arg in types[:-1]: args_json.append(json_string(arg))
-        callback_signatures.append("[" + json_string(ty) + ",[" + ",".join(args_json) + "]," + json_string(types[-1]) + "]")
+        callback_signatures.append("[" + json_string(ty) + ",[" + ",".join(args_json) + "]," + json_string(library_callback_result(types[-1])) + "," + ("true" if types[-1].startswith("Coroutine[") else "false") + "]")
     js = "// Generated by Snek. ES module; do not edit.\nconst signatures = [" + ",".join(signatures) + "];\nconst hostSignatures = [" + ",".join(host_signatures) + "];\nconst callbackSignatures = [" + ",".join(callback_signatures) + "];\n" + emit_library_javascript()
     dts = "// Generated by Snek.\nexport interface SnekLibrary {\n" + "\n".join(declarations) + "\n}\n"
     dts += "export interface SnekImports {\n" + "\n".join(host_declarations) + "\n}\n"

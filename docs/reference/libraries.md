@@ -237,7 +237,7 @@ its invocation's frame until the host settles it, but does not block other calls
 | `str` | `string`, copied as UTF-8 |
 | `HostObject` | `object`, opaque GC-managed JavaScript reference |
 | `HostObject | None` | `object | null` |
-| `Callable[[T, ...], R]` | Typed synchronous function |
+| `Callable[[T, ...], R]` | Typed synchronous function, or async function when `R` is a `Coroutine` |
 | `None` return | `void` / `undefined` |
 
 The generated `.d.ts` describes an instance's exported methods. Wrappers also
@@ -342,8 +342,8 @@ greet("browser"); // Hello, browser
 ```
 
 Callback arguments and results can be numbers, booleans, strings, `HostObject`,
-or `HostObject | None`; results can also be `None`. Nested callbacks, collections,
-optional callbacks and coroutine-returning callbacks are not supported. Callbacks
+or `HostObject | None`; results can also be `None`. Nested callbacks, collections
+and optional callbacks are not supported. Callbacks with these result types
 are synchronous: returning a Promise is an error, including for `None` results.
 The generated TypeScript uses `undefined` for a `None` callback result to catch
 accidentally async functions.
@@ -365,6 +365,43 @@ instance is already executing a synchronous step, so host functions must
 not invoke a received Snek callback inline. Deferred events can invoke it after
 the current step finishes, including while an async call is suspended. Exceptions and boundary validation follow the same
 rules as exports and synchronous host imports.
+
+### Async callbacks
+
+Declare a callback returning `Coroutine[None, None, T]` when it performs async
+work. JavaScript supplies a function returning `PromiseLike<T>`; Snek awaits it:
+
+```python
+from typing import Callable, Coroutine
+
+async def transform(fetch_text: Callable[[str], Coroutine[None, None, str]], url: str) -> str:
+    return (await fetch_text(url)).upper()
+```
+
+```javascript
+const text = await lib.transform(async url => {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  return response.text();
+}, "./message.txt");
+```
+
+Snek can also return async functions and closures using the same annotation.
+Their JavaScript wrappers return Promises, and calls can overlap with other async
+invocations. Passing a returned closure back into the same instance preserves its
+identity. Host declarations may accept or return async callbacks as well.
+
+Async callback results use the same scalar/string/opaque-object types as sync
+callbacks, plus `None`. `Coroutine[None, None, None]` maps to `PromiseLike<void>`.
+Returning a bare value is rejected. Promise rejections, synchronous throws, and
+invalid resolved values become catchable Snek `RuntimeError`s; awaited `finally`
+cleanup runs. Uncaught Snek exceptions from returned async closures reject their
+JavaScript Promise with `SnekError`.
+
+Creating a Snek coroutine does not start its callback until it is awaited. A
+JavaScript call to a returned async closure starts immediately, just like an async
+export. Synchronous re-entry remains forbidden; an async callback must not call a
+Snek wrapper on the same instance before first yielding back to JavaScript.
 
 ## Initialization, errors and output
 

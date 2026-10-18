@@ -61,7 +61,7 @@ or `snek run examples/modules/main.py`.
 `--library --export FUNCTION` produces a core Wasm library and generated
 JavaScript/TypeScript bindings. Both exports and `@host("name")`
 imports support fixed-width numbers, booleans, copied strings and opaque `HostObject`
-references (including nullable references), synchronous typed `Callable` values, plus `None`
+references (including nullable references), typed sync/async `Callable` values, plus `None`
 returns. Host declarations have typed signatures and `pass` bodies; their host
 names remain explicit metadata in checked IR, not ordinary function bodies.
 JavaScript supplies the functions when instantiating the library. There is no
@@ -74,6 +74,9 @@ entry guard resets the arena on exceptional exit. Private JavaScript closures re
 opaque WasmGC callable and coroutine references; public bindings expose ordinary
 JavaScript functions and Promises, not raw Snek objects. Weak maps preserve callback
 identity without manual handle tables.
+Async callback signatures use `Coroutine[None, None, T]`. Imported callback frames
+reuse the async host protocol and exported callback frames reuse the async export
+driver, including per-invocation pending results and exception translation.
 Host string returns, like exported string parameters, enable the Unicode tables
 needed for open-world input.
 

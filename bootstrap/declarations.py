@@ -182,6 +182,7 @@ class DeclType:
         if self.kind == "Callable":
             for i in range(len(self.args)):
                 arg = self.args[i]
+                if i == len(self.args) - 1 and arg.kind == "Coroutine": arg = arg.args[0]
                 if arg.kind == "Callable" or (arg.kind == "None" and i != len(self.args) - 1) or not arg.host_boundary():
                     return False
             return True

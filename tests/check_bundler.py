@@ -33,6 +33,11 @@ const exact: bigint = library.twice(1n);
 const opaque: object = library.identity(document.body);
 const greeting: string = library.apply(library.make_greeter(), "typed");
 library.notify(text => { console.log(text); }, "typed");
+const asyncGreeting: Promise<string> = library.apply_async(async text => text, "typed");
+// @ts-expect-error async callbacks must return a PromiseLike
+library.apply_async(text => text, "typed");
+// @ts-expect-error async callback result types are checked
+library.apply_async(async text => 42, "typed");
 // @ts-expect-error callbacks must return their declared value
 library.apply(text => 42, "typed");
 // @ts-expect-error callback parameters are typed
@@ -83,7 +88,7 @@ class BundlerTests(unittest.TestCase):
     def compile(self, optimize):
         driver.build(self.root / "program.py", self.root / "src/generated/program.wasm",
                      optimize=optimize, compiler=self.compiler, library=True,
-                     exports=["greet", "twice", "load", "identity", "apply", "make_greeter", "notify"])
+                     exports=["greet", "twice", "load", "identity", "apply", "make_greeter", "notify", "apply_async"])
         self.run_node("node_modules/typescript/bin/tsc", "--noEmit")
 
     def run_node(self, *args):

@@ -1445,7 +1445,7 @@ def emit_module(module: ir.Module, component: bool = False, *, graph_factory=Non
         from .machine_bridge import WasmMachineBackend
         machine_backend = WasmMachineBackend(Path(os.environ["SNEK_MACHINE_EMITTER"]))
     selected = []
-    from bootstrap.library import LibraryExport, library_code, library_target, library_host_imports, library_host_wrapper, library_callbacks, library_callback_imports
+    from bootstrap.library import LibraryExport, library_code, library_target, library_host_imports, library_host_wrapper, library_callbacks, library_callback_imports, library_callback_async
     hosts = [LibraryExport(f.host, f.name, [str(t) for _, t in f.params],
                           str(f.ret.elem) if isinstance(f.ret, CoroutineT) else str(f.ret),
                           "$" + mangle(f.ret) if isinstance(f.ret, CoroutineT) else "")
@@ -1474,7 +1474,8 @@ def emit_module(module: ir.Module, component: bool = False, *, graph_factory=Non
         if component or emitter.main_async or emitter.byte_io or emitter.stdlib_io or emitter.wasi_features:
             raise ValueError("library targets support print(), not WASI services or async initialization")
         wat = wat.replace('(export "_start")', '(export "__snek_init")')
-        imports = library_host_imports(hosts, emitter.host_objects) + "\n" + library_callback_imports(library_callbacks(selected, hosts), len(hosts))
+        callbacks = library_callbacks(selected, hosts)
+        imports = library_host_imports(hosts, emitter.host_objects, library_callback_async(callbacks)) + "\n" + library_callback_imports(callbacks, len(hosts))
         wat = wat.replace("(module\n", "(module\n" + imports + "\n", 1)
         wrappers = "\n".join(library_host_wrapper(item, i) for i, item in enumerate(hosts))
         wat = wat.rstrip()[:-1] + wrappers + "\n" + library_code(selected, hosts) + "\n)\n"

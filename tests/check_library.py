@@ -161,6 +161,40 @@ def failer() -> Callable[[], None]:
 '''
 CALLBACK_EXPORTS = ["apply", "echo", "same", "make", "counter", "install", "from_host", "from_async_host", "deferred", "deferred_make", "apply_void", "object_callback", "failer"]
 
+ASYNC_CALLBACK_SOURCE = '''from snek import checkpoint, HostObject
+from typing import Callable, Coroutine
+async def apply(fn: Callable[[str], Coroutine[None, None, str]], text: str) -> str:
+    return (await fn(text)).upper()
+def echo(fn: Callable[[str], Coroutine[None, None, str]]) -> Callable[[str], Coroutine[None, None, str]]:
+    return fn
+def make(prefix: str) -> Callable[[str], Coroutine[None, None, str]]:
+    async def callback(text: str) -> str:
+        await checkpoint()
+        return prefix + text.upper()
+    return callback
+async def recover(fn: Callable[[str], Coroutine[None, None, str]]) -> str:
+    try:
+        return await fn("input")
+    except RuntimeError as error:
+        return str(error)
+    finally:
+        await checkpoint()
+        print("cleaned")
+def failer() -> Callable[[str], Coroutine[None, None, str]]:
+    async def callback(text: str) -> str:
+        await checkpoint()
+        raise ValueError(text)
+    return callback
+async def apply_void(fn: Callable[[], Coroutine[None, None, None]]) -> None:
+    await fn()
+def object_callback() -> Callable[[HostObject | None], Coroutine[None, None, HostObject | None]]:
+    async def callback(value: HostObject | None) -> HostObject | None:
+        await checkpoint()
+        return value
+    return callback
+'''
+ASYNC_CALLBACK_EXPORTS = ["apply", "echo", "make", "recover", "failer", "apply_void", "object_callback"]
+
 HOST_SOURCE = '''from snek import host, i32, i64, f32, f64
 @host("render")
 def render(value: str) -> None:
@@ -426,6 +460,79 @@ mode = "ok";
 assert.equal(made("still works"), "prefix: STILL WORKS");
 ''')
 
+    def test_async_callback_boundaries(self):
+        self.src.write_text(ASYNC_CALLBACK_SOURCE)
+        result = self.build(ASYNC_CALLBACK_EXPORTS)
+        self.assertIn("=> PromiseLike<string>", result.dts_path.read_text())
+        self.node('''
+let output = "";
+const lib = await instantiate(bytes, {stdout: text => output += text});
+const supplied = async text => text + "🐍";
+assert.equal(await lib.apply(supplied, "Straße"), "STRASSE🐍");
+assert.equal(lib.echo(supplied), supplied);
+const made = lib.make("prefix: ");
+assert.equal(lib.echo(made), made);
+assert.equal(await made("Straße"), "prefix: STRASSE");
+assert.equal(await lib.apply(made, "Straße"), "PREFIX: STRASSE");
+assert.deepEqual(await Promise.all([made("one"), made("two"), lib.apply(supplied, "three")]),
+  ["prefix: ONE", "prefix: TWO", "THREE🐍"]);
+assert.equal(await lib.apply(text => ({then(resolve) {resolve(text);}}), "ok"), "OK");
+for (const [fn, message] of [[async () => {throw new Error("rejected 🐍");}, "rejected 🐍"],
+  [() => {throw new Error("thrown");}, "thrown"], [async () => 42, "expected string"],
+  [() => "bare", "must return a Promise"], [async () => "\\ud800", "surrogate"]]) {
+  assert.ok((await lib.recover(fn)).includes(message));
+  await assert.rejects(lib.apply(fn, "input"), error => error instanceof SnekError && error.message.includes(message));
+}
+assert.equal(output, "cleaned\\n".repeat(5));
+await assert.rejects(lib.failer()("async closure failure"), error => error instanceof SnekError && error.message.includes("async closure failure"));
+await assert.rejects(made(42), /expected string/);
+await assert.rejects(made(), /expects 1/);
+await assert.rejects(lib.apply_void(async () => 42), /must return undefined/);
+await lib.apply_void(async () => {});
+const object = {};
+assert.equal(await lib.object_callback()(object), object);
+assert.equal(await lib.object_callback()(null), null);
+assert.equal(await made("still works"), "prefix: STILL WORKS");
+''')
+
+    def test_async_callback_only_signature_and_host_declarations(self):
+        self.src.write_text('''from typing import Callable, Coroutine
+def echo(fn: Callable[[str], Coroutine[None, None, str]]) -> Callable[[str], Coroutine[None, None, str]]:
+    return fn
+''')
+        self.build(["echo"])
+        self.node('const lib = await instantiate(bytes); const fn = async text => text; assert.equal(lib.echo(fn), fn);')
+        self.src.write_text('''from typing import Callable, Coroutine
+from snek import host
+@host("store")
+def store(fn: Callable[[str], Coroutine[None, None, str]]) -> None:
+    pass
+@host("get")
+def get() -> Callable[[str], Coroutine[None, None, str]]:
+    pass
+@host("get_async")
+async def get_async() -> Callable[[str], Coroutine[None, None, str]]:
+    pass
+async def callback_0(text: str) -> str:
+    return text.upper()
+def install() -> None:
+    store(callback_0)
+async def call(text: str) -> str:
+    fn = await get_async()
+    return await fn(text)
+''')
+        self.build(["install", "get", "call", "callback_0"])
+        self.node('''
+let saved;
+const supplied = async text => text + "🐍";
+const lib = await instantiate(bytes, {imports: {store: fn => {saved = fn;}, get: () => supplied, get_async: async () => supplied}});
+lib.install();
+assert.equal(await saved("Straße"), "STRASSE");
+assert.equal(lib.get(), supplied);
+assert.equal(await lib.call("hello"), "hello🐍");
+assert.equal(await lib.callback_0("ok"), "OK");
+''')
+
     def test_callback_scalar_signatures(self):
         types = ("i32", "i64", "f32", "f64", "bool")
         self.src.write_text('from snek import i32, i64, f32, f64\nfrom typing import Callable\n' + ''.join(
@@ -448,9 +555,31 @@ assert.throws(() => lib.apply_i64(() => 1, 0n), TypeError);
 assert.throws(() => lib.apply_bool(() => 1, true), TypeError);
 ''')
 
+    def test_async_callback_scalar_signatures(self):
+        types = ("i32", "i64", "f32", "f64", "bool")
+        self.src.write_text('from snek import i32, i64, f32, f64, checkpoint\nfrom typing import Callable, Coroutine\n' + ''.join(
+            f'async def apply_{ty}(fn: Callable[[{ty}], Coroutine[None, None, {ty}]], value: {ty}) -> {ty}:\n    return await fn(value)\n'
+            f'def make_{ty}() -> Callable[[{ty}], Coroutine[None, None, {ty}]]:\n    async def identity(value: {ty}) -> {ty}:\n        await checkpoint()\n        return value\n    return identity\n'
+            for ty in types))
+        self.build([prefix + ty for ty in types for prefix in ("apply_", "make_")])
+        self.node('''
+const lib = await instantiate(bytes);
+await Promise.all([["i32", -2147483648], ["i64", 9007199254740993n], ["f32", 1.1], ["f64", -0], ["bool", true]].map(async ([type, value]) => {
+  const fn = lib[`make_${type}`]();
+  const expected = type === "f32" ? Math.fround(value) : value;
+  assert.ok(Object.is(await fn(value), expected));
+  assert.ok(Object.is(await lib[`apply_${type}`](async value => value, value), expected));
+}));
+await assert.rejects(lib.apply_i32(async () => 2147483648, 0), /i32 out of range/);
+await assert.rejects(lib.apply_i64(async () => 1, 0n), /expected bigint/);
+await assert.rejects(lib.apply_bool(async () => 1, true), /expected boolean/);
+''')
+
     def test_unsupported_callback_signatures(self):
         for signature in ("Callable[[list[str]], str]", "Callable[[str], list[str]]",
                           "Callable[[Callable[[], str]], str]", "Callable[[], Coroutine[str]]",
+                          "Callable[[], Coroutine[None, None, list[str]]]",
+                          "Callable[[Coroutine[None, None, str]], str]",
                           "Callable[[None], str]", "Callable[[str], str] | None"):
             for host in (False, True):
                 with self.subTest(signature=signature, host=host):

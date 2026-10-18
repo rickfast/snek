@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 from snekc import driver
 from check_library import SOURCE, EXPORTS, HOST_SOURCE, HOST_EXPORTS, ASYNC_SOURCE, ASYNC_EXPORTS
 from check_library import OBJECT_SOURCE, OBJECT_EXPORTS, CALLBACK_SOURCE, CALLBACK_EXPORTS
+from check_library import ASYNC_CALLBACK_SOURCE, ASYNC_CALLBACK_EXPORTS
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -53,6 +54,10 @@ class BrowserTests(unittest.TestCase):
         for name, optimize in (("callbacks", False), ("callbacks-optimized", True)):
             driver.build(source, root / (name + ".wasm"), optimize=optimize,
                          compiler=compiler, library=True, exports=CALLBACK_EXPORTS)
+        source.write_text(ASYNC_CALLBACK_SOURCE)
+        for name, optimize in (("async-callbacks", False), ("async-callbacks-optimized", True)):
+            driver.build(source, root / (name + ".wasm"), optimize=optimize,
+                         compiler=compiler, library=True, exports=ASYNC_CALLBACK_EXPORTS)
         shutil.copyfile(ROOT / "examples/library/worker.mjs", root / "worker.mjs")
         driver.build(ROOT / "examples/library/host_demo.py", root / "host_demo.wasm", optimize=False,
                      compiler=compiler, library=True, exports=["increment"])
@@ -240,6 +245,27 @@ class BrowserTests(unittest.TestCase):
                 self.assertEqual(result[1], 2)
                 self.assertIn("browser rejection", result[2])
                 self.assertEqual(result[3:], ["DONE!", ["done", "wait", "cleaned", "done", "wait"], "9007199254740993", 42])
+
+    def test_async_callbacks_and_fetch(self):
+        for target in ("async-callbacks", "async-callbacks-optimized"):
+            with self.subTest(target=target):
+                result = self.page.evaluate('''async target => {
+                  const {instantiate} = await import(`./${target}.js`);
+                  let output = "";
+                  const lib = await instantiate(`./${target}.wasm`, {stdout: text => output += text});
+                  const fetchText = async url => (await fetch(url)).text();
+                  const text = await lib.apply(fetchText, "./message.txt");
+                  const made = lib.make("prefix: ");
+                  const values = await Promise.all([made("Straße"), made("中🐍")]);
+                  const error = await lib.recover(async () => {throw new Error("browser callback rejected");});
+                  const node = document.createElement("div");
+                  return [text, values, lib.echo(fetchText) === fetchText, lib.echo(made) === made,
+                    error, output, await lib.object_callback()(node) === node];
+                }''', target)
+                self.assertIn("AWAITED FETCH", result[0])
+                self.assertEqual(result[1:4], [["prefix: STRASSE", "prefix: 中🐍"], True, True])
+                self.assertIn("browser callback rejected", result[4])
+                self.assertEqual(result[5:], ["cleaned\n", True])
 
     def test_concurrent_async_host_results(self):
         for target in ("async", "async-optimized"):

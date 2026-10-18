@@ -10,7 +10,7 @@ from bootstrap.emit_support import EmitUnicode
 from bootstrap.emit_runtime import emit_collection_helpers, emit_keyed_builtin, emit_byte_io
 from bootstrap.emit_host import emit_host_helpers, emit_host_core_imports, emit_io_helpers, emit_component_imports
 from bootstrap.emit_suspension import OwnedMachine, owned_has_await, owned_machine_types, owned_machine_helpers, owned_runtime_machines, owned_runtime_machine
-from bootstrap.library import LibraryExport, library_target, library_code, library_host_imports, library_host_wrapper, library_callbacks, library_callback_imports
+from bootstrap.library import LibraryExport, library_target, library_code, library_host_imports, library_host_wrapper, library_callbacks, library_callback_imports, library_callback_async
 
 
 def emit_closures(e: SourceEmitter) -> str:
@@ -199,7 +199,7 @@ def emit_source_module(checked: BodyChecker, prelude_source: str, component: boo
     e.types.close()
     if e.types.host_objects and (exports is None or len(exports) == 0):
         raise ValueError("HostObject requires a --library build")
-    imports += "\n" + library_host_imports(host_functions, e.types.host_objects)
+    callbacks: list[str] = []
     start = '(func $snek.start (export "_start") (call $lib.reset) (call $snek.sys.reset) (call $rt.uncaught (block $uncaught (result (ref $BaseException)) (try_table (catch $snek.exc $uncaught) (call $snek.main)) (call $rt.flush) (return))))'
     if main_async:
         start = '(func $snek.start (export "_start") (local $main (ref $coro<none>)) (call $lib.reset) (call $snek.sys.reset) (call $rt.uncaught (block $uncaught (result (ref $BaseException)) (try_table (catch $snek.exc $uncaught) (local.set $main (call $snek.main)) (loop $run (br_if $run (call $coro<none>.advance (local.get $main))))) (call $rt.flush) (return))))'
@@ -230,5 +230,6 @@ def emit_source_module(checked: BodyChecker, prelude_source: str, component: boo
         if len(callbacks) > 0: unicode_dynamic = True
         start = start.replace('(export "_start")', '(export "__snek_init")')
     # Host strings are open-world input, even when every source literal is ASCII.
+    imports += "\n" + library_host_imports(host_functions, e.types.host_objects, library_callback_async(callbacks))
     unicode.build(e.literals.texts, checked.unicode_flags, checked.unicode_cases, checked.unicode_decimal, unicode_dynamic, checked.unicode_extra)
     return "\n".join(["(module", imports, emit_types(e, classes), "(tag $snek.exc (param (ref $BaseException)))", '' if component else '(memory (export "memory") 1)', unicode.wat(), prelude, byte_io, io, host, literals, collections, "\n".join(keyed), protocols, machines, builders, vtables, closures, "\n".join(funcs), component_runtime if component else start, library, ")"]) + "\n"

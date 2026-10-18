@@ -1,5 +1,5 @@
 from snek import HostObject, host, i64
-from typing import Callable
+from typing import Callable, Coroutine
 
 
 @host("fetch_text")
@@ -33,3 +33,7 @@ def make_greeter() -> Callable[[str], str]:
 
 def notify(fn: Callable[[str], None], text: str) -> None:
     fn(text)
+
+
+async def apply_async(fn: Callable[[str], Coroutine[None, None, str]], text: str) -> str:
+    return await fn(text)
