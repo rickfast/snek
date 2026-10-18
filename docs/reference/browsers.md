@@ -46,7 +46,11 @@ type also works because the loader compiles its bytes rather than requiring
 streaming compilation.
 
 Use `.js` and `.wasm` artifacts from the same build. The loader checks required
-exports, but this is not a cryptographic check that two artifacts belong together.
+exports and compares the complete boundary schema before running Snek module
+initialization. Mismatched parameters, results, host imports or nested handle
+types raise `SnekLoadError`, even when their low-level Wasm signatures match.
+This is an interface compatibility check, not authentication or a code digest:
+different implementations with the same interface remain compatible.
 
 ## Web Workers
 

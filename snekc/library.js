@@ -201,8 +201,8 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
     throw new SnekLoadError("Unable to instantiate Snek library. Use the .wasm and .js files from the same --library build.", { cause });
   }
   wasm = instance.exports;
-  if (wasm.__snek_abi?.value !== 9 || !(wasm.__snek_yielded instanceof WebAssembly.Global) || !(wasm.memory instanceof WebAssembly.Memory) || !(wasm.__snek_length instanceof WebAssembly.Global) ||
-      ["__snek_init", "__snek_reset", "__snek_alloc", "__snek_mark", "__snek_restore", "__snek_string_from", "__snek_string_to",
+  if (wasm.__snek_abi?.value !== 10 || !(wasm.__snek_yielded instanceof WebAssembly.Global) || !(wasm.memory instanceof WebAssembly.Memory) || !(wasm.__snek_length instanceof WebAssembly.Global) ||
+      ["__snek_init", "__snek_reset", "__snek_alloc", "__snek_mark", "__snek_restore", "__snek_string_from", "__snek_string_to", "__snek_interface",
         ...listSignatures.flatMap((_, i) => ["len", "get", "set", "append", "pop"].map(op => `__snek_list_${op}_${i}`)),
         ...dictSignatures.flatMap((_, i) => ["len", "next", "get", "contains", "set", "delete", "clear", "copy", "keys_at", "values_at"].map(op => `__snek_dict_${op}_${i}`)),
         ...tupleSignatures.flatMap(([, fields], i) => fields.map((_, field) => `__snek_tuple_get_${i}_${field}`)),
@@ -213,6 +213,17 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
         isAsync ? [name, `__snek_step_${name}`, `__snek_result_${name}`] : [name])]
         .some(name => typeof wasm[name] !== "function"))
     throw new SnekLoadError("Invalid Snek library exports. Use the .wasm and .js files from the same --library build.");
+  try {
+    const pointer = wasm.__snek_interface() >>> 0;
+    const schema = decoder.decode(new Uint8Array(wasm.memory.buffer, pointer, wasm.__snek_length.value >>> 0));
+    if (schema !== libraryInterface)
+      throw new SnekLoadError("Snek library interface mismatch. Use the .wasm and .js files from the same --library build.");
+  } catch (cause) {
+    if (cause instanceof SnekLoadError) throw cause;
+    throw new SnekLoadError("Unable to read Snek library interface. Rebuild the .wasm and .js files together.", {cause});
+  } finally {
+    wasm.__snek_reset();
+  }
   function begin(task = null) {
     if (busy) throw new Error("Snek library calls are not reentrant");
     busy = true;

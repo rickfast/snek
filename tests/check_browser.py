@@ -109,6 +109,11 @@ class BrowserTests(unittest.TestCase):
         for name, optimize in (("iterators", False), ("iterators-optimized", True)):
             driver.build(source, root / (name + ".wasm"), optimize=optimize,
                          compiler=compiler, library=True, exports=ITERATOR_EXPORTS)
+        for name, ty, value in (("schema", "i32", "1"), ("schema-wrong", "bool", "True")):
+            source.write_text('from snek import i32\nprint("initialized")\ndef value() -> ' + ty + ':\n    return ' + value + '\n')
+            for suffix, optimize in (("", False), ("-optimized", True)):
+                driver.build(source, root / (name + suffix + ".wasm"), optimize=optimize,
+                             compiler=compiler, library=True, exports=["value"])
         source.write_text(CLASS_VALUE_SOURCE)
         for name, optimize in (("classes", False), ("classes-optimized", True)):
             driver.build(source, root / (name + ".wasm"), optimize=optimize,
@@ -143,6 +148,20 @@ class BrowserTests(unittest.TestCase):
         self.page = context.new_page()
         self.page.set_default_timeout(15000)
         self.page.goto(self.url)
+
+    def test_interface_mismatch_precedes_initialization(self):
+        for suffix in ("", "-optimized"):
+            with self.subTest(suffix=suffix):
+                result = self.page.evaluate('''async suffix => {
+                  const {instantiate, SnekLoadError} = await import(`/schema${suffix}.js`);
+                  let output = "", mismatch = false;
+                  try {await instantiate(`/schema-wrong${suffix}.wasm`, {stdout: text => {output += text;}});}
+                  catch(e) {mismatch = e instanceof SnekLoadError && /interface mismatch/.test(e.message);}
+                  const before = output;
+                  const lib = await instantiate(`/schema${suffix}.wasm`, {stdout: text => {output += text;}});
+                  return {mismatch, before, output, value: lib.value()};
+                }''', suffix)
+                self.assertEqual(result, {"mismatch": True, "before": "", "output": "initialized\n", "value": 1})
 
     def test_iterator_handles(self):
         for target in ("iterators", "iterators-optimized"):

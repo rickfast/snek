@@ -979,6 +979,13 @@ main guards do not execute. Local imports work with the usual `--module-root`
 rules. Select functions defined in the entry module; wrap imported functions in
 an entry function when you want to expose them.
 
+Before initialization, the loader checks the bridge version, required helpers and
+the exact interface schema embedded in the Wasm. This includes export and host
+signatures, nested handle/callback types and class ancestry. Stale bindings paired
+with a different interface raise `SnekLoadError` before Snek top-level code runs.
+Rebuild and deploy `.wasm` and `.js` together. This check does not authenticate
+code or reject implementation-only changes with an unchanged interface.
+
 An uncaught Snek exception becomes a JavaScript `SnekError` with its class name and
 message. Failed initialization rejects `instantiate`. Wasm traps and host callback
 errors propagate as JavaScript errors. Reentrant calls into the same instance

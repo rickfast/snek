@@ -19,6 +19,26 @@ from snekc.wasm import encode
 
 
 class RepeatEmissionTests(unittest.TestCase):
+    def test_library_schema_matches_across_emitters(self):
+        import json
+        from bootstrap.body_bridge import to_module
+        from snekc.emit_wat import emit_module
+        from check_library import CLASS_VALUE_SOURCE, CLASS_VALUE_EXPORTS
+        from check_library import ITERATOR_SOURCE, ITERATOR_EXPORTS, HIGHER_CALLBACK_SOURCE, HIGHER_CALLBACK_EXPORTS
+        for source, exports in ((CLASS_VALUE_SOURCE, CLASS_VALUE_EXPORTS), (ITERATOR_SOURCE, ITERATOR_EXPORTS),
+                                (HIGHER_CALLBACK_SOURCE, HIGHER_CALLBACK_EXPORTS)):
+            with self.subTest(exports=exports):
+                owned = check(source)
+                reference = to_module(json.loads(owned.tree().json()))
+                prelude = (ROOT / "snekc/prelude.wat").read_text()
+                schemas = []
+                for wat in (emit_source_module(owned, prelude, exports=exports), emit_module(reference, exports=exports)):
+                    bindings = next(line.split(";; SNEK-BINDINGS ", 1)[1] for line in wat.splitlines() if ";; SNEK-BINDINGS " in line)
+                    schema_line = json.loads(bindings)["js"].splitlines()[0]
+                    self.assertTrue(schema_line.startswith("const libraryInterface = "))
+                    schemas.append(schema_line)
+                self.assertEqual(schemas[0], schemas[1])
+
     def test_iterator_handles_survive_owned_bridge_and_repeat_emission(self):
         import json
         from bootstrap.body_bridge import to_module

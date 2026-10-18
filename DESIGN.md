@@ -144,6 +144,15 @@ do not abort a suspended frame. Neither GC finalization nor arbitrary JavaScript
 iterator adapters are introduced. Nullable and nested iterators use the shared
 boundary graph, identity checks and invariant TypeScript brand.
 
+Bridge ABI 10 embeds an exact interface schema as passive UTF-8 data. It includes
+ordered export/host signatures, all nested boundary metadata and class ancestry.
+A private getter copies it into the call arena; JavaScript compares it with its
+generated schema and resets the arena before module initialization. This detects
+semantic mismatches that share a Wasm wire type, such as bool versus i32, without
+hash collisions or an external hashing dependency. Optimized and unoptimized
+modules use the same schema. It is not a code digest or a trust mechanism;
+implementations with the same interface remain interchangeable.
+
 Class boundaries use opaque `SnekObject` handles. A per-instance JavaScript
 private brand validates ownership; the private field strongly roots the WasmGC
 reference even after the public API is discarded. One weak identity map spans

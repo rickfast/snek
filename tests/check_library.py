@@ -2654,12 +2654,77 @@ assert.equal(output, "loop cleaned\\n");
         self.node('''
 const original = WebAssembly.instantiate;
 try {
-  for (const version of [undefined, 1, 2, 3, 4, 5, 6, 7, 8, 10]) {
+  for (const version of [undefined, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11]) {
     WebAssembly.instantiate = async (...args) => {
       const instance = await original(...args);
       return {exports: {...instance.exports, __snek_abi: version === undefined ? undefined : new WebAssembly.Global({value: "i32"}, version)}};
     };
     await assert.rejects(instantiate(bytes), /Invalid Snek library exports/);
+  }
+} finally {WebAssembly.instantiate = original;}
+assert.equal((await instantiate(bytes)).add(1, 2), 3);
+''')
+
+    def test_loader_rejects_mismatched_interfaces_before_initialization(self):
+        original = '''from snek import i32
+print("initialized")
+def echo(value: i32) -> i32:
+    return value
+'''
+        self.src.write_text(original)
+        self.build(["echo"])
+        self.src.write_text(original.replace("value: i32", "value: bool").replace("-> i32", "-> bool"))
+        self.build(["echo"], output="wrong.wasm")
+        self.src.write_text(original.replace("return value", "return value + 1"))
+        self.build(["echo"], output="compatible.wasm")
+        self.node('''
+const {SnekLoadError} = await import("./output.js");
+let output = "";
+for (const source of [await readFile("./wrong.wasm"), await WebAssembly.compile(await readFile("./wrong.wasm"))]) {
+  await assert.rejects(instantiate(source, {stdout: text => {output += text;}}),
+    error => error instanceof SnekLoadError && /interface mismatch/.test(error.message));
+}
+assert.equal(output, "");
+const lib = await instantiate(await readFile("./compatible.wasm"), {stdout: text => {output += text;}});
+assert.equal(output, "initialized\\n"); assert.equal(lib.echo(4), 5);
+assert.equal((await instantiate(bytes)).echo(4), 4);
+''')
+
+    def test_loader_checks_nested_and_host_interface_types(self):
+        for original, changed in [
+            ('from snek import i32\ndef echo() -> list[i32]:\n    return [1]\n',
+             'from snek import i32\ndef echo() -> list[bool]:\n    return [True]\n'),
+            ('from snek import i32, host\n@host("value")\ndef value() -> i32:\n    pass\ndef echo() -> i32:\n    return value()\n',
+             'from snek import i32, host\n@host("value")\ndef value() -> bool:\n    pass\ndef echo() -> i32:\n    return 1 if value() else 0\n'),
+            ('from snek import i32\nfrom typing import Callable\ndef echo(fn: Callable[[i32], i32]) -> i32:\n    return fn(1)\n',
+             'from snek import i32\nfrom typing import Callable\ndef echo(fn: Callable[[bool], bool]) -> i32:\n    return 1 if fn(True) else 0\n'),
+            ('class A:\n    pass\nclass B:\n    pass\nclass C(A):\n    pass\ndef echo(value: C) -> C:\n    return value\n',
+             'class A:\n    pass\nclass B:\n    pass\nclass C(B):\n    pass\ndef echo(value: C) -> C:\n    return value\n'),
+        ]:
+            with self.subTest(source=original):
+                self.src.write_text(original)
+                self.build(["echo"])
+                self.src.write_text(changed)
+                self.build(["echo"], output="wrong.wasm")
+                self.node('''
+let called = false;
+await assert.rejects(instantiate(await readFile("./wrong.wasm"), {imports: {value: () => {called = true; return 1;}}}), /interface mismatch/);
+assert.equal(called, false);
+''')
+
+    def test_loader_checks_missing_and_unreadable_interface(self):
+        self.build()
+        self.node('''
+const {SnekLoadError} = await import("./output.js");
+const original = WebAssembly.instantiate;
+try {
+  for (const getter of [undefined, () => {throw new Error("bad schema");}, () => -1]) {
+    WebAssembly.instantiate = async (...args) => {
+      const instance = await original(...args);
+      return {exports: {...instance.exports, __snek_interface: getter}};
+    };
+    await assert.rejects(instantiate(bytes), error => error instanceof SnekLoadError &&
+      /Invalid Snek library exports|Unable to read Snek library interface/.test(error.message));
   }
 } finally {WebAssembly.instantiate = original;}
 assert.equal((await instantiate(bytes)).add(1, 2), 3);
