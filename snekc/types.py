@@ -123,8 +123,7 @@ def host_boundary(t: Type) -> bool:
     if isinstance(t, ListT): return t.elem != NONE and host_boundary(t.elem)
     if isinstance(t, CallableT):
         ret = t.ret.elem if isinstance(t.ret, CoroutineT) else t.ret
-        return (all(p != NONE and not isinstance(p, CallableT) and host_boundary(p) for p in t.params)
-                and not isinstance(ret, CallableT) and host_boundary(ret))
+        return all(p != NONE and host_boundary(p) for p in t.params) and host_boundary(ret)
     return t in (*leaf, NONE)
 
 

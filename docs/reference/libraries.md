@@ -477,8 +477,8 @@ JavaScript functions returning `PromiseLike<T>`. Generated TypeScript checks
 parameter and result types, including `undefined` for synchronous `None` results.
 Host functions may inspect and mutate callback lists during a Snek call, but must
 defer invoking Snek callbacks until the synchronous step returns. Callback values
-cannot be nullable, and direct callback parameters/results that are themselves
-callbacks remain unsupported.
+cannot be nullable. Callback parameters/results may themselves be callbacks;
+see [higher-order callbacks](#higher-order-callbacks).
 
 ## Snek-owned class handles
 
@@ -646,9 +646,9 @@ greet("browser"); // Hello, browser
 Callback arguments and results can be numbers, booleans, strings, `HostObject`,
 or `HostObject | None`, Snek class/nullable class handles, plus supported `list[T]`
 handles (including nested lists);
-results can also be `None`. Lists can contain callbacks, but direct callback-valued
-callback parameters/results, collections other than supported
-lists, and optional callbacks are not supported. Callbacks with these result types
+results can also be `None`. Callbacks may also accept and return other callbacks,
+and lists can contain callbacks. Collections other than supported lists and
+optional callbacks are not supported. Callbacks with these result types
 are synchronous: returning a Promise is an error, including for `None` results.
 The generated TypeScript uses `undefined` for a `None` callback result to catch
 accidentally async functions.
@@ -670,6 +670,38 @@ instance is already executing a synchronous step, so host functions must
 not invoke a received Snek callback inline. Deferred events can invoke it after
 the current step finishes, including while an async call is suspended. Exceptions and boundary validation follow the same
 rules as exports and synchronous host imports.
+
+### Higher-order callbacks
+
+Typed function factories and decorators can cross the same boundary. For example:
+
+```python
+from typing import Callable
+
+def decorator(suffix: str) -> Callable[[Callable[[str], str]], Callable[[str], str]]:
+    def decorate(fn: Callable[[str], str]) -> Callable[[str], str]:
+        def wrapped(text: str) -> str:
+            return fn(text) + suffix
+        return wrapped
+    return decorate
+```
+
+```javascript
+const decorate = lib.decorator("!");
+const shout = decorate(text => text.toUpperCase());
+console.log(shout("hello")); // HELLO!
+```
+
+Callback arguments and returned functions use the existing identity maps and
+retain captured values. Generated TypeScript checks every nested signature.
+Async factories declare `Coroutine[None, None, Callable[...]]` results and return
+Promises of functions; an async factory can itself accept or return async callbacks.
+Higher-order functions can also be elements of supported lists.
+
+The synchronous re-entry rule still applies. While Snek is calling a JavaScript
+function, that function may retain or return a received Snek callback, but cannot
+invoke it inline. Invoke it after the active step returns, or arrange the
+composition in Snek as above. Returning a function alone never executes it.
 
 ### Async callbacks
 

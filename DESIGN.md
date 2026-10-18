@@ -112,6 +112,12 @@ Callback parameters/results can use supported list types. Signature decoding
 tracks bracket depth, and list metadata includes types reachable only through a
 callback signature. Both directions use the same list identity maps and ownership
 checks; async callbacks resolve handles through the ordinary host-result protocol.
+Callbacks can also accept and return other callbacks, including async factories.
+Recursive signature validation and discovery reuse the same typed wrappers at
+every depth; there is no second registry or handle format for higher-order values.
+Returning a function does not invoke it. Snek callback invocation during an active
+synchronous step remains prohibited, even when the callback arrived as an argument
+to another callback.
 Host string returns, like exported string parameters, enable the Unicode tables
 needed for open-world input.
 

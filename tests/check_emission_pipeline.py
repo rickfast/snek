@@ -141,6 +141,23 @@ class RepeatEmissionTests(unittest.TestCase):
             self.assertTrue(encode(wat).startswith(b"\0asm"))
         self.assertEqual(owned.tree().json(), before)
 
+    def test_higher_callbacks_survive_owned_bridge_and_repeat_emission(self):
+        import json
+        from bootstrap.body_bridge import to_module
+        from snekc.emit_wat import emit_module
+        from check_library import HIGHER_CALLBACK_SOURCE, HIGHER_CALLBACK_EXPORTS
+        owned = check(HIGHER_CALLBACK_SOURCE)
+        before = owned.tree().json()
+        reference = to_module(json.loads(before))
+        prelude = (ROOT / "snekc/prelude.wat").read_text()
+        for build in (lambda: emit_source_module(owned, prelude, exports=HIGHER_CALLBACK_EXPORTS),
+                      lambda: emit_module(reference, exports=HIGHER_CALLBACK_EXPORTS)):
+            wat = build()
+            self.assertIn('(import "snek_callback_async"', wat)
+            self.assertEqual(build(), wat)
+            self.assertTrue(encode(wat).startswith(b"\0asm"))
+        self.assertEqual(owned.tree().json(), before)
+
     def test_callback_types_survive_owned_bridge_and_repeat_emission(self):
         import json
         from bootstrap.body_bridge import to_module

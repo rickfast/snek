@@ -298,6 +298,62 @@ def observe(fn: Callable[[list[Callable[[str], str]]], str], items: list[Callabl
 '''
 CALLBACK_LIST_EXPORTS = ["sync_list", "async_list", "upper_callbacks", "void_list", "nested", "echo", "use", "use_async", "from_host", "observe"]
 
+HIGHER_CALLBACK_SOURCE = '''
+from typing import Callable, Coroutine
+from snek import host, checkpoint
+
+@host("install")
+def install(fn: Callable[[Callable[[str], str]], Callable[[str], str]]) -> Callable[[Callable[[str], str]], Callable[[str], str]]:
+    pass
+
+def greeter(prefix: str) -> Callable[[str], str]:
+    def greet(text: str) -> str:
+        return prefix + text
+    return greet
+
+def decorator(suffix: str) -> Callable[[Callable[[str], str]], Callable[[str], str]]:
+    def decorate(fn: Callable[[str], str]) -> Callable[[str], str]:
+        def wrapped(text: str) -> str:
+            return fn(text) + suffix
+        return wrapped
+    return decorate
+
+def from_host() -> Callable[[Callable[[str], str]], Callable[[str], str]]:
+    return install(decorator("!"))
+
+def select(fn: Callable[[Callable[[str], str], Callable[[str], str]], Callable[[str], str]], a: Callable[[str], str], b: Callable[[str], str]) -> Callable[[str], str]:
+    return fn(a, b)
+
+def use(factory: Callable[[str], Callable[[str], str]], prefix: str, text: str) -> str:
+    fn = factory(prefix)
+    return fn(text)
+
+def async_factory() -> Callable[[str], Coroutine[None, None, Callable[[str], str]]]:
+    async def factory(prefix: str) -> Callable[[str], str]:
+        await checkpoint()
+        return greeter(prefix)
+    return factory
+
+async def use_async(factory: Callable[[str], Coroutine[None, None, Callable[[str], str]]], prefix: str, text: str) -> str:
+    fn = await factory(prefix)
+    return fn(text)
+
+def async_consumer() -> Callable[[Callable[[str], Coroutine[None, None, str]], str], Coroutine[None, None, str]]:
+    async def consume(fn: Callable[[str], Coroutine[None, None, str]], text: str) -> str:
+        return await fn(text)
+    return consume
+
+def async_decorator() -> Callable[[Callable[[str], Coroutine[None, None, str]]], Coroutine[None, None, Callable[[str], Coroutine[None, None, str]]]]:
+    async def decorate(fn: Callable[[str], Coroutine[None, None, str]]) -> Callable[[str], Coroutine[None, None, str]]:
+        await checkpoint()
+        return fn
+    return decorate
+
+def factories() -> list[Callable[[str], Callable[[str], str]]]:
+    return [greeter, greeter]
+'''
+HIGHER_CALLBACK_EXPORTS = ["greeter", "decorator", "from_host", "select", "use", "async_factory", "use_async", "async_consumer", "async_decorator", "factories"]
+
 OBJECT_SOURCE = '''from snek import HostObject, host, checkpoint
 from typing import Callable, Iterator
 @host("lookup")
@@ -665,6 +721,61 @@ const second = await instantiate(await WebAssembly.compile(bytes));
 assert.equal(second.add(2, 3), 5);
 ''')
 
+    def test_higher_order_callbacks(self):
+        self.src.write_text(HIGHER_CALLBACK_SOURCE)
+        self.build(HIGHER_CALLBACK_EXPORTS)
+        self.node('''
+let installed;
+const lib = await instantiate(bytes, {imports: {install: fn => {installed = fn; return fn;}}});
+const greet = lib.greeter("hello:");
+const js = text => text.toUpperCase();
+assert.equal(lib.decorator("!")(greet)("world"), "hello:world!");
+assert.equal(lib.decorator("!")(js)("straße 🐍"), "STRASSE 🐍!");
+assert.equal(lib.select((a, b) => a, greet, js), greet);
+assert.equal(lib.select((a, b) => b, greet, js), js);
+assert.equal(lib.use(prefix => text => prefix + text, "JS:", "factory"), "JS:factory");
+const host = lib.from_host(); assert.equal(host, installed);
+assert.equal(installed(greet)("later"), "hello:later!");
+const factories = lib.factories();
+assert.equal(factories.get(0), factories.get(1));
+const factory = factories.pop(); factories.pop();
+assert.equal(factory("list:")("retained"), "list:retained");
+assert.throws(() => lib.use(() => 42, "", ""), /expected function/);
+assert.throws(() => lib.select((a, b) => a("inline"), greet, js), /not reentrant/);
+assert.equal(greet("after"), "hello:after");
+''')
+
+    def test_async_higher_order_callbacks(self):
+        self.src.write_text(HIGHER_CALLBACK_SOURCE)
+        self.build(HIGHER_CALLBACK_EXPORTS)
+        self.node('''
+const lib = await instantiate(bytes, {imports: {install: fn => fn}});
+const factory = lib.async_factory();
+const greet = await factory("Snek:");
+assert.equal(greet("factory"), "Snek:factory");
+assert.equal(await lib.use_async(factory, "Snek:", "use"), "Snek:use");
+const js = text => "JS:" + text;
+assert.equal(await lib.use_async(async () => js, "", "factory"), "JS:factory");
+const consume = lib.async_consumer();
+const asyncJS = async x => "async:" + x;
+assert.equal(await lib.async_decorator()(asyncJS), asyncJS);
+assert.deepEqual(await Promise.all([consume(async x => "a:" + x, "one"), consume(async x => "b:" + x, "two")]), ["a:one", "b:two"]);
+await assert.rejects(lib.use_async(async () => 42, "", ""), /expected function/);
+await assert.rejects(lib.use_async(() => js, "", ""), SnekError);
+await assert.rejects(lib.use_async(async () => {throw new Error("factory failed");}, "", ""), /factory failed/);
+await assert.rejects(consume(async () => 42, ""), /expected str/);
+assert.equal(await consume(async x => x, "recovered"), "recovered");
+''')
+
+    def test_nested_callback_only_signature_metadata(self):
+        self.src.write_text(HIGHER_CALLBACK_SOURCE)
+        self.build(["async_consumer", "factories"])
+        self.node('''
+const lib = await instantiate(bytes, {imports: {install: fn => fn}});
+assert.equal(await lib.async_consumer()(async x => x.toUpperCase(), "straße 🐍"), "STRASSE 🐍");
+assert.equal(lib.factories().get(0)("only:")("nested"), "only:nested");
+''')
+
     def test_callback_list_identity_mutation_and_deferred_host_use(self):
         self.src.write_text(CALLBACK_LIST_SOURCE)
         self.build(CALLBACK_LIST_EXPORTS)
@@ -918,7 +1029,7 @@ assert.equal(lib.echo(value), value); assert.equal(lib.read(value), 42);
 
     def test_class_handles_reject_unsupported_boundary_shapes(self):
         base = 'from typing import Callable\nfrom snek import host\nclass Box:\n    pass\n'
-        for ty in ("dict[str, Box]", "list[Callable[[], Box] | None]", "Callable[[Callable[[], Box]], Box]", "list[Box] | None"):
+        for ty in ("dict[str, Box]", "list[Callable[[], Box] | None]", "Callable[[Callable[[], dict[str, Box]]], Box]", "list[Box] | None"):
             for host in (False, True):
                 self.src.write_text(base + ('@host("f")\n' if host else '') + f'def f(value: {ty}) -> None:\n    pass\n')
                 with self.subTest(ty=ty, host=host), self.assertRaises(Exception):
@@ -1413,7 +1524,7 @@ await assert.rejects(lib.apply_bool(async () => 1, true), /expected boolean/);
 
     def test_unsupported_callback_signatures(self):
         for signature in ("Callable[[tuple[str, str]], str]", "Callable[[str], tuple[str, str]]",
-                          "Callable[[Callable[[], str]], str]", "Callable[[], Coroutine[str]]",
+                          "Callable[[Callable[[None], str]], str]", "Callable[[], Coroutine[str]]",
                           "Callable[[], Coroutine[None, None, tuple[str, str]]]",
                           "Callable[[list[Callable[[None], str]]], str]",
                           "Callable[[Coroutine[None, None, str]], str]",

@@ -18,6 +18,7 @@ from check_library import LIST_SOURCE, LIST_EXPORTS, NESTED_LIST_SOURCE, NESTED_
 from check_library import LIST_CALLBACK_SOURCE, LIST_CALLBACK_EXPORTS
 from check_library import CLASS_VALUE_SOURCE, CLASS_VALUE_EXPORTS
 from check_library import CALLBACK_LIST_SOURCE, CALLBACK_LIST_EXPORTS
+from check_library import HIGHER_CALLBACK_SOURCE, HIGHER_CALLBACK_EXPORTS
 
 EXAMPLE = ROOT / "examples/vite"
 SERVER = '''
@@ -30,6 +31,24 @@ console.log(JSON.stringify({url: server.resolvedUrls.local[0]}));
 '''
 
 TYPES = '''
+import {type SnekLibrary as HigherLibrary} from "./generated/higher-callbacks.js";
+declare const higher: HigherLibrary;
+const decorated: string = higher.decorator("!")(text => text)("typed");
+const factory: PromiseLike<(arg: string) => string> = higher.async_factory()("prefix");
+higher.use(prefix => text => prefix + text, "prefix", "typed");
+higher.use_async(async prefix => text => prefix + text, "prefix", "typed");
+higher.async_consumer()(async text => text, "typed");
+higher.async_decorator()(async text => text);
+// @ts-expect-error nested callback parameter types are checked
+higher.decorator("!")((value: number) => String(value));
+// @ts-expect-error factories must return functions
+higher.use(prefix => prefix, "prefix", "typed");
+// @ts-expect-error factory result function types are checked
+higher.use(prefix => text => 42, "prefix", "typed");
+// @ts-expect-error async factories require a PromiseLike
+higher.use_async(prefix => text => text, "prefix", "typed");
+// @ts-expect-error nested async callbacks require a PromiseLike
+higher.async_consumer()(text => text, "typed");
 import {type SnekLibrary as CallbackListLibrary} from "./generated/callback-lists.js";
 declare const callbackLists: CallbackListLibrary;
 const functions = callbackLists.sync_list("prefix");
@@ -181,6 +200,10 @@ class BundlerTests(unittest.TestCase):
         print(f"Bundler browser: {engine} {cls.browser.version}; compiler: {cls.compiler}", flush=True)
 
     def compile(self, optimize):
+        source = self.root / "higher_callbacks.py"
+        source.write_text(HIGHER_CALLBACK_SOURCE)
+        driver.build(source, self.root / "src/generated/higher-callbacks.wasm", optimize=optimize,
+                     compiler=self.compiler, library=True, exports=HIGHER_CALLBACK_EXPORTS)
         source = self.root / "callback_lists.py"
         source.write_text(CALLBACK_LIST_SOURCE)
         driver.build(source, self.root / "src/generated/callback-lists.wasm", optimize=optimize,

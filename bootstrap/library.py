@@ -108,7 +108,7 @@ def library_target(name: str, entry: str) -> str:
 
 
 def library_callback_types(ty: str) -> list[str]:
-    """Decode the checker's canonical display form; nested boundaries are explicit errors."""
+    """Decode the checker's canonical display form, validating nested boundaries."""
     if not ty.startswith("Callable[[") or not ty.endswith("]"):
         raise ValueError("invalid callback signature: " + ty)
     end = -1
@@ -132,8 +132,8 @@ def library_callback_types(ty: str) -> list[str]:
     types.append(ty[end + 3:-1])
     for i in range(len(types)):
         value = library_callback_result(types[i]) if i == len(types) - 1 else types[i]
-        if "[" in value and not value.startswith("list["):
-            raise ValueError("callback signatures cannot contain unsupported collections, nested callbacks, or coroutines: " + ty)
+        if "[" in value and not (value.startswith("list[") or value.startswith("Callable[")):
+            raise ValueError("callback signatures cannot contain unsupported collections or bare coroutines: " + ty)
         if value != "None" or i != len(types) - 1: library_type(value)
     return types
 

@@ -21,6 +21,7 @@ from check_library import NESTED_LIST_SOURCE, NESTED_LIST_EXPORTS
 from check_library import LIST_CALLBACK_SOURCE, LIST_CALLBACK_EXPORTS
 from check_library import CLASS_VALUE_SOURCE, CLASS_VALUE_EXPORTS
 from check_library import CALLBACK_LIST_SOURCE, CALLBACK_LIST_EXPORTS
+from check_library import HIGHER_CALLBACK_SOURCE, HIGHER_CALLBACK_EXPORTS
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -84,6 +85,10 @@ class BrowserTests(unittest.TestCase):
         for name, optimize in (("callback-lists", False), ("callback-lists-optimized", True)):
             driver.build(source, root / (name + ".wasm"), optimize=optimize,
                          compiler=compiler, library=True, exports=CALLBACK_LIST_EXPORTS)
+        source.write_text(HIGHER_CALLBACK_SOURCE)
+        for name, optimize in (("higher-callbacks", False), ("higher-callbacks-optimized", True)):
+            driver.build(source, root / (name + ".wasm"), optimize=optimize,
+                         compiler=compiler, library=True, exports=HIGHER_CALLBACK_EXPORTS)
         source.write_text(CLASS_VALUE_SOURCE)
         for name, optimize in (("classes", False), ("classes-optimized", True)):
             driver.build(source, root / (name + ".wasm"), optimize=optimize,
@@ -118,6 +123,28 @@ class BrowserTests(unittest.TestCase):
         self.page = context.new_page()
         self.page.set_default_timeout(15000)
         self.page.goto(self.url)
+
+    def test_higher_order_callbacks(self):
+        for target in ("higher-callbacks", "higher-callbacks-optimized"):
+            with self.subTest(target=target):
+                result = self.page.evaluate('''async target => {
+                  const {instantiate, SnekError} = await import(`/${target}.js`);
+                  const lib = await instantiate(`/${target}.wasm`, {imports: {install: fn => fn}});
+                  const greet = lib.greeter("hello:"), js = text => text.toUpperCase();
+                  const same = lib.select((a, b) => a, greet, js) === greet && lib.select((a, b) => b, greet, js) === js;
+                  const decorated = lib.decorator("!")(greet)("browser");
+                  const factory = await lib.async_factory()("async:");
+                  const asyncJS = async text => "JS:" + text;
+                  const asyncSame = await lib.async_decorator()(asyncJS) === asyncJS;
+                  const called = await lib.async_consumer()(asyncJS, "consumer");
+                  let invalid = false, guarded = false;
+                  try {await lib.use_async(async () => 42, "", "");} catch(e) {invalid = e instanceof SnekError;}
+                  try {lib.select((a, b) => a("inline"), greet, js);} catch(e) {guarded = /not reentrant/.test(e.message);}
+                  return {same, asyncSame, decorated, called, invalid, guarded, factory: factory("value"),
+                    nested: lib.factories().get(0)("list:")("factory")};
+                }''', target)
+                self.assertEqual(result, {"same": True, "asyncSame": True, "decorated": "hello:browser!",
+                    "called": "JS:consumer", "invalid": True, "guarded": True, "factory": "async:value", "nested": "list:factory"})
 
     def test_callback_list_elements(self):
         for target in ("callback-lists", "callback-lists-optimized"):
