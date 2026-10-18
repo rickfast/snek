@@ -24,8 +24,8 @@ class IndependentCompiler:
         guards.enter_context(patch.dict(os.environ, {"SNEK_COMPILER": "snek", "SNEK_RUNTIME": "wasmtime"}))
         compile_original = driver.compile_to_wat
 
-        def compile_owned(source, filename="<input>", *, component=False, frontend=None, compiler=None):
-            return compile_original(source, filename, component=component, compiler="snek")
+        def compile_owned(source, filename="<input>", *, frontend=None, compiler=None, **kwargs):
+            return compile_original(source, filename, compiler="snek", **kwargs)
 
         guards.enter_context(patch("snekc.driver.compile_to_wat", compile_owned))
         guards.enter_context(no_host_compiler())

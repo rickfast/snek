@@ -108,17 +108,19 @@ def main() -> None:
     print(len(args), args[1], args[2] == "", len(args[3]))
     args[1] = "changed"
     print(sys.argv[1])
-    print(len(os.getenv("VALUE", "missing")), os.getenv("EMPTY", "notempty") == "")
+    print(len(os.getenv("VALUE", "missing")) + len(os.getenv("VALUE2", "missing")), os.getenv("EMPTY", "notempty") == "")
     print(os.getenv("ABSENT") is None, os.getenv("HOME") is None)
     value = os.getenv("VALUE")
     if value is not None:
         print(value.startswith("世界"))
     data = secrets.token_bytes(100000)
-    print(len(data), len(os.getenv("VALUE", "missing")))
+    print(len(data), len(os.getenv("VALUE", "missing")) + len(os.getenv("VALUE2", "missing")))
 main()
 '''
         args = ["🐍=hi", "", "é" * 40000]
-        env = {"VALUE": "世界" * 30000, "EMPTY": ""}
+        # Still cross multiple Wasm pages, without exceeding Linux's 128-KiB
+        # per-argument limit when Wasmtime receives each --env KEY=VALUE.
+        env = {"VALUE": "世界" * 15000, "VALUE2": "世界" * 15000, "EMPTY": ""}
         expected = b"x" * 70000 + "4 🐍=hi True 40000\nchanged\n60000 True\nTrue True\nTrue\n100000 60000\n".encode()
         for component_ in (False, True):
             for optimize in self.modes:

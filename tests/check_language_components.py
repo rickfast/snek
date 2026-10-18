@@ -26,7 +26,11 @@ class LanguageComponentTests(StdlibTests):
         if not checker.exists():
             raise RuntimeError("run bootstrap/bootstrap_checker.py first")
 
-        def compile_owned(source, filename="<input>", *, component=False, frontend=None):
+        def compile_owned(source, filename="<input>", *, component=False, frontend=None,
+                          _project=None, exports=None):
+            # This legacy bridge checks single-file command programs only.
+            assert not exports
+            assert _project is None or len(_project.sources) == 1
             try:
                 with ExitStack() as guards, patch.object(Checker, "run", side_effect=AssertionError("Python checker fallback")), \
                      patch("ast.parse", side_effect=AssertionError("Python source parser fallback")), \

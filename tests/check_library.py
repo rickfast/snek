@@ -923,18 +923,18 @@ class LibraryTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.root = Path(directory.name)
         self.src = self.root / "entry.py"
-        self.src.write_text(SOURCE)
+        self.src.write_text(SOURCE, encoding="utf-8")
         self.compiler = os.environ.get("SNEK_COMPILER", "python")
         self.native = NATIVE
         # Explicit ES-module scope also exercises Node with a package manifest.
-        (self.root / "package.json").write_text('{"type":"module"}')
+        (self.root / "package.json").write_text('{"type":"module"}', encoding="utf-8")
 
     def build(self, exports=EXPORTS, **kwargs):
         out = self.root / kwargs.pop("output", "output.wasm")
         if self.native:
             command = [self.native, "build", str(self.src), "--library", "-o", str(out)]
             for name in exports: command += ["--export", name]
-            result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+            result = subprocess.run(command, capture_output=True, text=True, timeout=60, encoding="utf-8")
             if result.returncode: raise RuntimeError(result.stderr)
             return driver.Result(None, out, js_path=out.with_suffix(".js"), dts_path=out.with_suffix(".d.ts"))
         return driver.build(self.src, out, optimize=OPTIMIZE, compiler=self.compiler,
@@ -946,13 +946,13 @@ class LibraryTests(unittest.TestCase):
             'import {readFile} from "node:fs/promises";\n'
             'import {instantiate, SnekError} from "./output.js";\n'
             'const bytes = await readFile("./output.wasm");\n' + script],
-            cwd=self.root, capture_output=True, text=True, timeout=60)
+            cwd=self.root, capture_output=True, text=True, timeout=60, encoding="utf-8")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_types_strings_errors_and_lifetime(self):
         result = self.build()
-        self.assertIn('"big"(arg0: bigint): bigint;', result.dts_path.read_text())
-        self.assertIn('"show"(arg0: string): void;', result.dts_path.read_text())
+        self.assertIn('"big"(arg0: bigint): bigint;', result.dts_path.read_text(encoding="utf-8"))
+        self.assertIn('"show"(arg0: string): void;', result.dts_path.read_text(encoding="utf-8"))
         self.node('''
 let output = "";
 const lib = await instantiate(bytes, {stdout: text => output += text});
@@ -985,7 +985,7 @@ assert.equal(second.add(2, 3), 5);
 ''')
 
     def test_iterator_handles_and_cleanup(self):
-        self.src.write_text(ITERATOR_SOURCE)
+        self.src.write_text(ITERATOR_SOURCE, encoding="utf-8")
         self.build(ITERATOR_EXPORTS)
         self.node('''
 let output = "";
@@ -1017,7 +1017,7 @@ const pass = lib.numbers(1); assert.equal(lib.apply(x => x, pass), pass); pass.r
 ''')
 
     def test_iterator_handle_roots_frame_without_api(self):
-        self.src.write_text(ITERATOR_SOURCE)
+        self.src.write_text(ITERATOR_SOURCE, encoding="utf-8")
         self.build(ITERATOR_EXPORTS)
         self.node('''
 const [iterator, weak] = await (async () => {
@@ -1031,7 +1031,7 @@ assert.equal(iterator.return().done, true);
 ''', gc=True)
 
     def test_iterator_errors_and_reentry(self):
-        self.src.write_text(ITERATOR_SOURCE)
+        self.src.write_text(ITERATOR_SOURCE, encoding="utf-8")
         self.build(ITERATOR_EXPORTS)
         self.node('''
 let output = "", touchError = null, rejectOutput = false;
@@ -1055,7 +1055,7 @@ assert.throws(() => stdout.return(), /output failed/); rejectOutput = false; ass
 ''')
 
     def test_optional_reference_boundaries(self):
-        self.src.write_text(OPTIONAL_SOURCE)
+        self.src.write_text(OPTIONAL_SOURCE, encoding="utf-8")
         self.build(OPTIONAL_EXPORTS)
         self.node('''
 let supplied = null;
@@ -1097,7 +1097,7 @@ assert.equal(await lib.apply_async(async x => x, null), null);
 ''')
 
     def test_nullable_string_host_only_unicode(self):
-        self.src.write_text(OPTIONAL_SOURCE)
+        self.src.write_text(OPTIONAL_SOURCE, encoding="utf-8")
         self.build(["upper"])
         self.node('''
 const lib = await instantiate(bytes, {imports: {text: () => "straße 🐍", text_async: async () => null, list_async: async x => x, mix: () => null}});
@@ -1105,7 +1105,7 @@ assert.equal(lib.upper(), "STRASSE 🐍");
 ''')
 
     def test_tuple_dictionary_keys(self):
-        self.src.write_text(TUPLE_SOURCE)
+        self.src.write_text(TUPLE_SOURCE, encoding="utf-8")
         self.build(TUPLE_EXPORTS)
         self.node('''
 const options = {imports: {inspect: x => x, later: async x => x}};
@@ -1130,7 +1130,7 @@ for (let i = 0; i < 100; i++) assert.equal(dict.get(lib.pair("grow" + i)), "valu
 ''')
 
     def test_tuple_handles(self):
-        self.src.write_text(TUPLE_SOURCE)
+        self.src.write_text(TUPLE_SOURCE, encoding="utf-8")
         self.build(TUPLE_EXPORTS)
         self.node('''
 const options = {imports: {inspect: x => x, later: async x => x}};
@@ -1157,7 +1157,7 @@ assert.deepEqual(composed.get(4).toArray(), ["nested", 7]);
 ''')
 
     def test_tuple_handle_roots_fields_without_api(self):
-        self.src.write_text(TUPLE_SOURCE)
+        self.src.write_text(TUPLE_SOURCE, encoding="utf-8")
         self.build(TUPLE_EXPORTS)
         self.node('''
 const [handle, weak] = await (async () => {
@@ -1170,7 +1170,7 @@ assert.ok(weak.deref()); assert.equal(handle.get(6), weak.deref());
 ''', gc=True)
 
     def test_tuple_host_and_callback_boundaries(self):
-        self.src.write_text(TUPLE_SOURCE)
+        self.src.write_text(TUPLE_SOURCE, encoding="utf-8")
         self.build(TUPLE_EXPORTS)
         self.node('''
 let saved;
@@ -1188,7 +1188,7 @@ assert.equal(lib.echo(pair), pair);
 ''')
 
     def test_dictionary_union_handles(self):
-        self.src.write_text(DICT_SOURCE)
+        self.src.write_text(DICT_SOURCE, encoding="utf-8")
         self.build(DICT_EXPORTS)
         self.node('''
 const lib = await instantiate(bytes, {imports: {edit: value => value, later: async value => value}});
@@ -1206,7 +1206,7 @@ assert.equal(lib.merge_inplace(left, left), left);
 ''')
 
     def test_dictionary_handles(self):
-        self.src.write_text(DICT_SOURCE)
+        self.src.write_text(DICT_SOURCE, encoding="utf-8")
         self.build(DICT_EXPORTS)
         self.node('''
 const options = {imports: {edit: x => x, later: async x => x}};
@@ -1239,7 +1239,7 @@ assert.deepEqual(lib.flags().entries(), [[true, "yes"], [false, "no"]]);
 ''')
 
     def test_dictionary_composition_and_hosts(self):
-        self.src.write_text(DICT_SOURCE)
+        self.src.write_text(DICT_SOURCE, encoding="utf-8")
         self.build(DICT_EXPORTS)
         self.node('''
 const lib = await instantiate(bytes, {imports: {
@@ -1273,7 +1273,7 @@ changed.clear(); changed.set("after", "cleanup"); assert.deepEqual(changed.entri
 ''')
 
     def test_dictionary_only_in_callback_signature(self):
-        self.src.write_text('from typing import Callable\ndef apply(fn: Callable[[dict[str, str]], dict[str, str]], values: dict[str, str]) -> dict[str, str]:\n    return fn(values)\n')
+        self.src.write_text('from typing import Callable\ndef apply(fn: Callable[[dict[str, str]], dict[str, str]], values: dict[str, str]) -> dict[str, str]:\n    return fn(values)\n', encoding="utf-8")
         self.build(["apply"])
         self.node('const lib = await instantiate(bytes); assert.throws(() => lib.apply(x => x, new Map()), /handle from this Snek instance/);')
 
@@ -1281,11 +1281,11 @@ changed.clear(); changed.set("after", "cleanup"); assert.deepEqual(changed.entri
         for ty in ("dict[list[str], str]", "dict[str, Coroutine[None, None, str]]", "dict[str, list[Coroutine[None, None, str]]]", "dict[str, Callable[[None], str]]"):
             for host in (False, True):
                 with self.subTest(ty=ty, host=host):
-                    self.src.write_text('from snek import host\nfrom typing import Callable, Coroutine\n' + ('@host("f")\n' if host else '') + f'def f(value: {ty}) -> None:\n    pass\n')
+                    self.src.write_text('from snek import host\nfrom typing import Callable, Coroutine\n' + ('@host("f")\n' if host else '') + f'def f(value: {ty}) -> None:\n    pass\n', encoding="utf-8")
                     with self.assertRaises(Exception): self.build(["f"])
 
     def test_higher_order_callbacks(self):
-        self.src.write_text(HIGHER_CALLBACK_SOURCE)
+        self.src.write_text(HIGHER_CALLBACK_SOURCE, encoding="utf-8")
         self.build(HIGHER_CALLBACK_EXPORTS)
         self.node('''
 let installed;
@@ -1309,7 +1309,7 @@ assert.equal(greet("after"), "hello:after");
 ''')
 
     def test_async_higher_order_callbacks(self):
-        self.src.write_text(HIGHER_CALLBACK_SOURCE)
+        self.src.write_text(HIGHER_CALLBACK_SOURCE, encoding="utf-8")
         self.build(HIGHER_CALLBACK_EXPORTS)
         self.node('''
 const lib = await instantiate(bytes, {imports: {install: fn => fn}});
@@ -1331,7 +1331,7 @@ assert.equal(await consume(async x => x, "recovered"), "recovered");
 ''')
 
     def test_nested_callback_only_signature_metadata(self):
-        self.src.write_text(HIGHER_CALLBACK_SOURCE)
+        self.src.write_text(HIGHER_CALLBACK_SOURCE, encoding="utf-8")
         self.build(["async_consumer", "factories"])
         self.node('''
 const lib = await instantiate(bytes, {imports: {install: fn => fn}});
@@ -1340,7 +1340,7 @@ assert.equal(lib.factories().get(0)("only:")("nested"), "only:nested");
 ''')
 
     def test_callback_list_identity_mutation_and_deferred_host_use(self):
-        self.src.write_text(CALLBACK_LIST_SOURCE)
+        self.src.write_text(CALLBACK_LIST_SOURCE, encoding="utf-8")
         self.build(CALLBACK_LIST_EXPORTS)
         self.node('''
 let saved, registered, output = "";
@@ -1375,7 +1375,7 @@ assert.equal(output, "printed\\n");
 ''')
 
     def test_async_callbacks_in_lists(self):
-        self.src.write_text(CALLBACK_LIST_SOURCE)
+        self.src.write_text(CALLBACK_LIST_SOURCE, encoding="utf-8")
         self.build(CALLBACK_LIST_EXPORTS)
         self.node('''
 const lib = await instantiate(bytes, {imports: {register: x => x}});
@@ -1395,7 +1395,7 @@ list.set(0, js); assert.equal(await lib.use_async(list, "again"), "JS:again");
 ''')
 
     def test_callbacks_only_reachable_through_list_signatures(self):
-        self.src.write_text(CALLBACK_LIST_SOURCE)
+        self.src.write_text(CALLBACK_LIST_SOURCE, encoding="utf-8")
         self.build(["upper_callbacks"])
         self.node('''
 const lib = await instantiate(bytes, {imports: {register: x => x}});
@@ -1404,7 +1404,7 @@ assert.equal(upper("straße 🐍"), "STRASSE 🐍");
 ''')
 
     def test_class_values_in_lists_and_callbacks(self):
-        self.src.write_text(CLASS_VALUE_SOURCE)
+        self.src.write_text(CLASS_VALUE_SOURCE, encoding="utf-8")
         self.build(CLASS_VALUE_EXPORTS)
         self.node('''
 const options = {imports: {store: x => x, optional: x => x, later: async x => x}};
@@ -1462,7 +1462,7 @@ def factory() -> Callable[[], Box]:
     return create
 def run() -> list[Box]:
     return visit([Box()], identity)
-''')
+''', encoding="utf-8")
         self.build(["factory", "run"])
         self.node('''
 let callback, received;
@@ -1476,9 +1476,9 @@ list.append(value); assert.equal(list.pop(), value);
 ''')
 
     def test_class_handles_identity_subtypes_and_lifetime(self):
-        self.src.write_text(CLASS_SOURCE)
+        self.src.write_text(CLASS_SOURCE, encoding="utf-8")
         built = self.build(CLASS_EXPORTS)
-        self.assertIn('SnekObject<"entry.Counter">', built.dts_path.read_text())
+        self.assertIn('SnekObject<"entry.Counter">', built.dts_path.read_text(encoding="utf-8"))
         self.node('''
 const options = {imports: {store: x => x, optional: x => x, later: async x => x}};
 const lib = await instantiate(bytes, options);
@@ -1525,7 +1525,7 @@ class Holder:
         self.value = value
 def make(value: HostObject) -> Holder:
     return Holder(value)
-''')
+''', encoding="utf-8")
         self.build(["make"])
         self.node('''
 let handle, weak;
@@ -1544,7 +1544,7 @@ assert(Object.isFrozen(handle));
 ''', gc=True)
 
     def test_class_handles_host_validation_and_overlapping_calls(self):
-        self.src.write_text(CLASS_SOURCE)
+        self.src.write_text(CLASS_SOURCE, encoding="utf-8")
         self.build(CLASS_EXPORTS)
         self.node('''
 const pending = [];
@@ -1574,7 +1574,7 @@ class Counter:
         self.value = value
 class Child(Counter):
     pass
-''')
+''', encoding="utf-8")
         self.src.write_text('''from snek import i32
 from models import Counter as Base, Child
 def make() -> Child:
@@ -1583,7 +1583,7 @@ def echo(value: Base) -> Base:
     return value
 def read(value: Base) -> i32:
     return value.value
-''')
+''', encoding="utf-8")
         self.build(["make", "echo", "read"])
         self.node('''
 const lib = await instantiate(bytes), value = lib.make();
@@ -1594,12 +1594,12 @@ assert.equal(lib.echo(value), value); assert.equal(lib.read(value), 42);
         base = 'from typing import Callable, Coroutine\nfrom snek import host\nclass Box:\n    pass\n'
         for ty in ("dict[Box, Box]", "list[Coroutine[None, None, Box]]", "Callable[[Coroutine[None, None, Box]], Box]", "tuple[Box, Coroutine[None, None, Box]]"):
             for host in (False, True):
-                self.src.write_text(base + ('@host("f")\n' if host else '') + f'def f(value: {ty}) -> None:\n    pass\n')
+                self.src.write_text(base + ('@host("f")\n' if host else '') + f'def f(value: {ty}) -> None:\n    pass\n', encoding="utf-8")
                 with self.subTest(ty=ty, host=host), self.assertRaises(Exception):
                     self.build(["f"])
 
     def test_list_callback_values_and_identity(self):
-        self.src.write_text(LIST_CALLBACK_SOURCE)
+        self.src.write_text(LIST_CALLBACK_SOURCE, encoding="utf-8")
         self.build(LIST_CALLBACK_EXPORTS)
         self.node('''
 const options = {imports: {install: fn => fn, install_async: async fn => fn}};
@@ -1643,7 +1643,7 @@ assert.equal(a, rows); assert.equal(b, rows);
             source += f'def make{i}(value: {elem}) -> list[{elem}]:\n    return [value]\n'
             source += f'def apply{i}(fn: Callable[[list[{elem}], list[{elem}]], list[{elem}]], items: list[{elem}]) -> list[{elem}]:\n    return fn(items, items)\n'
             exports += [f"make{i}", f"apply{i}"]
-        self.src.write_text(source)
+        self.src.write_text(source, encoding="utf-8")
         self.build(exports)
         self.node('''
 const lib = await instantiate(bytes);
@@ -1658,7 +1658,7 @@ for (const [i, value] of values.entries()) {
 ''')
 
     def test_lists_only_reachable_through_callback_signatures(self):
-        self.src.write_text(LIST_CALLBACK_SOURCE)
+        self.src.write_text(LIST_CALLBACK_SOURCE, encoding="utf-8")
         self.build(["factory", "visit"])
         self.node('''
 const lib = await instantiate(bytes, {imports: {install: fn => fn, install_async: async fn => fn}});
@@ -1670,9 +1670,9 @@ assert.deepEqual(received.toArray().map(row => row.toArray()), [["changed"]]);
 ''')
 
     def test_nested_list_handles_preserve_aliases_and_types(self):
-        self.src.write_text(NESTED_LIST_SOURCE)
+        self.src.write_text(NESTED_LIST_SOURCE, encoding="utf-8")
         built = self.build(NESTED_LIST_EXPORTS)
-        self.assertIn('"cube"(): SnekList<SnekList<SnekList<string>>>', built.dts_path.read_text())
+        self.assertIn('"cube"(): SnekList<SnekList<SnekList<string>>>', built.dts_path.read_text(encoding="utf-8"))
         self.node('''
 const options = {imports: {edit: rows => rows, later: async rows => rows}};
 const lib = await instantiate(bytes, options);
@@ -1705,7 +1705,7 @@ assert.equal(shared.get(-1), "straße 🐍"); // child outlives parent membershi
 ''')
 
     def test_nested_list_host_calls_and_gather(self):
-        self.src.write_text(NESTED_LIST_SOURCE)
+        self.src.write_text(NESTED_LIST_SOURCE, encoding="utf-8")
         self.build(NESTED_LIST_EXPORTS)
         self.node('''
 let saved, release;
@@ -1732,9 +1732,9 @@ assert.deepEqual(collected.toArray().map(row => row.toArray()), [["first"], ["se
 ''')
 
     def test_typed_list_handles_identity_mutation_and_lifetime(self):
-        self.src.write_text(LIST_SOURCE)
+        self.src.write_text(LIST_SOURCE, encoding="utf-8")
         built = self.build(LIST_EXPORTS)
-        self.assertIn('"words"(): SnekList<string>', built.dts_path.read_text())
+        self.assertIn('"words"(): SnekList<string>', built.dts_path.read_text(encoding="utf-8"))
         self.node('''
 const options = {imports: {edit: x => x, later: async x => x}};
 const lib = await instantiate(bytes, options);
@@ -1779,7 +1779,7 @@ survivor.append("alive"); assert.equal(survivor.pop(), "alive");
 ''')
 
     def test_list_handles_inside_host_calls_and_async_steps(self):
-        self.src.write_text(LIST_SOURCE)
+        self.src.write_text(LIST_SOURCE, encoding="utf-8")
         self.build(LIST_EXPORTS)
         self.node('''
 let lib, saved, output = "", release;
@@ -1812,7 +1812,7 @@ await assert.rejects(bad.delayed(bad.words()), SnekError);
 ''')
 
     def test_list_handles_from_stdout_can_grow_memory(self):
-        self.src.write_text(LIST_SOURCE)
+        self.src.write_text(LIST_SOURCE, encoding="utf-8")
         self.build(LIST_EXPORTS)
         self.node('''
 let saved, output = "";
@@ -1834,7 +1834,7 @@ def take(items: list[i64]) -> list[i64]:
 def total() -> i64:
     return sum(take([1, 2]))
 print(total())
-''')
+''', encoding="utf-8")
         self.build(["total"])
         self.node('''
 let output = "", saved;
@@ -1848,7 +1848,7 @@ assert.equal(lib.total(), 6n);
 
     def test_list_scalar_element_types(self):
         self.src.write_text('from snek import i32, i64, f32, f64\n' + '\n'.join(
-            f'def {ty}_list() -> list[{ty}]:\n    return []\n' for ty in ("i32", "i64", "f32", "f64", "bool")))
+            f'def {ty}_list() -> list[{ty}]:\n    return []\n' for ty in ("i32", "i64", "f32", "f64", "bool")), encoding="utf-8")
         self.build([ty + "_list" for ty in ("i32", "i64", "f32", "f64", "bool")])
         self.node('''
 const lib = await instantiate(bytes);
@@ -1864,10 +1864,10 @@ assert.throws(() => lib.bool_list().append(1), TypeError);
 ''')
 
     def test_opaque_host_objects(self):
-        self.src.write_text(OBJECT_SOURCE)
+        self.src.write_text(OBJECT_SOURCE, encoding="utf-8")
         result = self.build(OBJECT_EXPORTS)
-        self.assertIn('"echo"(arg0: object): object;', result.dts_path.read_text())
-        self.assertIn('"optional_async"(arg0: object | null, options?: SnekCallOptions): Promise<object | null>;', result.dts_path.read_text())
+        self.assertIn('"echo"(arg0: object): object;', result.dts_path.read_text(encoding="utf-8"))
+        self.assertIn('"optional_async"(arg0: object | null, options?: SnekCallOptions): Promise<object | null>;', result.dts_path.read_text(encoding="utf-8"))
         self.node('''
 const a = {name: "a"}, b = {name: "b"};
 let touched, release, result = a;
@@ -1916,15 +1916,15 @@ result = a; assert.equal(lib.find("ok"), a);
         ]
         for source in bad:
             with self.subTest(source=source):
-                self.src.write_text("from snek import HostObject\n" + source)
+                self.src.write_text("from snek import HostObject\n" + source, encoding="utf-8")
                 with self.assertRaises((CompileError, ValueError, RuntimeError, driver.ToolError)):
                     self.build(["bad"])
 
     def test_typed_callbacks_cross_both_directions(self):
-        self.src.write_text(CALLBACK_SOURCE)
+        self.src.write_text(CALLBACK_SOURCE, encoding="utf-8")
         result = self.build(CALLBACK_EXPORTS)
-        self.assertIn('((arg0: string) => string)', result.dts_path.read_text())
-        self.assertIn('((arg0: string) => undefined)', result.dts_path.read_text())
+        self.assertIn('((arg0: string) => string)', result.dts_path.read_text(encoding="utf-8"))
+        self.assertIn('((arg0: string) => undefined)', result.dts_path.read_text(encoding="utf-8"))
         self.node('''
 let saved, output = "", mode = "ok";
 const supplied = value => value + " 🐍";
@@ -1971,9 +1971,9 @@ assert.equal(made("still works"), "prefix: STILL WORKS");
 ''')
 
     def test_async_callback_boundaries(self):
-        self.src.write_text(ASYNC_CALLBACK_SOURCE)
+        self.src.write_text(ASYNC_CALLBACK_SOURCE, encoding="utf-8")
         result = self.build(ASYNC_CALLBACK_EXPORTS)
-        self.assertIn("=> PromiseLike<string>", result.dts_path.read_text())
+        self.assertIn("=> PromiseLike<string>", result.dts_path.read_text(encoding="utf-8"))
         self.node('''
 let output = "";
 const lib = await instantiate(bytes, {stdout: text => output += text});
@@ -2009,7 +2009,7 @@ assert.equal(await made("still works"), "prefix: STILL WORKS");
         self.src.write_text('''from typing import Callable, Coroutine
 def echo(fn: Callable[[str], Coroutine[None, None, str]]) -> Callable[[str], Coroutine[None, None, str]]:
     return fn
-''')
+''', encoding="utf-8")
         self.build(["echo"])
         self.node('const lib = await instantiate(bytes); const fn = async text => text; assert.equal(lib.echo(fn), fn);')
         self.src.write_text('''from typing import Callable, Coroutine
@@ -2030,7 +2030,7 @@ def install() -> None:
 async def call(text: str) -> str:
     fn = await get_async()
     return await fn(text)
-''')
+''', encoding="utf-8")
         self.build(["install", "get", "call", "callback_0"])
         self.node('''
 let saved;
@@ -2049,7 +2049,7 @@ assert.equal(await lib.callback_0("ok"), "OK");
             f'def echo_{ty}(fn: Callable[[{ty}], {ty}]) -> Callable[[{ty}], {ty}]:\n    return fn\n'
             f'def apply_{ty}(fn: Callable[[{ty}], {ty}], value: {ty}) -> {ty}:\n    return fn(value)\n'
             f'def make_{ty}() -> Callable[[{ty}], {ty}]:\n    def identity(value: {ty}) -> {ty}:\n        return value\n    return identity\n'
-            for ty in types))
+            for ty in types), encoding="utf-8")
         self.build([prefix + ty for ty in types for prefix in ("echo_", "apply_", "make_")])
         self.node('''
 const lib = await instantiate(bytes);
@@ -2070,7 +2070,7 @@ assert.throws(() => lib.apply_bool(() => 1, true), TypeError);
         self.src.write_text('from snek import i32, i64, f32, f64, checkpoint\nfrom typing import Callable, Coroutine\n' + ''.join(
             f'async def apply_{ty}(fn: Callable[[{ty}], Coroutine[None, None, {ty}]], value: {ty}) -> {ty}:\n    return await fn(value)\n'
             f'def make_{ty}() -> Callable[[{ty}], Coroutine[None, None, {ty}]]:\n    async def identity(value: {ty}) -> {ty}:\n        await checkpoint()\n        return value\n    return identity\n'
-            for ty in types))
+            for ty in types), encoding="utf-8")
         self.build([prefix + ty for ty in types for prefix in ("apply_", "make_")])
         self.node('''
 const lib = await instantiate(bytes);
@@ -2096,14 +2096,14 @@ await assert.rejects(lib.apply_bool(async () => 1, true), /expected boolean/);
                 with self.subTest(signature=signature, host=host):
                     self.src.write_text('from snek import host\nfrom typing import Callable, Coroutine\n' +
                         ('@host("f")\n' if host else '') +
-                        f'def f(fn: {signature}) -> None:\n    pass\n')
+                        f'def f(fn: {signature}) -> None:\n    pass\n', encoding="utf-8")
                     with self.assertRaises(Exception):
                         self.build(["f"])
 
     def test_host_object_modules_and_command_rejection(self):
         from snekc.errors import CompileError
-        (self.root / "objects.py").write_text('from snek import HostObject\ndef echo(value: HostObject) -> HostObject:\n    return value\n')
-        self.src.write_text('from snek import HostObject\nfrom objects import echo\ndef call(value: HostObject) -> HostObject:\n    return echo(value)\n')
+        (self.root / "objects.py").write_text('from snek import HostObject\ndef echo(value: HostObject) -> HostObject:\n    return value\n', encoding="utf-8")
+        self.src.write_text('from snek import HostObject\nfrom objects import echo\ndef call(value: HostObject) -> HostObject:\n    return echo(value)\n', encoding="utf-8")
         self.build(["call"])
         self.node('const lib = await instantiate(bytes); const object = {}; assert.equal(lib.call(object), object);')
         command = [self.native] if self.native else [sys.executable, "-m", "snekc"]
@@ -2134,9 +2134,9 @@ assert.equal(lib.text("still", " works"), "still works");
 ''')
 
     def test_host_imports_types_strings_initialization_and_arena(self):
-        self.src.write_text(HOST_SOURCE)
+        self.src.write_text(HOST_SOURCE, encoding="utf-8")
         result = self.build(exports=HOST_EXPORTS)
-        declarations = result.dts_path.read_text()
+        declarations = result.dts_path.read_text(encoding="utf-8")
         self.assertIn('"render"(arg0: string): undefined;', declarations)
         self.assertIn('imports: SnekImports', declarations)
         self.assertIn('options: LibraryOptions', declarations)
@@ -2182,7 +2182,7 @@ assert.deepEqual(output, ["ready 🐍", "later"]);
 ''')
 
     def test_host_import_errors_and_reentry_recover(self):
-        self.src.write_text(HOST_SOURCE)
+        self.src.write_text(HOST_SOURCE, encoding="utf-8")
         self.build(exports=HOST_EXPORTS)
         self.node('''
 const base = {render: () => {}, transform: (a, b) => a + b,
@@ -2226,19 +2226,19 @@ await assert.rejects(instantiate(bytes, {imports: {...base, render: () => 1}}), 
 @host("__proto__")
 def text(a: str) -> str:
     pass
-''')
+''', encoding="utf-8")
         (self.root / "other.py").write_text('''from snek import host
 @host("__proto__")
 def another(value: str) -> str:
     pass
-''')
+''', encoding="utf-8")
         self.src.write_text('''from bridge import text
 from other import another
 from typing import Callable
 def call(value: str) -> str:
     fn: Callable[[str], str] = text
     return another(fn(value))
-''')
+''', encoding="utf-8")
         self.build(exports=["call"])
         self.node('''
 const imports = Object.create(null);
@@ -2264,21 +2264,21 @@ assert.equal(lib.call("hi"), "hi🐍🐍");
         ]
         for source, message in cases:
             with self.subTest(source=source):
-                self.src.write_text('from snek import host, i32\nfrom typing import Coroutine\n' + source + '\ndef entry() -> None:\n    pass\n')
+                self.src.write_text('from snek import host, i32\nfrom typing import Coroutine\n' + source + '\ndef entry() -> None:\n    pass\n', encoding="utf-8")
                 with self.assertRaisesRegex(Exception, message):
                     self.build(exports=["entry"])
 
     def test_host_imports_require_library_and_cpython_fails_explicitly(self):
-        self.src.write_text('from snek import host\n@host("text")\ndef text() -> str:\n    pass\n')
+        self.src.write_text('from snek import host\n@host("text")\ndef text() -> str:\n    pass\n', encoding="utf-8")
         if self.native:
-            result = subprocess.run([self.native, "build", str(self.src)], capture_output=True, text=True)
+            result = subprocess.run([self.native, "build", str(self.src)], capture_output=True, text=True, encoding="utf-8")
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("host imports require", result.stderr)
         else:
             with self.assertRaisesRegex(Exception, "host imports require"):
                 driver.build(self.src, self.root / "command.wasm", compiler=self.compiler, optimize=False)
             with self.assertRaisesRegex(Exception, "host imports require"):
-                driver.compile_to_wat(self.src.read_text(), str(self.src), compiler=self.compiler, component=True)
+                driver.compile_to_wat(self.src.read_text(encoding="utf-8"), str(self.src), compiler=self.compiler, component=True)
         from snek import host
         @host("text")
         def text() -> str:
@@ -2302,7 +2302,7 @@ async def error() -> str:
         return "ok"
     except RuntimeError as problem:
         return str(problem).upper()
-''')
+''', encoding="utf-8")
         self.build(exports=["integer", "single", "boolean", "error"])
         self.node('''
 let integer = -2147483648, single = 1.1, boolean = true;
@@ -2333,7 +2333,7 @@ async def repeat(n: i32) -> i32:
     for i in range(n):
         total += len(await text("used"))
     return total
-''')
+''', encoding="utf-8")
         self.build(exports=["repeat"])
         self.node('''
 let memory;
@@ -2351,10 +2351,10 @@ assert.deepEqual(await Promise.all([lib.repeat(1), other.repeat(1)]), [20000, 20
 ''')
 
     def test_async_exports_and_host_values(self):
-        self.src.write_text(ASYNC_SOURCE)
+        self.src.write_text(ASYNC_SOURCE, encoding="utf-8")
         result = self.build(exports=ASYNC_EXPORTS)
-        self.assertIn('"load"(arg0: string, options?: SnekCallOptions): Promise<string>;', result.dts_path.read_text())
-        self.assertIn('"wait"(): PromiseLike<void>;', result.dts_path.read_text())
+        self.assertIn('"load"(arg0: string, options?: SnekCallOptions): Promise<string>;', result.dts_path.read_text(encoding="utf-8"))
+        self.assertIn('"wait"(): PromiseLike<void>;', result.dts_path.read_text(encoding="utf-8"))
         self.node('''
 const events = [];
 const lib = await instantiate(bytes, {imports: {
@@ -2379,7 +2379,7 @@ assert.equal(lib.sync(3), 3);
 ''')
 
     def test_async_rejections_cleanup_validation_and_overlap(self):
-        self.src.write_text(ASYNC_SOURCE)
+        self.src.write_text(ASYNC_SOURCE, encoding="utf-8")
         self.build(exports=ASYNC_EXPORTS)
         self.node('''
 let mode = "ok", resolvePending, rejectPending;
@@ -2423,7 +2423,7 @@ assert.equal(await lib.plain(1), 2);
 ''')
 
     def test_concurrent_async_invocations_are_isolated(self):
-        self.src.write_text(ASYNC_SOURCE)
+        self.src.write_text(ASYNC_SOURCE, encoding="utf-8")
         self.build(exports=ASYNC_EXPORTS)
         self.node('''
 const requests = new Map(), events = [], reentries = [];
@@ -2462,7 +2462,7 @@ await Promise.all(reentries);
 ''')
 
     def test_callbacks_can_run_between_async_steps(self):
-        self.src.write_text(CALLBACK_SOURCE)
+        self.src.write_text(CALLBACK_SOURCE, encoding="utf-8")
         self.build(CALLBACK_EXPORTS)
         self.node('''
 let resolve;
@@ -2483,7 +2483,7 @@ assert.equal(count(), 2);
 ''')
 
     def test_wait_all_host_requests_and_cleanup(self):
-        self.src.write_text(WAIT_ALL_SOURCE)
+        self.src.write_text(WAIT_ALL_SOURCE, encoding="utf-8")
         self.build(WAIT_ALL_EXPORTS)
         self.node('''
 const reads = new Map(), cleanups = new Map(), events = [];
@@ -2542,7 +2542,7 @@ assert.ok(events.includes("first") && events.includes("second"));
 ''')
 
     def test_gather_preserves_input_order_and_structured_cleanup(self):
-        self.src.write_text(WAIT_ALL_SOURCE)
+        self.src.write_text(WAIT_ALL_SOURCE, encoding="utf-8")
         self.build(WAIT_ALL_EXPORTS)
         self.node('''
 const requests = new Map(), cleaned = [];
@@ -2573,14 +2573,14 @@ async def resolve(value: HostObject | None) -> HostObject | None:
 async def check(a: HostObject, b: HostObject) -> bool:
     values = await gather(resolve(a), resolve(None), resolve(b))
     return values[0] is a and values[1] is None and values[2] is b
-''')
+''', encoding="utf-8")
         self.build(["check"])
         self.node('const lib = await instantiate(bytes, {imports: {resolve: async value => value}}); assert.equal(await lib.check({}, {}), true);')
 
     def test_abort_signal_unwinds_groups_and_awaits_cleanup(self):
-        self.src.write_text(WAIT_ALL_SOURCE)
+        self.src.write_text(WAIT_ALL_SOURCE, encoding="utf-8")
         result = self.build(WAIT_ALL_EXPORTS)
-        self.assertIn("options?: SnekCallOptions", result.dts_path.read_text())
+        self.assertIn("options?: SnekCallOptions", result.dts_path.read_text(encoding="utf-8"))
         self.node('''
 const {SnekCancelledError} = await import("./output.js");
 const requests = new Map(), cleanup = new Map(), events = [];
@@ -2640,7 +2640,7 @@ async def looping() -> None:
             await checkpoint()
     finally:
         print("loop cleaned")
-''')
+''', encoding="utf-8")
         self.build([*ASYNC_EXPORTS, "cleanup_failure", "explicit_exit", "suppress", "looping"])
         self.node('''
 const {SnekCancelledError} = await import("./output.js");
@@ -2696,11 +2696,11 @@ print("initialized")
 def echo(value: i32) -> i32:
     return value
 '''
-        self.src.write_text(original)
+        self.src.write_text(original, encoding="utf-8")
         self.build(["echo"])
-        self.src.write_text(original.replace("value: i32", "value: bool").replace("-> i32", "-> bool"))
+        self.src.write_text(original.replace("value: i32", "value: bool").replace("-> i32", "-> bool"), encoding="utf-8")
         self.build(["echo"], output="wrong.wasm")
-        self.src.write_text(original.replace("return value", "return value + 1"))
+        self.src.write_text(original.replace("return value", "return value + 1"), encoding="utf-8")
         self.build(["echo"], output="compatible.wasm")
         self.node('''
 const {SnekLoadError} = await import("./output.js");
@@ -2727,9 +2727,9 @@ assert.equal((await instantiate(bytes)).echo(4), 4);
              'class A:\n    pass\nclass B:\n    pass\nclass C(B):\n    pass\ndef echo(value: C) -> C:\n    return value\n'),
         ]:
             with self.subTest(source=original):
-                self.src.write_text(original)
+                self.src.write_text(original, encoding="utf-8")
                 self.build(["echo"])
-                self.src.write_text(changed)
+                self.src.write_text(changed, encoding="utf-8")
                 self.build(["echo"], output="wrong.wasm")
                 self.node('''
 let called = false;
@@ -2783,14 +2783,14 @@ try {
 ''')
 
     def test_imports_are_internal(self):
-        self.src.write_text('from helper import twice\nfrom snek import i32\ndef value(x: i32) -> i32:\n    return twice(x)\n')
-        (self.root / "helper.py").write_text('from snek import i32\nprint("helper init")\ndef twice(x: i32) -> i32:\n    return x * 2\n')
+        self.src.write_text('from helper import twice\nfrom snek import i32\ndef value(x: i32) -> i32:\n    return twice(x)\n', encoding="utf-8")
+        (self.root / "helper.py").write_text('from snek import i32\nprint("helper init")\ndef twice(x: i32) -> i32:\n    return x * 2\n', encoding="utf-8")
         self.build(["value"])
         self.node('const lib = await instantiate(bytes); assert.equal(lib.value(21), 42); assert.equal(lib.twice, undefined);')
         with self.assertRaises((ValueError, RuntimeError)): self.build(["twice"])
 
     def test_library_does_not_run_main_guard(self):
-        self.src.write_text('def name() -> str:\n    return __name__\nif __name__ == "__main__":\n    raise ValueError("command only")\nelse:\n    print("library initialized")\n')
+        self.src.write_text('def name() -> str:\n    return __name__\nif __name__ == "__main__":\n    raise ValueError("command only")\nelse:\n    print("library initialized")\n', encoding="utf-8")
         self.build(["name"])
         self.node('let output = ""; const lib = await instantiate(bytes, {stdout: t => output += t}); assert.equal(lib.name(), "entry"); assert.equal(output, "library initialized\\n");')
 
@@ -2808,7 +2808,7 @@ def alpha(value: str) -> bool:
     return value.isalpha()
 def number(value: str) -> i32:
     return i32(value)
-''')
+''', encoding="utf-8")
         self.build(["transform", "alpha", "number"])
         self.node('''const lib = await instantiate(bytes);
 assert.equal(lib.transform("Straße 🐍"), "straße 🐍|STRASSE 🐍");
@@ -2834,14 +2834,14 @@ assert.equal(lib.number("٤٢"), 42);
             'from snek import time, f64\ndef value() -> f64:\n    return time.time()\n',
         ):
             with self.subTest(source=source):
-                self.src.write_text('from typing import Coroutine\n' + source)
+                self.src.write_text('from typing import Coroutine\n' + source, encoding="utf-8")
                 with self.assertRaises((ValueError, RuntimeError)): self.build(["value"])
 
     def test_failed_init_and_callback(self):
-        self.src.write_text('def value() -> str:\n    return "ok"\nraise ValueError("init failed")\n')
+        self.src.write_text('def value() -> str:\n    return "ok"\nraise ValueError("init failed")\n', encoding="utf-8")
         self.build(["value"])
         self.node('await assert.rejects(instantiate(bytes), /init failed/);')
-        self.src.write_text(SOURCE)
+        self.src.write_text(SOURCE, encoding="utf-8")
         self.build()
         self.node('''
 let ready = false;
@@ -2871,7 +2871,7 @@ assert.equal(lib.add(2, 3), 5);
         self.assertEqual([path.read_bytes() for path in paths], before)
 
     def test_boundary_defaults_are_required_and_private_names_safe(self):
-        self.src.write_text('from snek import i32\ndef __snek_alloc(x: i32) -> i32:\n    return x + 1\ndef value(x: i32 = 5) -> i32:\n    return __snek_alloc(x)\ndef __proto__() -> str:\n    return "safe"\n')
+        self.src.write_text('from snek import i32\ndef __snek_alloc(x: i32) -> i32:\n    return x + 1\ndef value(x: i32 = 5) -> i32:\n    return __snek_alloc(x)\ndef __proto__() -> str:\n    return "safe"\n', encoding="utf-8")
         self.build(["value", "__proto__"])
         self.node('const lib = await instantiate(bytes); assert.equal(lib.value(5), 6); assert.throws(() => lib.value(), /expects 1/); assert.equal(lib.__proto__(), "safe");')
 

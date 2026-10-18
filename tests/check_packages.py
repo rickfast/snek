@@ -23,6 +23,14 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def wheel_binary(wheel):
+    # auditwheel adds directory entries, which are not executable payloads.
+    binaries = [info.filename for info in wheel.infolist()
+                if info.filename.startswith("snek_cli/bin/") and not info.is_dir()]
+    assert len(binaries) == 1, binaries
+    return binaries[0]
+
+
 def check(dist):
     version = tomllib.loads((ROOT / "native/Cargo.toml").read_text())["package"]["version"]
     wheels = list(dist.glob("*.whl"))
@@ -37,7 +45,7 @@ def check(dist):
             data = wheel.read(name)
             assert len(data) == int(size)
             assert digest == "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
-        binary_name = next(name for name in wheel.namelist() if name.startswith("snek_cli/bin/"))
+        binary_name = wheel_binary(wheel)
         binary = wheel.read(binary_name)
         assert wheel.getinfo(binary_name).external_attr >> 16 & 0o111
     with tarfile.open(platforms[0]) as package:

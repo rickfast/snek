@@ -24,6 +24,7 @@ from snekc import CompileError, driver, runner
 from snekc.check import check_module
 from snekc.emit_wat import emit_module
 from snekc.frontend import parse_source, select, to_ast
+from component_expectations import component_expectation
 
 
 class FrontendTests(unittest.TestCase):
@@ -47,8 +48,11 @@ class FrontendTests(unittest.TestCase):
                 if path.parent.name == "bootstrap" and component:
                     continue  # Binary stdin is currently core-only.
                 with self.subTest(path=path.name, component=component):
-                    expected = driver.compile_to_wat(source, frontend="cpython", component=component)
-                    actual = driver.compile_to_wat(source, frontend="snek", component=component)
+                    actual = expected = None
+                    with component_expectation(self, source, component):
+                        expected = driver.compile_to_wat(source, frontend="cpython", component=component)
+                    with component_expectation(self, source, component):
+                        actual = driver.compile_to_wat(source, frontend="snek", component=component)
                     self.assertEqual(actual, expected)
 
     def test_checker_error_parity(self):
@@ -111,8 +115,11 @@ async for a in xs:
                 self.assertEqual((result.code, result.stderr), (0, b""))
                 owned = json.loads(result.stdout)
                 for component in (False, True):
-                    actual = emit_module(check_module(to_ast(owned), frontend="snek"), component=component)
-                    expected = driver.compile_to_wat(source, frontend="cpython", component=component)
+                    actual = expected = None
+                    with component_expectation(self, source, component):
+                        actual = emit_module(check_module(to_ast(owned), frontend="snek"), component=component)
+                    with component_expectation(self, source, component):
+                        expected = driver.compile_to_wat(source, frontend="cpython", component=component)
                     self.assertEqual(actual, expected)
 
     def test_expression_mode(self):

@@ -25,6 +25,7 @@ from snekc.machines import Graph, has_await
 from snekc.types import (BOOL, I32, I64, F32, F64, NONE, STR, ClassInfo, ClassT,
                         CoroutineT, IteratorT, OptionalT, ListT, TupleT, CallableT, StreamT)
 from snekc.wasm import encode
+from component_expectations import component_expectation
 
 
 ORDER = '''from snek import i32, checkpoint, run
@@ -94,10 +95,13 @@ class MachineLoweringTests(unittest.TestCase):
 
         for path in sorted((ROOT / "examples").glob("*.py")):
             with self.subTest(example=path.name):
-                module = self.module(path.read_text())
+                source = path.read_text()
+                module = self.module(source)
                 for component in (False, True):
-                    expected = emit_module(module, component=component, graph_factory=Graph)
-                    with no_host_machines():
+                    actual = expected = None
+                    with component_expectation(self, source, component):
+                        expected = emit_module(module, component=component, graph_factory=Graph)
+                    with no_host_machines(), component_expectation(self, source, component):
                         actual = emit_module(module, component=component, graph_factory=compared,
                                              machine_backend=WasmMachineBackend(self.binary))
                     self.assertEqual(actual, expected, path.name)

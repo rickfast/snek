@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,9 +24,22 @@ def load(name, path):
 packages = load("snek_build_packages", "packaging/build_packages.py")
 native = load("snek_build_native", "packaging/build_native.py")
 common = load("snek_bench_common", "bench/common.py")
+package_checks = load("snek_package_checks", "tests/check_packages.py")
 
 
 class ToolingTests(unittest.TestCase):
+    def test_repaired_wheel_directory_is_not_the_executable(self):
+        for executable in ("snek", "snek.exe"):
+            with self.subTest(executable=executable), zipfile.ZipFile(io.BytesIO(), "w") as wheel:
+                wheel.writestr("snek_cli/bin/", b"")
+                with self.assertRaises(AssertionError):
+                    package_checks.wheel_binary(wheel)
+                wheel.writestr("snek_cli/bin/" + executable, b"native")
+                self.assertEqual(package_checks.wheel_binary(wheel), "snek_cli/bin/" + executable)
+                wheel.writestr("snek_cli/bin/unexpected", b"extra")
+                with self.assertRaises(AssertionError):
+                    package_checks.wheel_binary(wheel)
+
     def test_matrix_and_packages_share_target_records(self):
         rows = packages.ci_matrix()["include"]
         self.assertEqual(len(rows), len(packages.TARGETS))
