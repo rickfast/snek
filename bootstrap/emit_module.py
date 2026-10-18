@@ -186,7 +186,11 @@ def emit_source_module(checked: BodyChecker, prelude_source: str, component: boo
     collections = emit_collection_helpers(e)
     protocols = emit_protocols(e)
     for name in e.wait_groups:
-        funcs.append(wait_all_code(name, e.wait_groups[name], e.literals.lit("wait_all() requires distinct, unawaited coroutines")))
+        if name in e.wait_results:
+            wait_result = e.wait_results[name]
+            funcs.append(wait_all_code(name, e.wait_groups[name], e.literals.lit("gather() requires distinct, unawaited coroutines"), wait_result[0], wait_result[1], wait_result[2]))
+        else:
+            funcs.append(wait_all_code(name, e.wait_groups[name], e.literals.lit("wait_all() requires distinct, unawaited coroutines")))
     builders = emit_builders(e)
     machines = owned_machine_helpers(e)
     literals = e.literals.functions()

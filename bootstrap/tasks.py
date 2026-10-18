@@ -4,13 +4,15 @@ from bootstrap.parser import Node, string
 from bootstrap.machine_emit import machine_fields_wat
 
 
-def wait_all_code(name: str, heaps: list[str], reuse: str) -> str:
-    B = "$coro<none>"
+def wait_all_code(name: str, heaps: list[str], reuse: str, B: str = "$coro<none>", result_heap: str = "", result_code: str = "") -> str:
     F = name + ".frame"
     a = "(local.get $a)"
     f = "(local.get $f)"
     failure = "(struct.get " + F + " $failure " + f + ")"
-    fields = machine_fields_wat(Node("Machine").put("heap", string(B)).put("elem", Node("Type").put("none", Node("scalar", "true"))))
+    elem = Node("Type").put("none", Node("scalar", "true" if result_heap == "" else "false")).put("storage", string("(ref null " + result_heap + ")"))
+    fields = machine_fields_wat(Node("Machine").put("heap", string(B)).put("elem", elem))
+    default = "" if result_heap == "" else " (ref.null " + result_heap + ")"
+    collect = "" if result_heap == "" else "(if (ref.is_null " + failure + ") (then (struct.set " + B + " $value " + a + " " + result_code + "))) "
     params = ""
     values = ""
     checks = ""
@@ -44,12 +46,12 @@ def wait_all_code(name: str, heaps: list[str], reuse: str) -> str:
     fields += " (field $failure (mut (ref null $BaseException)))"
     return ("(type " + F + " (sub final " + B + " (struct " + fields + ")))\n"
         + "(elem declare func " + name + ".step)\n"
-        + "(func " + name + params + " (result (ref " + B + ")) (struct.new " + F + " (i32.const 0) (i32.const 0) (i32.const -1) (i32.const 0) (i32.const 0) (ref.func " + name + ".step)" + values + " (ref.null $BaseException)))\n"
+        + "(func " + name + params + " (result (ref " + B + ")) (struct.new " + F + " (i32.const 0) (i32.const 0) (i32.const -1) (i32.const 0) (i32.const 0) (ref.func " + name + ".step)" + default + values + " (ref.null $BaseException)))\n"
         + "(func " + name + ".step (type " + B + ".sig) (param $a (ref " + B + ")) (param $error (ref null $BaseException)) (result i32)"
         + " (local $f (ref " + F + ")) (local $caught (ref null $BaseException)) (local $inject (ref null $BaseException)) (local $status i32)"
         + " (local.set $f (ref.cast (ref " + F + ") " + a + "))"
         + " (if (i32.eqz (struct.get " + B + " $pc " + a + ")) (then " + checks + claims + " (struct.set " + B + " $pc " + a + " (i32.const 1))))"
         + " (if (i32.and (ref.is_null " + failure + ") (i32.eqz (ref.is_null (local.get $error)))) (then (struct.set " + F + " $failure " + f + " (local.get $error)))) "
         + steps + " (struct.set " + B + " $busy " + a + " (i32.const 0))"
-        + " (if " + all_done + " (then (struct.set " + B + " $pc " + a + " (i32.const -1)) " + clears
+        + " (if " + all_done + " (then (struct.set " + B + " $pc " + a + " (i32.const -1)) " + collect + clears
         + " (if (i32.eqz (ref.is_null " + failure + ")) (then (throw $snek.exc (ref.as_non_null " + failure + ")))) (return (i32.const 0)))) (i32.const 1))")

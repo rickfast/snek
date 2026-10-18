@@ -195,7 +195,7 @@ def object_callback() -> Callable[[HostObject | None], Coroutine[None, None, Hos
 '''
 ASYNC_CALLBACK_EXPORTS = ["apply", "echo", "make", "recover", "failer", "apply_void", "object_callback"]
 
-WAIT_ALL_SOURCE = '''from snek import host, checkpoint, wait_all
+WAIT_ALL_SOURCE = '''from snek import host, checkpoint, wait_all, gather
 from typing import Callable, Coroutine
 @host("read")
 async def read(name: str) -> str:
@@ -244,8 +244,16 @@ async def invoke(fn: Callable[[str], Coroutine[None, None, str]], name: str) -> 
     report(await fn(name))
 async def callbacks(fn: Callable[[str], Coroutine[None, None, str]]) -> None:
     await wait_all(invoke(fn, "one"), invoke(fn, "two"))
+async def gathered() -> str:
+    values = await gather(child("a"), child("b"))
+    return "|".join(values)
+async def fail_text() -> str:
+    await checkpoint()
+    raise ValueError("gather failure")
+async def gather_failure() -> None:
+    await gather(child("blocked"), fail_text())
 '''
-WAIT_ALL_EXPORTS = ["pair", "failfast", "nested", "duplicate", "reused", "callbacks"]
+WAIT_ALL_EXPORTS = ["pair", "failfast", "nested", "duplicate", "reused", "callbacks", "gathered", "gather_failure"]
 
 HOST_SOURCE = '''from snek import host, i32, i64, f32, f64
 @host("render")
@@ -1081,6 +1089,42 @@ callbackRequests.get("two")("second"); callbackRequests.get("one")("first");
 await callbacks;
 assert.ok(events.includes("first") && events.includes("second"));
 ''')
+
+    def test_gather_preserves_input_order_and_structured_cleanup(self):
+        self.src.write_text(WAIT_ALL_SOURCE)
+        self.build(WAIT_ALL_EXPORTS)
+        self.node('''
+const requests = new Map(), cleaned = [];
+const lib = await instantiate(bytes, {imports: {
+  read: name => new Promise(resolve => requests.set(name, resolve)),
+  cleanup: async name => {await new Promise(resolve => setTimeout(resolve, 0)); cleaned.push(name);},
+  report: text => {}
+}});
+let settled = false;
+const task = lib.gathered().then(value => {settled = true; return value;});
+assert.deepEqual([...requests.keys()], ["a", "b"]);
+const second = "🐍".repeat(10000);
+requests.get("b")(second);
+await new Promise(resolve => setTimeout(resolve, 5));
+assert.equal(settled, false);
+requests.get("a")("first");
+assert.equal(await task, "first|" + second);
+assert.deepEqual(cleaned, ["b", "a"]);
+await assert.rejects(lib.gather_failure(), /gather failure/);
+assert.deepEqual(cleaned, ["b", "a", "blocked"]);
+''')
+
+    def test_gather_opaque_reference_results(self):
+        self.src.write_text('''from snek import HostObject, host, gather
+@host("resolve")
+async def resolve(value: HostObject | None) -> HostObject | None:
+    pass
+async def check(a: HostObject, b: HostObject) -> bool:
+    values = await gather(resolve(a), resolve(None), resolve(b))
+    return values[0] is a and values[1] is None and values[2] is b
+''')
+        self.build(["check"])
+        self.node('const lib = await instantiate(bytes, {imports: {resolve: async value => value}}); assert.equal(await lib.check({}, {}), true);')
 
     def test_library_abi_mismatch_is_rejected(self):
         self.build()

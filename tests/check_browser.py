@@ -287,13 +287,17 @@ class BrowserTests(unittest.TestCase):
                   const started = [...requests.keys()];
                   requests.get("b")("second"); requests.get("a")("first");
                   const value = await pair;
+                  const gathered = lib.gathered();
+                  requests.get("b")("second"); requests.get("a")("first");
+                  const ordered = await gathered;
                   let error;
                   try {await lib.failfast();} catch (e) {error = e.message;}
-                  return [started, value, events, error];
+                  return [started, value, events, error, ordered];
                 }''', target)
                 self.assertEqual(result[:2], [["a", "b"], "finished"])
-                self.assertEqual(sorted(result[2]), ["a", "b", "blocked"])
+                self.assertEqual(sorted(result[2]), ["a", "a", "b", "b", "blocked"])
                 self.assertIn("first failure", result[3])
+                self.assertEqual(result[4], "first|second")
 
     def test_concurrent_async_host_results(self):
         for target in ("async", "async-optimized"):

@@ -64,6 +64,7 @@ class SourceEmitter:
     component: bool
     frames: list[Node]
     wait_groups: dict[str, list[str]]
+    wait_results: dict[str, list[str]]
 
     def __init__(self, checked: BodyChecker, component: bool = False) -> None:
         self.checked = checked
@@ -88,6 +89,7 @@ class SourceEmitter:
         self.component = component
         self.frames = []
         self.wait_groups = {}
+        self.wait_results = {}
 
     def temp(self, ty: str) -> str:
         name = "$e." + str(len(self.temps))
@@ -273,16 +275,26 @@ class SourceEmitter:
         if kind == "IsInstance": return "(ref.test (ref $" + text + ") " + self.ex(args[0]) + ")"
         if kind == "IfExpr": return f"(if (result {self.types.valtype(ty)}) {self.ex(args[0])} (then {self.ex(args[1])}) (else {self.ex(args[2])}))"
         if kind == "Call":
-            if text == "snek.wait_all":
-                if self.component: raise ValueError("wait_all() is not yet supported for components")
+            if text in ("snek.wait_all", "snek.gather"):
+                if self.component: raise ValueError(text[5:] + "() is not yet supported for components")
                 wait_heaps: list[str] = []
                 wait_parts: list[str] = []
                 for arg in args:
                     wait_heap = self.types.heap(arg.ty)
                     wait_heaps.append(wait_heap)
                     wait_parts.append(wait_heap[1:])
-                name = "$snek.wait_all<" + "~".join(wait_parts) + ">"
+                name = "$" + text + "<" + "~".join(wait_parts) + ">"
                 self.wait_groups[name] = wait_heaps
+                if text == "snek.gather":
+                    wait_values: list[str] = []
+                    wait_elem = ty.args[0].args[0]
+                    for i in range(len(args)):
+                        wait_value = "(struct.get " + wait_heaps[i] + " $value (ref.as_non_null (struct.get " + name + ".frame $child" + str(i) + " (local.get $f))))"
+                        if wait_elem.reference() and wait_elem.kind != "optional": wait_value = "(ref.as_non_null " + wait_value + ")"
+                        wait_values.append(wait_value)
+                    wait_list = self.types.heap(ty.args[0])
+                    wait_code = "(struct.new " + wait_list + " (i32.const " + str(len(args)) + ") (array.new_fixed $arr." + emit_mangle(wait_elem) + " " + str(len(args)) + " " + " ".join(wait_values) + "))"
+                    self.wait_results[name] = [self.types.heap(ty), wait_list, wait_code]
                 return self.call(name, args)
             if text.startswith("snek.lib."):
                 operations = abi_library_operations()

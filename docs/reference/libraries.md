@@ -267,6 +267,35 @@ the library target. Component builds reject `wait_all` until their host-service
 state supports multiple pending operations. The CPython shim uses asyncio tasks
 and asyncio cancellation for sibling cleanup.
 
+### Collecting results with `gather`
+
+Use `await gather(...)` when you need the children's results:
+
+```python
+from snek import gather
+
+async def load_both() -> str:
+    texts = await gather(fetch_text("./first.txt"), fetch_text("./second.txt"))
+    return "\n".join(texts)
+```
+
+Here `fetch_text` is an async host declaration returning `str`, and `texts` is a
+`list[str]`. Results stay in argument order even when requests finish out of order.
+The returned list is an ordinary Snek-owned list; existing library boundary limits
+still apply, so return a string or another supported boundary value to JavaScript.
+
+`gather` requires one or more distinct, fresh coroutines with exactly matching,
+non-`None` result types. Numbers, strings, objects, optional references, collections
+and callables work, as do nested gathers. Mixed result types and `None` results
+are rejected at compile time; use `wait_all` when discarding results. There is no
+implicit numeric widening or heterogeneous result union.
+
+Failure and cleanup rules match `wait_all`: the first failure escaping a child
+unwinds unfinished siblings, awaits their cleanup, then propagates. Unlike
+`asyncio.gather`'s default behavior, siblings are not left running after failure.
+The CPython shim follows Snek's structured behavior. Component builds currently
+reject `gather`, just as they reject `wait_all`.
+
 ## Boundary types
 
 | Snek | JavaScript / TypeScript |

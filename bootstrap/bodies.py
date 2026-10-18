@@ -1422,14 +1422,20 @@ class BodyChecker:
 
     def builtin_call(self, name: str, node: Node, expected: DeclType) -> BodyExpr:
         args = node.get("args").items
-        if name == "wait_all" and name in self.decl.imported:
+        if name in ("wait_all", "gather") and name in self.decl.imported:
             if len(node.get("keywords").items) != 0 or len(args) == 0:
-                declaration_error("wait_all() requires one or more positional coroutines", node)
-            result = BodyExpr("Call", DeclType("Coroutine").add(DeclType("None")), node, "snek.wait_all")
+                declaration_error(name + "() requires one or more positional coroutines", node)
+            result = BodyExpr("Call", DeclType("Coroutine").add(DeclType("None")), node, "snek." + name)
             for arg in args:
                 value = self.expr(arg, DeclType("unknown"))
-                if value.ty.kind != "Coroutine": declaration_error("wait_all() arguments must be coroutines", arg)
+                if value.ty.kind != "Coroutine": declaration_error(name + "() arguments must be coroutines", arg)
                 result.add(value)
+            if name == "gather":
+                gather_type = result.args[0].ty.args[0]
+                for value in result.args:
+                    if gather_type.kind == "None" or not value.ty.args[0].same(gather_type):
+                        declaration_error("gather() requires matching non-None coroutine result types; use wait_all() to discard results", node)
+                result.ty = DeclType("Coroutine").add(DeclType("list").add(gather_type))
             return result
         if name in ("run", "checkpoint") and name in self.decl.imported:
             if len(node.get("keywords").items) != 0:

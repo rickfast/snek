@@ -17,7 +17,7 @@ operations over WASI and provide CPython equivalents for testing.
 | `snek.os` | `getenv(name, default)` with explicit guest environment grants |
 | `snek.time` | `time()`, `monotonic()`, async `sleep(seconds)` |
 | `snek.secrets` | `token_bytes(n)`, `token_hex(n)`, `randbelow(n)` |
-| `snek` | Machine types, `run`, `checkpoint`, structured `wait_all`, and core-only `read_bytes` / `write_bytes` |
+| `snek` | Machine types, `run`, `checkpoint`, structured `wait_all` / `gather`, and core-only `read_bytes` / `write_bytes` |
 
 This is not the full CPython standard library. Filesystem access, HTTP, sockets,
 text stdin, and a general package loader are not implemented.

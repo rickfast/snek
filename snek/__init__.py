@@ -22,21 +22,30 @@ async def checkpoint() -> None:
 
 async def wait_all(*coroutines) -> None:
     """Run distinct fresh coroutines together; unwind siblings on failure."""
+    await _structured("wait_all", coroutines)
+
+
+async def gather(*coroutines):
+    """Collect sibling coroutine results in argument order, with scoped cleanup."""
+    return await _structured("gather", coroutines)
+
+
+async def _structured(name, coroutines):
     import asyncio
     import inspect
     if not coroutines or any(not inspect.iscoroutine(value) for value in coroutines):
-        raise TypeError("wait_all() requires one or more positional coroutines")
+        raise TypeError(name + "() requires one or more positional coroutines")
     if len({id(value) for value in coroutines}) != len(coroutines) or any(
         inspect.getcoroutinestate(value) != inspect.CORO_CREATED for value in coroutines
     ):
-        raise RuntimeError("wait_all() requires distinct, unawaited coroutines")
+        raise RuntimeError(name + "() requires distinct, unawaited coroutines")
     tasks = [asyncio.create_task(value) for value in coroutines]
     try:
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
         for task in tasks:
             if task in done and task.exception() is not None:
                 raise task.exception()
-        await asyncio.gather(*tasks)
+        return await asyncio.gather(*tasks)
     finally:
         for task in tasks:
             if not task.done(): task.cancel()
@@ -95,4 +104,4 @@ def write_bytes(data: list[i32]) -> None:
         raise RuntimeError("stdout write failed") from error
 
 
-__all__ = ["i32", "i64", "f32", "f64", "HostObject", "Final", "final", "host", "run", "checkpoint", "wait_all", "read_bytes", "write_bytes", "sys", "os", "time", "secrets", "io"]
+__all__ = ["i32", "i64", "f32", "f64", "HostObject", "Final", "final", "host", "run", "checkpoint", "wait_all", "gather", "read_bytes", "write_bytes", "sys", "os", "time", "secrets", "io"]

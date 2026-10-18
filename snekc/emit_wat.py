@@ -223,6 +223,7 @@ class Emitter(CollectionEmitter, ProtocolEmitter, MachineEmitter, ClosureEmitter
         self.machine_types = {}
         self.machine_graphs = []
         self.wait_groups: dict[str, list[str]] = {}
+        self.wait_results: dict[str, list[str]] = {}
         self.main_async = True
         self.closure_types = {}
         self.cell_types = {}
@@ -342,7 +343,8 @@ class Emitter(CollectionEmitter, ProtocolEmitter, MachineEmitter, ClosureEmitter
         funcs.extend(stdlib_host.machines(self))
         from bootstrap.tasks import wait_all_code
         for name, heaps in self.wait_groups.items():
-            funcs.append(wait_all_code(name, heaps, self.lit("wait_all() requires distinct, unawaited coroutines")))
+            operation = "gather" if name in self.wait_results else "wait_all"
+            funcs.append(wait_all_code(name, heaps, self.lit(operation + "() requires distinct, unawaited coroutines"), *self.wait_results.get(name, [])))
         class_types = self.class_types()
         vtables = self.vtable_globals()
         closures = self.closure_artifacts()
@@ -1219,12 +1221,18 @@ class Emitter(CollectionEmitter, ProtocolEmitter, MachineEmitter, ClosureEmitter
             return (f"(if (result {self.valtype(e.ty)}) {self.ex(e.cond)} "
                     f"(then {self.ex(e.then)}) (else {self.ex(e.else_)}))")
         if isinstance(e, ir.Call):
-            if e.func == "snek.wait_all":
+            if e.func in ("snek.wait_all", "snek.gather"):
                 if self.component:
-                    raise ValueError("wait_all() is not yet supported for components")
+                    raise ValueError(e.func[5:] + "() is not yet supported for components")
                 heaps = [self.heap(arg.ty) for arg in e.args]
-                name = "$snek.wait_all<" + "~".join(h[1:] for h in heaps) + ">"
+                name = "$" + e.func + "<" + "~".join(h[1:] for h in heaps) + ">"
                 self.wait_groups[name] = heaps
+                if e.func == "snek.gather":
+                    values = [self.machine_value(arg.ty, f"(ref.as_non_null (struct.get {name}.frame $child{i} (local.get $f)))") for i, arg in enumerate(e.args)]
+                    result = e.ty.elem
+                    heap = self.heap(result)
+                    code = f"(struct.new {heap} (i32.const {len(values)}) (array.new_fixed $arr.{mangle(result.elem)} {len(values)} {' '.join(values)}))"
+                    self.wait_results[name] = [self.heap(e.ty), heap, code]
                 return self.call(name, e.args)
             if e.func.startswith("snek.lib."):
                 from .wasi_bindings import OPERATIONS
