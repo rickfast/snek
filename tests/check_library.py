@@ -766,8 +766,8 @@ for (const [value, message] of [["throw", "thrown"], ["reject", "rejected 🐍"]
 }
 mode = "pending";
 const loading = lib.load("pending");
-assert.throws(() => lib.sync(1), /not reentrant/);
-await assert.rejects(lib.plain(1), /not reentrant/);
+assert.equal(lib.sync(1), 1);
+assert.equal(await lib.plain(1), 2);
 resolvePending("Straße");
 assert.equal(await loading, "STRASSE");
 assert.deepEqual(events.splice(0), ["done"]);
@@ -780,6 +780,66 @@ assert.equal(await lib.load("back"), "BACK");
 await assert.rejects(lib.number(1n), /i64 out of range/);
 await assert.rejects(lib.scalar(1, 2, 3, false), /expected number/);
 assert.equal(await lib.plain(1), 2);
+''')
+
+    def test_concurrent_async_invocations_are_isolated(self):
+        self.src.write_text(ASYNC_SOURCE)
+        self.build(exports=ASYNC_EXPORTS)
+        self.node('''
+const requests = new Map(), events = [], reentries = [];
+let lib;
+lib = await instantiate(bytes, {imports: {
+  read_text: value => {
+    assert.throws(() => lib.sync(0), /not reentrant/);
+    reentries.push(assert.rejects(lib.plain(0), /not reentrant/));
+    return new Promise((resolve, reject) => requests.set(value, {resolve, reject}));
+  }, wait: async () => {events.push("wait");}, number: async value => value,
+  scalar: async (a, b, c, d) => c, render: value => {events.push(value);}
+}});
+const first = lib.load("first"), second = lib.load("second");
+const rejected = lib.load("rejected"), recovered = lib.recover();
+const rejection = assert.rejects(rejected, /only this task fails/);
+assert.deepEqual([...requests.keys()], ["first", "second", "rejected", "recover"]);
+assert.equal(lib.sync(17), 17);
+await assert.rejects(lib.load(42), /expected string/);
+await assert.rejects(lib.failure(), /async failure/);
+requests.get("second").resolve("Straße 🐍".repeat(10000));
+assert.equal(await second, "STRASSE 🐍".repeat(10000));
+requests.get("rejected").reject(new Error("only this task fails"));
+await rejection;
+requests.get("recover").resolve(42); // boundary failure belongs to this task
+assert.match(await recovered, /expected string/);
+requests.get("first").resolve("first 🐍");
+assert.equal(await first, "FIRST 🐍");
+assert.equal(events.filter(value => value === "done").length, 3);
+assert.ok(events.includes("cleaned"));
+assert.deepEqual(await Promise.all([lib.number(9007199254740993n), lib.scalar(1, 2, 3.5, true), lib.plain(41)]),
+  [9007199254740993n, 3.5, 42]);
+const many = Array.from({length: 32}, (_, i) => lib.load(String(i)));
+for (let i = 31; i >= 0; i--) requests.get(String(i)).resolve("value " + i);
+assert.deepEqual(await Promise.all(many), Array.from({length: 32}, (_, i) => "VALUE " + i));
+await Promise.all(reentries);
+''')
+
+    def test_callbacks_can_run_between_async_steps(self):
+        self.src.write_text(CALLBACK_SOURCE)
+        self.build(CALLBACK_EXPORTS)
+        self.node('''
+let resolve;
+const lib = await instantiate(bytes, {imports: {
+  store: fn => {}, get_callback: () => text => text,
+  get_async_callback: () => new Promise(done => {resolve = done;})
+}});
+const count = lib.counter(0), made = lib.make("prefix: ");
+const waiting = lib.from_async_host("held");
+assert.equal(count(), 1);
+assert.equal(made("Straße"), "prefix: STRASSE");
+const closures = await Promise.all([lib.deferred_make("one: "), lib.deferred_make("two: ")]);
+assert.equal(closures[0]("a"), "one: A");
+assert.equal(closures[1]("b"), "two: B");
+resolve(text => text + "!");
+assert.equal(await waiting, "held!");
+assert.equal(count(), 2);
 ''')
 
     def test_browser_loader_response_and_url(self):

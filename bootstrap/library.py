@@ -275,13 +275,13 @@ def library_async_host(item: LibraryExport, index: i32) -> str:
 
 def library_async_export(item: LibraryExport, head: str, args: list[str]) -> str:
     B = item.heap
-    task = "$__snek_task_" + item.name
-    value = "(ref.as_non_null (global.get " + task + "))"
-    factory = "(global.set " + task + " (call $" + item.target + " " + " ".join(args) + ")) (call " + B + ".claim " + value + ")"
+    value = "(local.get $task)"
+    parameter = " (param $task (ref " + B + "))"
+    factory = "(local.set $task (call $" + item.target + " " + " ".join(args) + ")) (call " + B + ".claim " + value + ")"
     catch = " (call $rt.uncaught (block $failed (result (ref $BaseException)) (try_table (catch $snek.exc $failed) "
-    lines = ["(global " + task + " (mut (ref null " + B + ")) (ref.null " + B + "))"]
-    lines.append(head + catch + factory + " (return)) (unreachable))) (unreachable))")
-    lines.append('(func (export "__snek_step_' + item.name + '") (result i32) (local $pending i32)' + catch
+    lines: list[str] = []
+    lines.append(head + " (result (ref " + B + ")) (local $task (ref " + B + "))" + catch + factory + " (return " + value + ")) (unreachable))) (unreachable))")
+    lines.append('(func (export "__snek_step_' + item.name + '")' + parameter + ' (result i32) (local $pending i32)' + catch
                  + "(local.set $pending (call " + B + ".advance " + value + ")) (call $rt.flush) (return (local.get $pending))) (unreachable))) (unreachable))")
     result = ""
     body = ""
@@ -290,8 +290,7 @@ def library_async_export(item: LibraryExport, head: str, args: list[str]) -> str
         body = "(struct.get " + B + " $value " + value + ")"
         if item.ret == "str": body = "(call $__snek_write (ref.as_non_null " + body + "))"
         elif item.ret == "HostObject" or item.ret.startswith("Callable["): body = "(ref.as_non_null " + body + ")"
-    lines.append('(func (export "__snek_result_' + item.name + '")' + result + " " + body + ")")
-    lines.append('(func (export "__snek_drop_' + item.name + '") (global.set ' + task + " (ref.null " + B + ")))")
+    lines.append('(func (export "__snek_result_' + item.name + '")' + parameter + result + " " + body + ")")
     return "\n".join(lines)
 
 

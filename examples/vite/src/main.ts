@@ -16,7 +16,7 @@ async function start() {
   document.querySelector("#integer")!.textContent = library.twice(9007199254740993n).toString();
   load.disabled = false;
   load.onclick = async () => {
-    load.disabled = true; // One active call per Snek instance.
+    load.disabled = true; // Keep this button's requests in order.
     try {
       result.textContent = await library.load(messageUrl);
     } catch (error) {

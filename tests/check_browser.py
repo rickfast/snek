@@ -227,20 +227,46 @@ class BrowserTests(unittest.TestCase):
                   }});
                   mode = "pending";
                   const loading = lib.load("url");
-                  let busy;
-                  try {await lib.plain(1);} catch (e) {busy = e.message;}
+                  const concurrent = await lib.plain(1);
                   resolvePending("Straße 🐍");
                   const value = await loading;
                   mode = "error";
                   const error = await lib.recover();
                   mode = "ok";
-                  return [value, busy, error, await lib.flow("done"), events,
+                  return [value, concurrent, error, await lib.flow("done"), events,
                     (await lib.number(9007199254740993n)).toString(), await lib.plain(41)];
                 }''', target)
                 self.assertEqual(result[0], "STRASSE 🐍")
-                self.assertIn("not reentrant", result[1])
+                self.assertEqual(result[1], 2)
                 self.assertIn("browser rejection", result[2])
                 self.assertEqual(result[3:], ["DONE!", ["done", "wait", "cleaned", "done", "wait"], "9007199254740993", 42])
+
+    def test_concurrent_async_host_results(self):
+        for target in ("async", "async-optimized"):
+            with self.subTest(target=target):
+                result = self.page.evaluate('''async target => {
+                  const {instantiate} = await import(`./${target}.js`);
+                  const requests = new Map(), events = [];
+                  const lib = await instantiate(`./${target}.wasm`, {imports: {
+                    read_text: value => new Promise((resolve, reject) => requests.set(value, {resolve, reject})),
+                    wait: async () => {}, number: async value => value,
+                    scalar: async (a, b, c, d) => c, render: text => {events.push(text);}
+                  }});
+                  const first = lib.load("first"), second = lib.load("second"), third = lib.load("third");
+                  const failed = third.catch(error => error.message);
+                  const started = [...requests.keys()];
+                  requests.get("second").resolve("Straße 🐍".repeat(1000));
+                  const secondResult = await second;
+                  requests.get("third").reject(new Error("isolated"));
+                  const error = await failed;
+                  const sync = lib.sync(42);
+                  requests.get("first").resolve("first");
+                  return [started, secondResult, error, sync, await first, events];
+                }''', target)
+                self.assertEqual(result[0], ["first", "second", "third"])
+                self.assertEqual(result[1], "STRASSE 🐍" * 1000)
+                self.assertIn("isolated", result[2])
+                self.assertEqual(result[3:], [42, "FIRST", ["done", "done", "done"]])
 
     def test_async_fetch_example(self):
         self.page.goto(self.url + "/async.html")

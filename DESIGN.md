@@ -61,7 +61,7 @@ or `snek run examples/modules/main.py`.
 `--library --export FUNCTION` produces a core Wasm library and generated
 JavaScript/TypeScript bindings. Both exports and `@host("name")`
 imports support fixed-width numbers, booleans, copied strings and opaque `HostObject`
-references (including nullable references), plus `None`
+references (including nullable references), synchronous typed `Callable` values, plus `None`
 returns. Host declarations have typed signatures and `pass` bodies; their host
 names remain explicit metadata in checked IR, not ordinary function bodies.
 JavaScript supplies the functions when instantiating the library. There is no
@@ -70,7 +70,10 @@ ambient DOM, filesystem or network access.
 The shared ABI generator lowers strings to UTF-8 pointer/length pairs and copies
 them into the GC heap before use. Host string returns use Wasm multi-value
 results. Scratch frames are released after each callback, and the JavaScript
-entry guard resets the arena on exceptional exit. Snek-owned GC references never escape.
+entry guard resets the arena on exceptional exit. Private JavaScript closures retain
+opaque WasmGC callable and coroutine references; public bindings expose ordinary
+JavaScript functions and Promises, not raw Snek objects. Weak maps preserve callback
+identity without manual handle tables.
 Host string returns, like exported string parameters, enable the Unicode tables
 needed for open-world input.
 
@@ -79,13 +82,16 @@ exception handlers and cleanup. An `async def` host declaration instead wraps a
 Promise as a GC-backed coroutine frame. It starts lazily on first resume, suspends,
 and retrieves a checked result on the next resume after JavaScript settles it.
 Rejections and invalid resolved values become Snek `RuntimeError`s, allowing normal
-exception handling and awaited cleanup. Async exports keep their root frame in a
-private GC global until completion; the JavaScript driver awaits pending host work
+exception handling and awaited cleanup. Async factories return a private GC frame
+to each invocation's JavaScript driver, which awaits its own pending host work
 or yields to the event loop for a cooperative checkpoint. No Wasm stack is retained.
 
-Each instance permits one active exported call, including suspended time. Reentrant
-and overlapping calls are rejected, not queued. Scratch memory is reset at suspension
-and exit; exported roots are cleared on success and failure. Async initialization,
+Each instance permits overlapping async invocations. A synchronous entry guard
+protects shared scratch memory and transient import state; the driver restores and
+saves each invocation's pending host state around every step. No scratch allocations
+survive suspension. Sync exports and typed callbacks may run between steps, but
+synchronous re-entry remains rejected. Invocation roots are released on success and
+failure; an unresolved host Promise retains its frame. Async initialization,
 task spawning and cancellation APIs remain unsupported. The CPython shim raises on a host call
 unless the application replaces the declaration with a Python implementation.
 See the [library guide](docs/reference/libraries.md) for the public contract.

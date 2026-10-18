@@ -195,18 +195,35 @@ exception rejects the exported Promise with `SnekError`. The original JavaScript
 error object/stack is not preserved. This differs from synchronous host callback
 errors, which still escape unchanged and bypass Snek cleanup.
 
-Each instance allows **one active exported call**, including time spent awaiting.
-Overlapping sync calls throw and overlapping async calls reject; they are not
-queued. Await completion before using the instance again, or create separate
-instances for independent work. Callbacks must not call back into the same
-instance. Errors release the active call and scratch storage so it can be reused.
+### Concurrent calls
+
+Async exports can overlap on the same instance, including repeated calls to the
+same export. Each invocation owns its coroutine frame and pending host result:
+
+```javascript
+const [first, second] = await Promise.all([
+  lib.load("./first.txt"),
+  lib.load("./second.txt"),
+]);
+```
+
+Both host requests start without waiting for the other to complete. Results may
+settle in either order; validation failures and exceptions belong to the invocation
+that produced them. `Promise.all` rejects when one call fails, but does not cancel
+the others. Each call still runs its own Snek cleanup.
+
+Execution is cooperative, not parallel: only one synchronous step runs at a time.
+Other exports and Snek callbacks may run while an invocation is suspended, so
+shared captured state can change across an `await`. Synchronous re-entry from a
+host function or stdout handler is still rejected. Scratch memory is reset between
+steps; no borrowed string buffers survive suspension.
 
 Async module initialization, task spawning, and a Snek cancellation API are not
 supported. `run()` is a command entry mechanism, not a way to block JavaScript
 waiting for a Promise. Start library coroutines through an async export. The
 application can own an `AbortController` inside its host implementation; a rejected
-fetch then follows normal Snek error/cleanup handling. An unsettled Promise keeps
-its instance busy until the host settles it.
+fetch then follows normal Snek error/cleanup handling. An unsettled Promise retains
+its invocation's frame until the host settles it, but does not block other calls.
 
 ## Boundary types
 
@@ -296,7 +313,7 @@ unsupported because an opaque object has no Snek representation.
 
 `HostObject` requires a library build. It does not export Snek classes or
 collections, provide a DOM API, make an object transferable to another worker,
-or change the one-active-call-per-instance rule. The Vite example passes a DOM
+or permit synchronous re-entry. The Vite example passes a DOM
 element through its `identity` export and verifies that it is the same object.
 
 ## Typed callbacks
@@ -344,9 +361,9 @@ same instance and signature preserve function identity. A callback from another
 instance is treated as a JavaScript function owned by that instance.
 
 Calling a Snek callback enters its instance just like an export. It fails if that
-instance is already executing or awaiting a host Promise, so host functions must
+instance is already executing a synchronous step, so host functions must
 not invoke a received Snek callback inline. Deferred events can invoke it after
-the current call finishes. Exceptions and boundary validation follow the same
+the current step finishes, including while an async call is suspended. Exceptions and boundary validation follow the same
 rules as exports and synchronous host imports.
 
 ## Initialization, errors and output

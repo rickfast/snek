@@ -166,7 +166,7 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
   wasm = instance.exports;
   if (!(wasm.memory instanceof WebAssembly.Memory) || !(wasm.__snek_length instanceof WebAssembly.Global) ||
       ["__snek_init", "__snek_reset", "__snek_alloc", ...callbackSignatures.flatMap((_, i) => [`__snek_wrap_${i}`, `__snek_call_${i}`]), ...signatures.flatMap(([name, , , isAsync]) =>
-        isAsync ? [name, `__snek_step_${name}`, `__snek_result_${name}`, `__snek_drop_${name}`] : [name])]
+        isAsync ? [name, `__snek_step_${name}`, `__snek_result_${name}`] : [name])]
         .some(name => typeof wasm[name] !== "function"))
     throw new SnekLoadError("Invalid Snek library exports. Use the .wasm and .js files from the same --library build.");
   function begin(isAsync = false) {
@@ -189,6 +189,17 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
     begin();
     try { return action(); }
     finally { finish(); }
+  }
+  // Only synchronous execution owns the instance. Each suspended invocation
+  // retains its own GC frame and pending host result, never borrowed memory.
+  function enterTask(task, action) {
+    begin(true);
+    pending = task.pending;
+    try { return action(); }
+    finally {
+      task.pending = pending;
+      finish();
+    }
   }
   function lower(type, value) {
     const callback = callbackSignatures.findIndex(([signature]) => signature === type);
@@ -273,18 +284,18 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
       continue;
     }
     api[name] = async (...args) => {
-      begin(true);
+      const task = {pending: null};
+      let frame;
       try {
-        wasm[name](...argumentsToWasm(args));
-        while (wasm[`__snek_step_${name}`]()) {
-          wasm.__snek_reset();
-          if (pending) await pending.ready;
+        frame = enterTask(task, () => wasm[name](...argumentsToWasm(args)));
+        while (enterTask(task, () => wasm[`__snek_step_${name}`](frame))) {
+          if (task.pending) await task.pending.ready;
           else await new Promise(resolve => setTimeout(resolve, 0)); // cooperative checkpoint
         }
-        return lift(result, wasm[`__snek_result_${name}`]());
+        return enterTask(task, () => lift(result, wasm[`__snek_result_${name}`](frame)));
       } finally {
-        wasm[`__snek_drop_${name}`]();
-        finish();
+        frame = null;
+        task.pending = null;
       }
     };
   }
