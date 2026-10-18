@@ -146,7 +146,7 @@ unittest.TextTestRunner().run(unittest.defaultTestLoader.loadTestsFromTestCase(T
                 self.assertEqual(len(unittest.defaultTestLoader.getTestCaseNames(cls)), count)
                 self.assertEqual([base for base in cls.__mro__[1:] if issubclass(base, unittest.TestCase)], [unittest.TestCase])
                 declared = {node.name for group in module.CASES
-                            for node in ast.parse(Path(importlib.import_module(group.__module__).__file__).read_text()).body
+                            for node in ast.parse(Path(importlib.import_module(group.__module__).__file__).read_text(encoding="utf-8")).body
                             if isinstance(node, ast.ClassDef) and node.name == group.__name__
                             for node in node.body if isinstance(node, ast.FunctionDef) and node.name.startswith("test_")}
                 self.assertEqual(set(unittest.defaultTestLoader.getTestCaseNames(cls)), declared)

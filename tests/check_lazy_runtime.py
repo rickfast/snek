@@ -74,7 +74,7 @@ class LazyRuntimeTests(unittest.TestCase):
 
     def test_eager_and_lazy_typed_ir_are_identical(self):
         for name in ("str_methods.py", "format_specs.py", "runtime_checker.py", "str_codepoints.py"):
-            source = (ROOT / "examples" / name).read_text()
+            source = (ROOT / "examples" / name).read_text(encoding="utf-8")
             eager, lazy = self.checker(source, eager=True), self.checker(source)
             eager.run()
             lazy.run()
