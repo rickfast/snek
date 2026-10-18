@@ -39,6 +39,75 @@ The optional `component` command measures native WASI 0.3 components using the W
 | `generators` | Three-stage lazy pipeline: generate, transform and filter 300,000 values |
 | `async_calls` | 100,000 nested coroutine calls with 1,000 cooperative checkpoints |
 
+## Compute and JavaScript boundary refresh — 2026-10-18
+
+[Compute samples](results/2026-10-18-compute.json) refresh all eleven workloads on
+an 18-core Apple M5 Max, Node 25.9.0, Wasmtime Python 49.0.0, CPython 3.13.14,
+and Binaryen 132. The self-hosted compiler builds the optimized modules. Ten
+repetitions per workload/runtime, with every output checked against CPython.
+These retain the existing timing boundaries: Snek instantiation plus `_start`
+with a compiled module, versus the interpreter's timed `main()`. No discarded
+warmup; all samples, including first-run tiering costs, are retained. No local
+build/test jobs ran alongside the measurements. This is a new baseline, not a
+controlled before/after speedup claim.
+
+Median milliseconds:
+
+| Workload | Snek / V8 | Snek / Wasmtime | Native CPython |
+| --- | ---: | ---: | ---: |
+| Strings | 14.92 | 102.53 | 82.81 |
+| Dictionaries | 3.43 | 20.71 | 12.85 |
+| List built-ins | 11.06 | 20.32 | 40.91 |
+| Generator pipeline | 4.71 | 15.70 | 17.79 |
+
+Wasmtime remains slower than CPython on these string and dictionary workloads.
+The generator pipeline is modestly faster on Wasmtime, and substantially faster
+on V8. Optimized command modules for these four workloads are 2,025–2,840 bytes
+(1,185–1,555 gzip bytes); per-module sizes and hashes accompany the samples.
+
+The new [boundary benchmark](results/2026-10-18-library.json) measures a warm
+library instance in Node, not browser startup or whole-program compute. It uses
+three discarded warmup batches, ten measured batches of 10,000 operations,
+rotating case order, and a checked checksum for every batch. Compilation,
+instantiation, fixture setup, and generator creation are outside the timer;
+the JS loop, checksum accumulation, bindings, handle/root management, and Wasm
+call are inside. Async measurements include awaiting an immediately resolved
+host Promise, not network or timer latency. The JS-only control is reported
+separately and is not subtracted. Load average was about 6.9 on 18 cores.
+
+Optimized library median ± MAD, nanoseconds per operation:
+
+| Operation | ns/op |
+| --- | ---: |
+| Scalar export | 121 ± 2 |
+| Five-byte string roundtrip | 379 ± 8 |
+| 1,152-byte Unicode string roundtrip | 3,020 ± 25 |
+| List handle roundtrip | 169 ± 5 |
+| Dictionary handle roundtrip | 164 ± 2 |
+| List element read | 87 ± 1 |
+| Dictionary lookup, including string key copy | 384 ± 5 |
+| Typed callback roundtrip | 250 ± 3 |
+| Generator `next()` | 162 ± 6 |
+| Async host roundtrip | 753 ± 15 |
+
+The combined benchmark library is 31,118 bytes raw or 20,310 optimized
+(7,579 gzip bytes optimized). Generated JS adds 30,200 bytes (7,472 gzip), with
+2,268 bytes of TypeScript declarations. These are this library's sizes, not a
+minimum bundle-size claim. Collection handles avoid copying collection contents;
+strings still cross through UTF-8 encoding/decoding. Small raw/optimized timing
+differences are not evidence that one mode is faster.
+
+Reproduce with the pinned tools and a fresh verified compiler bootstrap:
+
+```sh
+SNEK_COMPILER=snek python bench/bench.py run --reps 10 \
+  --runtimes snek-v8,snek-wasmtime,cpython-native --out bench/work/compute.json
+python bench/library_bench.py --reps 10 --iterations 10000 --out bench/work/library.json
+```
+
+Snapshots record the exact source hash, including JavaScript runtime sources,
+and dirty-tree status because the benchmark harness was added in this run.
+
 ## Lazy runtime-helper parsing — 2026-10-15
 
 The compiler now registers 63 lightweight runtime-helper source entries and

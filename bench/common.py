@@ -34,7 +34,7 @@ def source_identity(root: Path) -> str:
     paths = subprocess.check_output(
         ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd=root).split(b"\0")
     digest = hashlib.sha256()
-    extensions = {".py", ".rs", ".toml", ".lock", ".cjs", ".mjs", ".wat", ".wit", ".json", ".snek", ".txt"}
+    extensions = {".py", ".rs", ".toml", ".lock", ".js", ".cjs", ".mjs", ".wat", ".wit", ".json", ".snek", ".txt"}
     for name in sorted(set(paths)):
         if not name or name.startswith(b"bench/results/"):
             continue

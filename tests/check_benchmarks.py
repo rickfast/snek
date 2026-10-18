@@ -19,9 +19,31 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "bench"))
 import bench
 import compare_strings
+import library_bench
 
 
 class Benchmarks(unittest.TestCase):
+    def test_library_boundary_smoke_checks_every_case_and_artifact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            result = library_bench.measure(Path(temporary), optimize=False, compiler="python",
+                                           reps=2, warmups=1, iterations=3)
+        self.assertEqual(len(result["cases"]), 11)
+        for case in result["cases"].values():
+            self.assertEqual(len(case["ns_per_operation"]["samples"]), 2)
+            self.assertGreaterEqual(case["ns_per_operation"]["min"], 0)
+        self.assertEqual(set(result["artifacts"]), {"wasm", "javascript", "typescript"})
+        for artifact in result["artifacts"].values():
+            self.assertGreater(artifact["bytes"], 0)
+            self.assertGreater(artifact["gzip_bytes"], 0)
+            self.assertEqual(len(artifact["sha256"]), 64)
+
+    def test_library_boundary_rejects_missing_samples(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.object(library_bench.subprocess, "run") as run:
+            run.return_value.stdout = '{"scalar": {"samples_ns": [1], "unit": "call"}}'
+            with self.assertRaisesRegex(ValueError, "missing benchmark samples"):
+                library_bench.measure(Path(temporary), optimize=False, compiler="python",
+                                      reps=2, warmups=1, iterations=3)
+
     def test_flattening_preserves_output(self):
         for name in bench.BENCHES:
             with self.subTest(name=name):

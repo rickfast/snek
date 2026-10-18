@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import ast
 import datetime
+import gzip
 import json
 import math
 import os
@@ -42,7 +43,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from common import source_identity, stats
+from common import sha, source_identity, stats
 
 try:
     import wasmtime
@@ -414,6 +415,11 @@ def cmd_run(ns: argparse.Namespace) -> bool:
                 res[n] = {"times": d["times"], "ok": ok}
                 failed |= not ok
                 report(rt, n, d["times"], ok)
+        if rt in ("snek-v8", "snek-wasmtime"):
+            for name in supported:
+                binary = snek_wasm(name).read_bytes()
+                res[name]["artifact"] = {"bytes": len(binary), "gzip_bytes": len(gzip.compress(binary, mtime=0)),
+                                         "sha256": sha(binary)}
         save(out, results)
     results["_meta"]["complete"] = True
     save(out, results)
