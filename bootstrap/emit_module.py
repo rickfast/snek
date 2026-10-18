@@ -17,6 +17,12 @@ from bootstrap.library import LibraryExport, LibraryClass, library_target, libra
 def owned_library_type(ty: DeclType) -> str:
     inner = inner_type(ty)
     if inner.kind == "class": return "class:" + inner.name + (" | None" if ty.kind == "optional" else "")
+    if ty.kind == "list": return "list[" + owned_library_type(ty.args[0]) + "]"
+    if ty.kind == "Coroutine": return "Coroutine[None, None, " + owned_library_type(ty.args[0]) + "]"
+    if ty.kind == "Callable":
+        params: list[str] = []
+        for arg in ty.args[:-1]: params.append(owned_library_type(arg))
+        return "Callable[[" + ", ".join(params) + "], " + owned_library_type(ty.args[-1]) + "]"
     return ty.display()
 
 

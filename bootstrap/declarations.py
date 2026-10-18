@@ -181,13 +181,12 @@ class DeclType:
     def host_boundary(self) -> bool:
         if self.kind == "class" or (self.kind == "optional" and self.args[0].kind == "class"): return True
         if self.kind == "list":
-            if self.args[0].kind == "list": return self.args[0].host_boundary()
-            return self.args[0].kind in ("i32", "i64", "f32", "f64", "bool", "str", "HostObject") or self.args[0].display() == "HostObject | None"
+            return self.args[0].kind not in ("None", "Callable") and self.args[0].host_boundary()
         if self.kind == "Callable":
             for i in range(len(self.args)):
                 arg = self.args[i]
                 if i == len(self.args) - 1 and arg.kind == "Coroutine": arg = arg.args[0]
-                if arg.kind in ("Callable", "class") or (arg.kind == "optional" and arg.args[0].kind == "class") or (arg.kind == "None" and i != len(self.args) - 1) or not arg.host_boundary():
+                if arg.kind == "Callable" or (arg.kind == "None" and i != len(self.args) - 1) or not arg.host_boundary():
                     return False
             return True
         return self.kind in ("i32", "i64", "f32", "f64", "bool", "str", "HostObject", "None") or self.display() == "HostObject | None"

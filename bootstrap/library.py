@@ -39,11 +39,29 @@ def library_class_label(name: str) -> str:
     return name[6:].replace("~", ".").replace(":", ".") if name.startswith("@user:") else name
 
 
-def library_class_types(exports: list[LibraryExport], hosts: list[LibraryExport]) -> list[str]:
+def library_boundary_types(exports: list[LibraryExport], hosts: list[LibraryExport]) -> list[str]:
+    """Close boundary metadata over the types nested in lists and callbacks."""
     types: list[str] = []
     for item in exports + hosts:
         for ty in item.params + [item.ret]:
-            if ty.startswith("class:") and ty not in types: types.append(ty)
+            if ty not in types: types.append(ty)
+    i = 0
+    while i < len(types):
+        ty = types[i]
+        i += 1
+        children: list[str] = []
+        if ty.startswith("list["): children.append(library_list_element(ty))
+        elif ty.startswith("Callable["): children = library_callback_types(ty)
+        for child in children:
+            child = library_callback_result(child)
+            if child not in types: types.append(child)
+    return types
+
+
+def library_class_types(exports: list[LibraryExport], hosts: list[LibraryExport]) -> list[str]:
+    types: list[str] = []
+    for ty in library_boundary_types(exports, hosts):
+        if ty.startswith("class:"): types.append(ty)
     return types
 
 
@@ -135,7 +153,7 @@ def library_callback_heap(ty: str) -> str:
     parts: list[str] = []
     for value in types:
         inner = library_callback_result(value)
-        part = "none" if inner == "None" else inner.replace(" | None", "?").replace("[", "<").replace("]", ">")
+        part = library_mangle(inner)
         parts.append("coro<" + part + ">" if value.startswith("Coroutine[") else part)
     return "$callable<" + "~".join(parts[:-1]) + ":" + parts[-1] + ">"
 
@@ -158,28 +176,27 @@ def library_list_element(ty: str) -> str:
         raise ValueError("invalid library list type: " + ty)
     if elem.startswith("list["):
         library_list_element(elem)
+    elif elem.startswith("class:"):
+        if library_class_name(elem) == "": raise ValueError("invalid library class element: " + ty)
     elif elem not in ("i32", "i64", "f32", "f64", "bool", "str", "HostObject", "HostObject | None"):
-        raise ValueError("library list elements must be scalar, string, HostObject, or supported lists; got " + ty)
+        raise ValueError("library list elements must be scalar, string, object handles, or supported lists; got " + ty)
     return elem
 
 
+def library_mangle(ty: str) -> str:
+    if ty.startswith("class:"): return library_class_name(ty) + ("?" if ty.endswith(" | None") else "")
+    if ty.startswith("list["): return "list<" + library_mangle(library_list_element(ty)) + ">"
+    return "none" if ty == "None" else ty.replace(" | None", "?")
+
+
 def library_list_heap(ty: str) -> str:
-    return "$list." + library_list_element(ty).replace(" | None", "?").replace("[", "<").replace("]", ">")
+    return "$list." + library_mangle(library_list_element(ty))
 
 
 def library_lists(exports: list[LibraryExport], hosts: list[LibraryExport]) -> list[str]:
     lists: list[str] = []
-    types: list[str] = []
-    for item in exports + hosts:
-        for ty in item.params + [item.ret]:
-            if ty.startswith("Callable["):
-                for value in library_callback_types(ty): types.append(library_callback_result(value))
-            else: types.append(ty)
-    for ty in types:
-        while ty.startswith("list[") and ty not in lists:
-            elem = library_list_element(ty)
-            lists.append(ty)
-            ty = elem
+    for ty in library_boundary_types(exports, hosts):
+        if ty.startswith("list["): lists.append(ty)
     return lists
 
 
@@ -286,7 +303,7 @@ def library_callback_code(callbacks: list[str], offset: i32) -> str:
         ret = library_callback_result(types[-1])
         async_heap = ""
         if types[-1].startswith("Coroutine["):
-            async_heap = "$coro<" + ("none" if ret == "None" else ret.replace(" | None", "?").replace("[", "<").replace("]", ">")) + ">"
+            async_heap = "$coro<" + library_mangle(ret) + ">"
         heap = library_callback_heap(ty)
         prefix = "$__snek_callback_" + str(i)
         env = prefix + ".env"

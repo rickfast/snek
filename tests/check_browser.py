@@ -19,7 +19,7 @@ from check_library import WAIT_ALL_SOURCE, WAIT_ALL_EXPORTS
 from check_library import LIST_SOURCE, LIST_EXPORTS
 from check_library import NESTED_LIST_SOURCE, NESTED_LIST_EXPORTS
 from check_library import LIST_CALLBACK_SOURCE, LIST_CALLBACK_EXPORTS
-from check_library import CLASS_SOURCE, CLASS_EXPORTS
+from check_library import CLASS_VALUE_SOURCE, CLASS_VALUE_EXPORTS
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -79,10 +79,10 @@ class BrowserTests(unittest.TestCase):
         for name, optimize in (("list-callbacks", False), ("list-callbacks-optimized", True)):
             driver.build(source, root / (name + ".wasm"), optimize=optimize,
                          compiler=compiler, library=True, exports=LIST_CALLBACK_EXPORTS)
-        source.write_text(CLASS_SOURCE)
+        source.write_text(CLASS_VALUE_SOURCE)
         for name, optimize in (("classes", False), ("classes-optimized", True)):
             driver.build(source, root / (name + ".wasm"), optimize=optimize,
-                         compiler=compiler, library=True, exports=CLASS_EXPORTS)
+                         compiler=compiler, library=True, exports=CLASS_VALUE_EXPORTS)
         shutil.copyfile(ROOT / "examples/library/worker.mjs", root / "worker.mjs")
         driver.build(ROOT / "examples/library/host_demo.py", root / "host_demo.wasm", optimize=False,
                      compiler=compiler, library=True, exports=["increment"])
@@ -113,6 +113,25 @@ class BrowserTests(unittest.TestCase):
         self.page = context.new_page()
         self.page.set_default_timeout(15000)
         self.page.goto(self.url)
+
+    def test_class_values_in_lists_and_callbacks(self):
+        for target in ("classes", "classes-optimized"):
+            with self.subTest(target=target):
+                result = self.page.evaluate('''async target => {
+                  const {instantiate, SnekError} = await import(`/${target}.js`);
+                  const lib = await instantiate(`/${target}.wasm`, {imports: {store: x => x, optional: x => x, later: async x => x}});
+                  const child = lib.derived(1), list = lib.list_base(child), wrong = lib.other(1);
+                  list.append(child);
+                  const add = lib.callback(2), asyncAdd = lib.async_callback(3);
+                  const same = list.get(0) === child && lib.nested(child).get(1).get(0) === child &&
+                    add(child) === child && await asyncAdd(child) === child && lib.roundtrip(add) === add;
+                  const callbacks = lib.apply((a, b) => b, child, child) === child &&
+                    lib.apply_rows(items => items, list) === list && await lib.apply_async(async x => x, child) === child;
+                  let invalid = false;
+                  try {await lib.apply_async(async () => wrong, child);} catch (e) {invalid = e instanceof SnekError;}
+                  return {same, callbacks, invalid, count: lib.read(child), nullable: lib.list_optional(null).get(0)};
+                }''', target)
+                self.assertEqual(result, {"same": True, "callbacks": True, "invalid": True, "count": 6, "nullable": None})
 
     def test_class_handles(self):
         for target in ("classes", "classes-optimized"):

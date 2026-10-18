@@ -113,6 +113,10 @@ def library_type_name(t: Type) -> str:
     inner = strip_optional(t)
     if isinstance(inner, ClassT):
         return "class:" + inner.info.name + (" | None" if isinstance(t, OptionalT) else "")
+    if isinstance(t, ListT): return "list[" + library_type_name(t.elem) + "]"
+    if isinstance(t, CoroutineT): return "Coroutine[None, None, " + library_type_name(t.elem) + "]"
+    if isinstance(t, CallableT):
+        return "Callable[[" + ", ".join(library_type_name(p) for p in t.params) + "], " + library_type_name(t.ret) + "]"
     return str(t)
 
 

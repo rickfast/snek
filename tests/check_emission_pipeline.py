@@ -76,13 +76,13 @@ class RepeatEmissionTests(unittest.TestCase):
         import json
         from bootstrap.body_bridge import to_module
         from snekc.emit_wat import emit_module
-        from check_library import CLASS_SOURCE, CLASS_EXPORTS
-        owned = check(CLASS_SOURCE)
+        from check_library import CLASS_VALUE_SOURCE, CLASS_VALUE_EXPORTS
+        owned = check(CLASS_VALUE_SOURCE)
         before = owned.tree().json()
         reference = to_module(json.loads(before))
         prelude = (ROOT / "snekc/prelude.wat").read_text()
-        for build in (lambda: emit_source_module(owned, prelude, exports=CLASS_EXPORTS),
-                      lambda: emit_module(reference, exports=CLASS_EXPORTS)):
+        for build in (lambda: emit_source_module(owned, prelude, exports=CLASS_VALUE_EXPORTS),
+                      lambda: emit_module(reference, exports=CLASS_VALUE_EXPORTS)):
             wat = build()
             self.assertIn('(export "__snek_class_test_0")', wat)
             self.assertEqual(build(), wat)

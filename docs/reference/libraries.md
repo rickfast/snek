@@ -320,7 +320,7 @@ async def load_both() -> str:
 Here `fetch_text` is an async host declaration returning `str`, and `texts` is a
 `list[str]`. Results stay in argument order even when requests finish out of order.
 The returned list is an ordinary Snek-owned list. If its elements are scalars,
-strings, opaque host objects or supported nested lists, an exported async function
+strings, object handles or supported nested lists, an exported async function
 can return it directly as a [list handle](#snek-owned-list-handles). Other element
 types stay inside Snek.
 
@@ -374,7 +374,8 @@ when those characters never appear in the source.
 
 Export a function returning `list[T]` to create a live `SnekList<T>` handle in
 JavaScript. Supported element types are `i32`, `i64`, `f32`, `f64`, `bool`, `str`,
-`HostObject`, `HostObject | None`, and lists of those types:
+`HostObject`, `HostObject | None`, Snek classes and nullable class references,
+and lists of those types:
 
 ```python
 def words() -> list[str]:
@@ -397,7 +398,8 @@ const last = words.pop();
 Handles expose read-only `length` and typed `get`, `set`, `append`, `pop` and
 `toArray` methods. Indices must be safe integers; negative indices count from the
 end. Invalid indices and popping an empty list throw JavaScript `RangeError`.
-Element validation follows the scalar/string/object rules above. `toArray()`
+Element validation follows the scalar/string/object rules, including the
+[class handle](#snek-owned-class-handles) subtype and ownership checks. `toArray()`
 is a shallow copy: object elements retain their JavaScript identity, and nested
 list elements remain live `SnekList` handles.
 
@@ -416,7 +418,7 @@ provide transaction isolation.
 Create lists in Snek, then pass their handles back. JavaScript arrays, lookalike
 objects, handles for different element types, and handles from another instance
 are rejected. Handles are not transferable between workers; send `toArray()` data
-instead. Dictionary/tuple handles, class or callback list elements, and
+instead. Dictionary/tuple handles, callback list elements, and
 optional lists are not supported yet. Supported lists can also be parameters and
 results of [typed callbacks](#typed-callbacks).
 
@@ -444,12 +446,12 @@ const snapshot = rows.toArray().map(row => row.toArray());
 Removing a child from its parent does not invalidate an existing child handle.
 Nested handles also work in host callbacks, async returns, and `gather()` results.
 There is no automatic recursive array conversion: choose explicitly which levels
-to copy, as above. Nullability is currently supported only for `HostObject`
+to copy, as above. Nullability is supported for `HostObject` and Snek class
 elements, not for child lists themselves.
 
 ## Snek-owned class handles
 
-Snek-created class instances can cross direct export and `@host` boundaries,
+Snek-created class instances can cross export and `@host` boundaries,
 including async parameters/results and nullable references:
 
 ```python
@@ -495,8 +497,35 @@ Runtime instance ownership is checked even when TypeScript types match.
 
 Handles are not transferable to another worker. They can be stored by JavaScript
 host callbacks, but calling an export during an active synchronous step is still
-forbidden. Class types inside lists or `Callable` boundary signatures are not
-supported yet; those types remain usable internally in Snek.
+forbidden.
+
+### Classes in lists and callbacks
+
+Class handles also work inside lists and synchronous/async `Callable` signatures,
+including nullable classes and nested lists. A `list[Counter]` becomes a
+`SnekList<SnekObject<"module.Counter">>`; its elements are the same handles that
+ordinary exports return. Removing an element does not invalidate its handle.
+Lists remain invariant: `list[Derived]` is not a `list[Base]`, although appending
+a derived object to a `list[Base]` is valid. Both TypeScript and runtime checks
+enforce these rules.
+
+```python
+from typing import Callable
+
+def transform(fn: Callable[[Counter], Counter], value: Counter) -> Counter:
+    return fn(value)
+```
+
+```javascript
+const same = lib.transform(value => value, counter);
+console.log(same === counter); // true
+```
+
+An async callback returning a class uses `Coroutine[None, None, Counter]` and
+resolves to a handle in JavaScript. Wrong-class and foreign-instance results are
+rejected. Types used only inside lists or callback signatures still generate the
+required wrappers and nominal TypeScript declarations. Class fields stay private
+in every context; list operations do not expose them or relax re-entry rules.
 
 ## Opaque JavaScript objects
 
@@ -584,7 +613,8 @@ greet("browser"); // Hello, browser
 ```
 
 Callback arguments and results can be numbers, booleans, strings, `HostObject`,
-or `HostObject | None`, plus supported `list[T]` handles (including nested lists);
+or `HostObject | None`, Snek class/nullable class handles, plus supported `list[T]`
+handles (including nested lists);
 results can also be `None`. Nested callbacks, collections other than supported
 lists, and optional callbacks are not supported. Callbacks with these result types
 are synchronous: returning a Promise is an error, including for `None` results.
@@ -634,7 +664,7 @@ Their JavaScript wrappers return Promises, and calls can overlap with other asyn
 invocations. Passing a returned closure back into the same instance preserves its
 identity. Host declarations may accept or return async callbacks as well.
 
-Async callback results use the same scalar/string/opaque-object/list types as sync
+Async callback results use the same scalar/string/object-handle/list types as sync
 callbacks, plus `None`. `Coroutine[None, None, None]` maps to `PromiseLike<void>`.
 Returning a bare value is rejected. Promise rejections, synchronous throws, and
 invalid resolved values become catchable Snek `RuntimeError`s; awaited `finally`

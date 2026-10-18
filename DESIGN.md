@@ -85,9 +85,9 @@ call they use the normal entry guard. `toArray()` copies values one at a time;
 ordinary handle passing does not copy list storage. List boundary metadata closes
 recursively over child list types, reusing the same wrappers and preserving aliases
 at every depth. `toArray()` is shallow and returns child handles for nested lists.
-Class/callback list elements and optional lists are not yet part of this boundary.
+Callback list elements and optional lists are not yet part of this boundary.
 
-Direct class boundaries use opaque `SnekObject` handles. A per-instance JavaScript
+Class boundaries use opaque `SnekObject` handles. A per-instance JavaScript
 private brand validates ownership; the private field strongly roots the WasmGC
 reference even after the public API is discarded. One weak identity map spans
 base and derived annotations. Private `ref.test` helpers validate the actual
@@ -95,7 +95,10 @@ runtime class before lowering, accepting derived instances for base parameters.
 Nullable classes map to `null`. TypeScript emits nominal brands with explicit
 ancestor sets, allowing upcasts without permitting unrelated classes or plain
 objects. Fields and methods remain private; only selected functions are callable.
-Class types inside list/callback boundary signatures remain unsupported.
+Boundary metadata closes over list/callback signatures, including class and
+nullable class leaves. Their wire types retain the original class heap names,
+and all paths share the same private brands and identity map. Class elements
+support ordinary upcasts, while mutable lists remain invariant.
 Async callback signatures use `Coroutine[None, None, T]`. Imported callback frames
 reuse the async host protocol and exported callback frames reuse the async export
 driver, including per-invocation pending results and exception translation.

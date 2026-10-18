@@ -227,6 +227,40 @@ def reader(value: Counter) -> Callable[[], i32]:
 '''
 CLASS_EXPORTS = ["make", "derived", "grand", "other", "lookalike", "read_other", "echo", "as_base", "require_derived", "increment", "read", "nullable", "from_host", "hold", "optional_async", "reader"]
 
+CLASS_VALUE_SOURCE = CLASS_SOURCE + '''from typing import Coroutine
+def list_base(value: Counter) -> list[Counter]:
+    return [value]
+def list_derived() -> list[DoubleCounter]:
+    return [DoubleCounter(1)]
+def list_optional(value: Counter | None) -> list[Counter | None]:
+    return [value]
+def nested(value: Counter) -> list[list[Counter]]:
+    return [[value], [value]]
+def callback(amount: i32) -> Callable[[Counter], Counter]:
+    def add(value: Counter) -> Counter:
+        value.value += amount
+        return value
+    return add
+def async_callback(amount: i32) -> Callable[[Counter | None], Coroutine[None, None, Counter | None]]:
+    async def add(value: Counter | None) -> Counter | None:
+        await checkpoint()
+        if value is not None:
+            value.value += amount
+        return value
+    return add
+def apply(fn: Callable[[Counter, Counter], Counter], a: Counter, b: Counter) -> Counter:
+    return fn(a, b)
+def apply_optional(fn: Callable[[Counter | None], Counter | None], value: Counter | None) -> Counter | None:
+    return fn(value)
+async def apply_async(fn: Callable[[Counter], Coroutine[None, None, Counter]], value: Counter) -> Counter:
+    return await fn(value)
+def apply_rows(fn: Callable[[list[Counter]], list[Counter]], items: list[Counter]) -> list[Counter]:
+    return fn(items)
+def roundtrip(fn: Callable[[Counter], Counter]) -> Callable[[Counter], Counter]:
+    return fn
+'''
+CLASS_VALUE_EXPORTS = CLASS_EXPORTS + ["list_base", "list_derived", "list_optional", "nested", "callback", "async_callback", "apply", "apply_optional", "apply_async", "apply_rows", "roundtrip"]
+
 OBJECT_SOURCE = '''from snek import HostObject, host, checkpoint
 from typing import Callable, Iterator
 @host("lookup")
@@ -594,6 +628,78 @@ const second = await instantiate(await WebAssembly.compile(bytes));
 assert.equal(second.add(2, 3), 5);
 ''')
 
+    def test_class_values_in_lists_and_callbacks(self):
+        self.src.write_text(CLASS_VALUE_SOURCE)
+        self.build(CLASS_VALUE_EXPORTS)
+        self.node('''
+const options = {imports: {store: x => x, optional: x => x, later: async x => x}};
+const lib = await instantiate(bytes, options), foreign = await instantiate(bytes, options);
+const base = lib.make(1), child = lib.derived(2), wrong = lib.other(3);
+const items = lib.list_base(base);
+items.append(child);
+assert.deepEqual(items.toArray(), [base, child]);
+assert.equal(lib.nested(child).get(0).get(0), child);
+assert.throws(() => items.append(wrong), /Counter handle/);
+assert.throws(() => items.set(0, foreign.make(1)), /handle from this Snek instance/);
+assert.equal(items.get(0), base);
+const derived = lib.list_derived();
+derived.append(child); assert.equal(derived.pop(), child);
+assert.throws(() => derived.append(base), /DoubleCounter handle/);
+assert.throws(() => lib.apply_rows(x => x, derived), /handle from this Snek instance/);
+const nullable = lib.list_optional(null);
+nullable.append(child); assert.equal(nullable.pop(), child); assert.equal(nullable.get(0), null);
+nullable.set(0, base); assert.equal(nullable.pop(), base);
+const add = lib.callback(10);
+assert.equal(add(child), child); assert.equal(lib.read(child), 12);
+assert.equal(lib.roundtrip(add), add);
+const js = value => value;
+assert.equal(lib.roundtrip(js), js);
+assert.equal(lib.apply((a, b) => {assert.equal(a, base); return b;}, base, child), child);
+assert.equal(lib.apply_optional(x => x, null), null);
+assert.equal(lib.apply_rows(rows => {rows.append(child); return rows;}, items), items);
+assert.throws(() => lib.apply(() => wrong, base, child), /Counter handle/);
+assert.throws(() => add(foreign.make(1)), /handle from this Snek instance/);
+const asyncAdd = lib.async_callback(1);
+assert.equal(await asyncAdd(child), child);
+assert.equal(await asyncAdd(null), null);
+assert.equal(lib.read(child), 13);
+assert.equal(await lib.apply_async(async value => {await Promise.resolve(); lib.increment(value); return value;}, child), child);
+assert.equal(lib.read(child), 15);
+await assert.rejects(lib.apply_async(async () => wrong, child), SnekError);
+await assert.rejects(lib.apply_async(async () => foreign.make(1), child), SnekError);
+''')
+
+    def test_classes_only_reachable_through_callback_signatures(self):
+        self.src.write_text('''from snek import host, i32
+from typing import Callable
+class Box:
+    value: i32
+    def __init__(self) -> None:
+        self.value = 42
+@host("visit")
+def visit(items: list[Box], fn: Callable[[Box], Box]) -> list[Box]:
+    pass
+def identity(value: Box) -> Box:
+    return value
+def factory() -> Callable[[], Box]:
+    def create() -> Box:
+        return Box()
+    return create
+def run() -> list[Box]:
+    return visit([Box()], identity)
+''')
+        self.build(["factory", "run"])
+        self.node('''
+let callback, received;
+const lib = await instantiate(bytes, {imports: {visit(items, fn) {received = items; callback = fn; return items;}}});
+const value = lib.factory()();
+assert(Object.isFrozen(value));
+const list = lib.run();
+assert.equal(list, received);
+assert.equal(callback(list.get(0)), list.get(0));
+list.append(value); assert.equal(list.pop(), value);
+''')
+
     def test_class_handles_identity_subtypes_and_lifetime(self):
         self.src.write_text(CLASS_SOURCE)
         built = self.build(CLASS_EXPORTS)
@@ -709,9 +815,9 @@ const lib = await instantiate(bytes), value = lib.make();
 assert.equal(lib.echo(value), value); assert.equal(lib.read(value), 42);
 ''')
 
-    def test_class_handles_reject_nested_boundary_shapes(self):
+    def test_class_handles_reject_unsupported_boundary_shapes(self):
         base = 'from typing import Callable\nfrom snek import host\nclass Box:\n    pass\n'
-        for ty in ("list[Box]", "Callable[[Box], Box]", "Callable[[], Box | None]"):
+        for ty in ("dict[str, Box]", "list[Callable[[], Box]]", "Callable[[Callable[[], Box]], Box]", "list[Box] | None"):
             for host in (False, True):
                 self.src.write_text(base + ('@host("f")\n' if host else '') + f'def f(value: {ty}) -> None:\n    pass\n')
                 with self.subTest(ty=ty, host=host), self.assertRaises(Exception):

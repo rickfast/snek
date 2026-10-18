@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 from snekc import driver
 from check_library import LIST_SOURCE, LIST_EXPORTS, NESTED_LIST_SOURCE, NESTED_LIST_EXPORTS
 from check_library import LIST_CALLBACK_SOURCE, LIST_CALLBACK_EXPORTS
-from check_library import CLASS_SOURCE, CLASS_EXPORTS
+from check_library import CLASS_VALUE_SOURCE, CLASS_VALUE_EXPORTS
 
 EXAMPLE = ROOT / "examples/vite"
 SERVER = '''
@@ -35,6 +35,17 @@ const base = classes.make(1), derived = classes.derived(2);
 const asBase: SnekObject<"classes.Counter"> = derived;
 const asDerived: ReturnType<typeof classes.derived> = classes.grand(3);
 classes.read(classes.grand(3));
+const classList = classes.list_base(base);
+classList.append(derived);
+const classResult: SnekObject<"classes.Counter"> = classes.apply((a, b) => b, base, derived);
+const classAsync: Promise<SnekObject<"classes.Counter">> = classes.apply_async(async x => x, derived);
+classes.apply_optional(x => x, null);
+// @ts-expect-error lists remain invariant even when their class elements support upcasts
+classes.apply_rows(x => x, classes.list_derived());
+// @ts-expect-error callback results must be compatible class handles
+classes.apply(() => classes.other(1), base, derived);
+// @ts-expect-error derived lists cannot accept base objects
+classes.list_derived().append(base);
 classes.read(derived);
 classes.nullable(null);
 const optionalObject: Promise<SnekObject<"classes.Counter"> | null> = classes.optional_async(null);
@@ -151,9 +162,9 @@ class BundlerTests(unittest.TestCase):
 
     def compile(self, optimize):
         source = self.root / "classes.py"
-        source.write_text(CLASS_SOURCE)
+        source.write_text(CLASS_VALUE_SOURCE)
         driver.build(source, self.root / "src/generated/classes.wasm", optimize=optimize,
-                     compiler=self.compiler, library=True, exports=CLASS_EXPORTS)
+                     compiler=self.compiler, library=True, exports=CLASS_VALUE_EXPORTS)
         source = self.root / "lists.py"
         source.write_text(LIST_SOURCE)
         driver.build(source, self.root / "src/generated/lists.wasm", optimize=optimize,
