@@ -14,7 +14,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from snekc import driver
-from check_library import LIST_SOURCE, LIST_EXPORTS
+from check_library import LIST_SOURCE, LIST_EXPORTS, NESTED_LIST_SOURCE, NESTED_LIST_EXPORTS
 
 EXAMPLE = ROOT / "examples/vite"
 SERVER = '''
@@ -27,6 +27,16 @@ console.log(JSON.stringify({url: server.resolvedUrls.local[0]}));
 '''
 
 TYPES = '''
+import {type SnekLibrary as NestedLibrary} from "./generated/nested.js";
+declare const nested: NestedLibrary;
+const rows: SnekList<SnekList<string>> = nested.rows();
+const child: SnekList<string> = rows.get(0);
+rows.append(child);
+const shallow: SnekList<string>[] = rows.toArray();
+// @ts-expect-error nested lists require handles, not arrays
+rows.append(["array"]);
+// @ts-expect-error nesting depth is checked
+rows.append(rows);
 import {type SnekLibrary as ListLibrary, type SnekList} from "./generated/lists.js";
 declare const lists: ListLibrary;
 const words: SnekList<string> = lists.words();
@@ -113,6 +123,10 @@ class BundlerTests(unittest.TestCase):
         source.write_text(LIST_SOURCE)
         driver.build(source, self.root / "src/generated/lists.wasm", optimize=optimize,
                      compiler=self.compiler, library=True, exports=LIST_EXPORTS)
+        source = self.root / "nested.py"
+        source.write_text(NESTED_LIST_SOURCE)
+        driver.build(source, self.root / "src/generated/nested.wasm", optimize=optimize,
+                     compiler=self.compiler, library=True, exports=NESTED_LIST_EXPORTS)
         driver.build(self.root / "program.py", self.root / "src/generated/program.wasm",
                      optimize=optimize, compiler=self.compiler, library=True,
                      exports=["greet", "twice", "load", "identity", "apply", "make_greeter", "notify", "apply_async"])

@@ -17,6 +17,7 @@ from check_library import OBJECT_SOURCE, OBJECT_EXPORTS, CALLBACK_SOURCE, CALLBA
 from check_library import ASYNC_CALLBACK_SOURCE, ASYNC_CALLBACK_EXPORTS
 from check_library import WAIT_ALL_SOURCE, WAIT_ALL_EXPORTS
 from check_library import LIST_SOURCE, LIST_EXPORTS
+from check_library import NESTED_LIST_SOURCE, NESTED_LIST_EXPORTS
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -68,6 +69,10 @@ class BrowserTests(unittest.TestCase):
         for name, optimize in (("lists", False), ("lists-optimized", True)):
             driver.build(source, root / (name + ".wasm"), optimize=optimize,
                          compiler=compiler, library=True, exports=LIST_EXPORTS)
+        source.write_text(NESTED_LIST_SOURCE)
+        for name, optimize in (("nested-lists", False), ("nested-lists-optimized", True)):
+            driver.build(source, root / (name + ".wasm"), optimize=optimize,
+                         compiler=compiler, library=True, exports=NESTED_LIST_EXPORTS)
         shutil.copyfile(ROOT / "examples/library/worker.mjs", root / "worker.mjs")
         driver.build(ROOT / "examples/library/host_demo.py", root / "host_demo.wasm", optimize=False,
                      compiler=compiler, library=True, exports=["increment"])
@@ -98,6 +103,27 @@ class BrowserTests(unittest.TestCase):
         self.page = context.new_page()
         self.page.set_default_timeout(15000)
         self.page.goto(self.url)
+
+    def test_nested_list_handles(self):
+        for target in ("nested-lists", "nested-lists-optimized"):
+            with self.subTest(target=target):
+                result = self.page.evaluate('''async target => {
+                  const {instantiate} = await import(`/${target}.js`);
+                  const lib = await instantiate(`/${target}.wasm`, {imports: {
+                    edit: rows => {rows.get(0).append("straße 🐍"); return rows;},
+                    later: async rows => rows,
+                  }});
+                  const rows = lib.rows();
+                  const same = rows.get(0) === rows.get(1) && lib.from_host(rows) === rows &&
+                    await lib.delayed(rows) === rows;
+                  const cube = lib.cube(); cube.append(rows);
+                  let rejected = false;
+                  try {rows.append(rows);} catch (e) {rejected = e instanceof TypeError;}
+                  return {same, rejected, popped: cube.pop() === rows, text: lib.upper(rows),
+                    collected: (await lib.collected()).toArray().map(row => row.toArray())};
+                }''', target)
+                self.assertEqual(result, {"same": True, "rejected": True, "popped": True,
+                    "text": "STRASSE 🐍", "collected": [["first"], ["second"]]})
 
     def test_typed_list_handles(self):
         for target in ("lists", "lists-optimized"):

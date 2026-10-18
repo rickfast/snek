@@ -320,8 +320,9 @@ async def load_both() -> str:
 Here `fetch_text` is an async host declaration returning `str`, and `texts` is a
 `list[str]`. Results stay in argument order even when requests finish out of order.
 The returned list is an ordinary Snek-owned list. If its elements are scalars,
-strings or opaque host objects, an exported async function can return it directly
-as a [list handle](#snek-owned-list-handles). Other element types stay inside Snek.
+strings, opaque host objects or supported nested lists, an exported async function
+can return it directly as a [list handle](#snek-owned-list-handles). Other element
+types stay inside Snek.
 
 `gather` requires one or more distinct, fresh coroutines with exactly matching,
 non-`None` result types. Numbers, strings, objects, optional references, collections
@@ -372,7 +373,7 @@ when those characters never appear in the source.
 
 Export a function returning `list[T]` to create a live `SnekList<T>` handle in
 JavaScript. Supported element types are `i32`, `i64`, `f32`, `f64`, `bool`, `str`,
-`HostObject` and `HostObject | None`:
+`HostObject`, `HostObject | None`, and lists of those types:
 
 ```python
 def words() -> list[str]:
@@ -396,7 +397,8 @@ Handles expose read-only `length` and typed `get`, `set`, `append`, `pop` and
 `toArray` methods. Indices must be safe integers; negative indices count from the
 end. Invalid indices and popping an empty list throw JavaScript `RangeError`.
 Element validation follows the scalar/string/object rules above. `toArray()`
-copies the elements; object elements retain their JavaScript identity.
+is a shallow copy: object elements retain their JavaScript identity, and nested
+list elements remain live `SnekList` handles.
 
 Passing a handle into Snek does not copy the list. Mutations on either side are
 visible to the other, and returning the same list from the same instance returns
@@ -413,9 +415,36 @@ provide transaction isolation.
 Create lists in Snek, then pass their handles back. JavaScript arrays, lookalike
 objects, handles for different element types, and handles from another instance
 are rejected. Handles are not transferable between workers; send `toArray()` data
-instead. Nested lists, dictionary/tuple/class handles, callback elements and
+instead. Dictionary/tuple/class handles, callback elements and
 optional lists are not supported yet. `Callable` boundary signatures still use
 scalar/string/object types, not lists.
+
+### Nested lists
+
+Types such as `list[list[str]]` and `list[list[list[i32]]]` use nested
+`SnekList` types in TypeScript. `get()` and `pop()` return child handles;
+`set()` and `append()` accept child handles of exactly the expected type from
+the same instance. Shared child lists retain their identity:
+
+```python
+def rows() -> list[list[str]]:
+    shared = ["one", "two"]
+    return [shared, shared]
+```
+
+```javascript
+const rows = lib.rows();
+console.log(rows.get(0) === rows.get(1)); // true
+rows.get(0).append("three");
+console.log(rows.get(1).get(-1)); // "three"
+const snapshot = rows.toArray().map(row => row.toArray());
+```
+
+Removing a child from its parent does not invalidate an existing child handle.
+Nested handles also work in host callbacks, async returns, and `gather()` results.
+There is no automatic recursive array conversion: choose explicitly which levels
+to copy, as above. Nullability is currently supported only for `HostObject`
+elements, not for child lists themselves.
 
 ## Opaque JavaScript objects
 

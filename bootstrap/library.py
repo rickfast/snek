@@ -81,22 +81,27 @@ def library_type(ty: str) -> str:
 
 def library_list_element(ty: str) -> str:
     elem = ty[5:-1]
-    if not ty.startswith("list[") or not ty.endswith("]") or elem not in ("i32", "i64", "f32", "f64", "bool", "str", "HostObject", "HostObject | None"):
-        raise ValueError("library list elements must be scalar, string, or HostObject; got " + ty)
+    if not ty.startswith("list[") or not ty.endswith("]"):
+        raise ValueError("invalid library list type: " + ty)
+    if elem.startswith("list["):
+        library_list_element(elem)
+    elif elem not in ("i32", "i64", "f32", "f64", "bool", "str", "HostObject", "HostObject | None"):
+        raise ValueError("library list elements must be scalar, string, HostObject, or supported lists; got " + ty)
     return elem
 
 
 def library_list_heap(ty: str) -> str:
-    return "$list." + library_list_element(ty).replace(" | None", "?")
+    return "$list." + library_list_element(ty).replace(" | None", "?").replace("[", "<").replace("]", ">")
 
 
 def library_lists(exports: list[LibraryExport], hosts: list[LibraryExport]) -> list[str]:
     lists: list[str] = []
     for item in exports + hosts:
         for ty in item.params + [item.ret]:
-            if ty.startswith("list[") and ty not in lists:
-                library_list_element(ty)
+            while ty.startswith("list[") and ty not in lists:
+                elem = library_list_element(ty)
                 lists.append(ty)
+                ty = elem
     return lists
 
 

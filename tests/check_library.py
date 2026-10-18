@@ -81,6 +81,38 @@ def nullable(value: HostObject | None) -> list[HostObject | None]:
 '''
 LIST_EXPORTS = ["words", "numbers", "echo", "upper", "mutate", "from_host", "delayed", "objects", "nullable"]
 
+NESTED_LIST_SOURCE = '''from snek import HostObject, host, checkpoint, gather
+@host("edit")
+def edit(rows: list[list[str]]) -> list[list[str]]:
+    pass
+@host("later")
+async def later(rows: list[list[str]]) -> list[list[str]]:
+    pass
+def rows() -> list[list[str]]:
+    shared = ["one", "two"]
+    return [shared, shared]
+def echo(rows: list[list[str]]) -> list[list[str]]:
+    return rows
+def child(row: list[str]) -> list[str]:
+    return row
+def upper(rows: list[list[str]]) -> str:
+    return rows[0][-1].upper()
+def from_host(rows: list[list[str]]) -> list[list[str]]:
+    return edit(rows)
+async def delayed(rows: list[list[str]]) -> list[list[str]]:
+    return await later(rows)
+async def row(text: str) -> list[str]:
+    await checkpoint()
+    return [text]
+async def collected() -> list[list[str]]:
+    return await gather(row("first"), row("second"))
+def cube() -> list[list[list[str]]]:
+    return [rows()]
+def nullable(value: HostObject | None) -> list[list[HostObject | None]]:
+    return [[value]]
+'''
+NESTED_LIST_EXPORTS = ["rows", "echo", "child", "upper", "from_host", "delayed", "collected", "cube", "nullable"]
+
 OBJECT_SOURCE = '''from snek import HostObject, host, checkpoint
 from typing import Callable, Iterator
 @host("lookup")
@@ -446,6 +478,68 @@ assert.equal(lib.__snek_init, undefined);
 assert.ok(Object.isFrozen(lib));
 const second = await instantiate(await WebAssembly.compile(bytes));
 assert.equal(second.add(2, 3), 5);
+''')
+
+    def test_nested_list_handles_preserve_aliases_and_types(self):
+        self.src.write_text(NESTED_LIST_SOURCE)
+        built = self.build(NESTED_LIST_EXPORTS)
+        self.assertIn('"cube"(): SnekList<SnekList<SnekList<string>>>', built.dts_path.read_text())
+        self.node('''
+const options = {imports: {edit: rows => rows, later: async rows => rows}};
+const lib = await instantiate(bytes, options);
+const rows = lib.rows(), shared = rows.get(0);
+assert.equal(rows.get(1), shared);
+assert.equal(lib.child(shared), shared);
+assert.equal(lib.echo(rows), rows);
+assert.deepEqual(rows.toArray(), [shared, shared]); // shallow, live child handles
+shared.append("straße 🐍");
+assert.equal(rows.get(1).get(-1), "straße 🐍");
+assert.equal(lib.upper(rows), "STRASSE 🐍");
+rows.append(shared); rows.set(0, shared);
+assert.equal(rows.pop(), shared);
+assert.throws(() => rows.append(["array"]), /handle from this Snek instance/);
+assert.throws(() => rows.append(rows), /handle from this Snek instance/);
+const other = await instantiate(bytes, options);
+assert.throws(() => rows.set(0, other.rows().get(0)), /handle from this Snek instance/);
+assert.equal(rows.get(0), shared);
+const cube = lib.cube();
+cube.append(rows);
+assert.equal(cube.pop(), rows);
+assert.equal(cube.get(0).get(0), cube.get(0).get(1));
+const nullable = lib.nullable(null), object = {};
+nullable.get(0).append(object);
+assert.deepEqual(nullable.get(0).toArray(), [null, object]);
+assert.throws(() => rows.append(nullable.get(0)), /handle from this Snek instance/);
+rows.pop(); rows.pop();
+assert.equal(rows.length, 0);
+assert.equal(shared.get(-1), "straße 🐍"); // child outlives parent membership
+''')
+
+    def test_nested_list_host_calls_and_gather(self):
+        self.src.write_text(NESTED_LIST_SOURCE)
+        self.build(NESTED_LIST_EXPORTS)
+        self.node('''
+let saved, release;
+const lib = await instantiate(bytes, {imports: {
+  edit(rows) {
+    assert.equal(rows, saved);
+    rows.get(0).append("🐍".repeat(40000));
+    rows.append(rows.get(0));
+    assert.equal(rows.pop(), rows.get(1));
+    return rows;
+  },
+  later: rows => new Promise(resolve => {release = () => resolve(rows);}),
+}});
+saved = lib.rows();
+assert.equal(lib.from_host(saved), saved);
+assert.equal(saved.get(1).get(-1).length, 80000);
+const pending = lib.delayed(saved);
+while (!release) await new Promise(resolve => setTimeout(resolve, 1));
+saved.get(0).set(0, "changed"); release();
+assert.equal(await pending, saved);
+assert.equal(saved.get(1).get(0), "changed");
+const collected = await lib.collected();
+assert.deepEqual(collected.toArray().map(row => row.toArray()), [["first"], ["second"]]);
 ''')
 
     def test_typed_list_handles_identity_mutation_and_lifetime(self):
@@ -972,7 +1066,7 @@ assert.equal(lib.call("hi"), "hi🐍🐍");
             ('@host("x")\nasync def f() -> None:\n    return\n', "pass body"),
             ('@host("x")\ndef f() -> i32:\n    return 1\n', "pass body"),
             ('@host("x")\ndef f(x: i32 = 0) -> None:\n    pass\n', "default arguments"),
-            ('@host("x")\ndef f(x: list[list[i32]]) -> None:\n    pass\n', "host boundaries"),
+            ('@host("x")\ndef f(x: list[tuple[i32, i32]]) -> None:\n    pass\n', "host boundaries"),
             ('@host("x")\ndef f() -> str | None:\n    pass\n', "scalar, string"),
             ('def outer() -> None:\n    @host("x")\n    def inner() -> None:\n        pass\n', "top-level"),
             ('@host("same")\ndef a() -> i32:\n    pass\n@host("same")\ndef b() -> str:\n    pass\n', "conflicting signatures"),
@@ -1477,9 +1571,10 @@ assert.equal(lib.number("٤٢"), 42);
 
     def test_unsupported_boundaries_and_services(self):
         for source in (
-            'def value(x: list[list[str]]) -> str:\n    return x[0][0]\n',
-            'def value() -> list[list[str]]:\n    return [["x"]]\n',
-            'async def value() -> list[list[str]]:\n    return [["x"]]\n',
+            'def value(x: list[tuple[str, str]]) -> str:\n    return x[0][0]\n',
+            'def value() -> list[tuple[str, str]]:\n    return [("x", "y")]\n',
+            'async def value() -> list[tuple[str, str]]:\n    return [("x", "y")]\n',
+            'def value(x: list[list[str] | None]) -> None:\n    pass\n',
             'from snek import sys\ndef value() -> str:\n    return sys.argv[0]\n',
             'from snek import time, f64\ndef value() -> f64:\n    return time.time()\n',
         ):

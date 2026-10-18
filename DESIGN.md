@@ -82,8 +82,10 @@ count from the end. These operations run no user Snek code and may be used insid
 a host callback: they borrow and restore the current scratch mark and string length
 without resetting output, coroutine yield state, or active host requests. Outside a
 call they use the normal entry guard. `toArray()` copies values one at a time;
-ordinary handle passing does not copy list storage. Nested lists, callback
-elements, optional lists and class handles are not yet part of this boundary.
+ordinary handle passing does not copy list storage. List boundary metadata closes
+recursively over child list types, reusing the same wrappers and preserving aliases
+at every depth. `toArray()` is shallow and returns child handles for nested lists.
+Callback elements, optional lists and class handles are not yet part of this boundary.
 Async callback signatures use `Coroutine[None, None, T]`. Imported callback frames
 reuse the async host protocol and exported callback frames reuse the async export
 driver, including per-invocation pending results and exception translation.

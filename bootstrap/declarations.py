@@ -180,6 +180,7 @@ class DeclType:
 
     def host_boundary(self) -> bool:
         if self.kind == "list":
+            if self.args[0].kind == "list": return self.args[0].host_boundary()
             return self.args[0].kind in ("i32", "i64", "f32", "f64", "bool", "str", "HostObject") or self.args[0].display() == "HostObject | None"
         if self.kind == "Callable":
             for i in range(len(self.args)):

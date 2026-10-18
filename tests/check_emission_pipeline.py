@@ -59,13 +59,13 @@ class RepeatEmissionTests(unittest.TestCase):
         import json
         from bootstrap.body_bridge import to_module
         from snekc.emit_wat import emit_module
-        from check_library import LIST_SOURCE, LIST_EXPORTS
-        owned = check(LIST_SOURCE)
+        from check_library import NESTED_LIST_SOURCE, NESTED_LIST_EXPORTS
+        owned = check(NESTED_LIST_SOURCE)
         before = owned.tree().json()
         reference = to_module(json.loads(before))
         prelude = (ROOT / "snekc/prelude.wat").read_text()
-        for build in (lambda: emit_source_module(owned, prelude, exports=LIST_EXPORTS),
-                      lambda: emit_module(reference, exports=LIST_EXPORTS)):
+        for build in (lambda: emit_source_module(owned, prelude, exports=NESTED_LIST_EXPORTS),
+                      lambda: emit_module(reference, exports=NESTED_LIST_EXPORTS)):
             wat = build()
             self.assertIn('(export "__snek_list_get_0")', wat)
             self.assertEqual(build(), wat)
