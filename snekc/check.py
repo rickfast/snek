@@ -42,6 +42,7 @@ from .types import (
     NONE,
     NUMERIC,
     STR,
+    HOST_OBJECT,
     StreamT,
     TRACEBACK,
     TypeT,
@@ -73,7 +74,7 @@ from .types import (
 INT_RANGE = {"i32": (-(2**31), 2**31 - 1), "i64": (-(2**63), 2**63 - 1)}
 
 ALLOWED_IMPORTS = {
-    "snek": {"i32", "i64", "f32", "f64", "Final", "final", "host", "run", "checkpoint", "read_bytes", "write_bytes"},
+    "snek": {"i32", "i64", "f32", "f64", "HostObject", "Final", "final", "host", "run", "checkpoint", "read_bytes", "write_bytes"},
     "typing": {"Final", "Optional", "final", "Iterator", "Generator", "Coroutine", "Callable"},
     "collections.abc": {"Iterator", "Generator", "Coroutine", "Callable"},
     "types": {"TracebackType"},
@@ -678,10 +679,10 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
         else:
             ret = self.resolve_type(node.returns)
         if host:
-            if any(t not in (I32, I64, F32, F64, BOOL, STR) for _, t in params):
-                raise CompileError("host boundaries support only scalar and string parameters", node)
-            if ret not in (I32, I64, F32, F64, BOOL, STR, NONE):
-                raise CompileError("host boundaries support only scalar, string, and None returns", node)
+            if any(t not in (I32, I64, F32, F64, BOOL, STR, HOST_OBJECT, OptionalT(HOST_OBJECT)) for _, t in params):
+                raise CompileError("host boundaries support only scalar, string, and HostObject parameters", node)
+            if ret not in (I32, I64, F32, F64, BOOL, STR, NONE, HOST_OBJECT, OptionalT(HOST_OBJECT)):
+                raise CompileError("host boundaries support only scalar, string, HostObject, and None returns", node)
         yields = any(isinstance(n, (ast.Yield, ast.YieldFrom)) for n in scope_walk(body_nodes(node)))
         if isinstance(node, ast.AsyncFunctionDef):
             if yields:
@@ -715,6 +716,8 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
                 return self.resolve_type(inner)
         if isinstance(node, ast.Name):
             n = node.id
+            if n == "HostObject" and n in self.imported:
+                return HOST_OBJECT
             if n in NUMERIC:
                 if n not in self.imported and not self.builtin_mode:
                     raise CompileError(f"'{n}' must be imported: `from snek import {n}`", node)
@@ -2111,6 +2114,8 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
                                            f"`{v.ty} | None` if it can be", a)
                     return ir.IsNull(BOOL, v, negate)
             l, r = self.check_expr(left_n), self.check_expr(right_n)
+            if HOST_OBJECT in (strip_optional(l.ty), strip_optional(r.ty)) and strip_optional(l.ty) != strip_optional(r.ty):
+                raise CompileError("HostObject identity requires two HostObject operands", node)
             if TRACEBACK in (strip_optional(l.ty), strip_optional(r.ty)):
                 raise CompileError("tracebacks are opaque; only None checks are supported", node)
             if not (l.ty.is_ref and r.ty.is_ref):
@@ -2128,6 +2133,8 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
         else:
             l, r = self.check_operands(left_n, right_n, None)
         lt, rt = strip_optional(l.ty), strip_optional(r.ty)
+        if lt == rt == HOST_OBJECT and name in ("eq", "ne"):
+            return ir.Compare(BOOL, "is" if name == "eq" else "isnot", l.ty, l, r)
         if isinstance(lt, ClassT) or isinstance(rt, ClassT):
             if name not in ("eq", "ne"):
                 raise CompileError("ordering comparisons on objects are not supported", node)

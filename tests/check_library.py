@@ -46,6 +46,65 @@ def internal() -> i32:
 '''
 EXPORTS = ["add", "big", "single", "double", "flip", "text", "count", "show", "fail"]
 
+OBJECT_SOURCE = '''from snek import HostObject, host, checkpoint
+from typing import Callable, Iterator
+@host("lookup")
+def lookup(name: str) -> HostObject | None:
+    pass
+@host("touch")
+def touch(value: HostObject) -> None:
+    pass
+@host("resolve")
+async def resolve(value: HostObject) -> HostObject:
+    pass
+@host("wait")
+async def wait() -> None:
+    pass
+class Holder:
+    value: HostObject | None
+    def __init__(self, value: HostObject | None) -> None:
+        self.value = value
+def echo(value: HostObject) -> HostObject:
+    return value
+def optional(value: HostObject | None) -> HostObject | None:
+    return Holder(value).value
+def same(a: HostObject | None, b: HostObject | None) -> bool:
+    return a is b and a == b and not (a != b) and not (a is not b)
+def find(name: str) -> HostObject | None:
+    value = lookup(name)
+    if value is not None:
+        touch(value)
+    return value
+def sequence(value: HostObject) -> Iterator[HostObject]:
+    yield value
+def collections(a: HostObject, b: HostObject) -> bool:
+    values: list[HostObject] = [a, b, a]
+    if values.count(a) != 2 or b not in values:
+        return False
+    values.remove(b)
+    mapping: dict[str, HostObject] = {"a": a}
+    for value in sequence(a):
+        if value is not a:
+            return False
+    return values == [a, a] and mapping == {"a": a} and (a, b) == (a, b)
+def closure(value: HostObject) -> HostObject:
+    def get() -> HostObject:
+        return value
+    callback: Callable[[], HostObject] = get
+    return callback()
+async def hold(value: HostObject) -> HostObject:
+    holder = Holder(value)
+    await wait()
+    result = holder.value
+    if result is None:
+        raise ValueError("lost object")
+    return await resolve(result)
+async def optional_async(value: HostObject | None) -> HostObject | None:
+    await checkpoint()
+    return value
+'''
+OBJECT_EXPORTS = ["echo", "optional", "same", "find", "collections", "closure", "hold", "optional_async"]
+
 HOST_SOURCE = '''from snek import host, i32, i64, f32, f64
 @host("render")
 def render(value: str) -> None:
@@ -204,6 +263,74 @@ const second = await instantiate(await WebAssembly.compile(bytes));
 assert.equal(second.add(2, 3), 5);
 ''')
 
+    def test_opaque_host_objects(self):
+        self.src.write_text(OBJECT_SOURCE)
+        result = self.build(OBJECT_EXPORTS)
+        self.assertIn('"echo"(arg0: object): object;', result.dts_path.read_text())
+        self.assertIn('"optional_async"(arg0: object | null): Promise<object | null>;', result.dts_path.read_text())
+        self.node('''
+const a = {name: "a"}, b = {name: "b"};
+let touched, release, result = a;
+const lib = await instantiate(bytes, {imports: {
+  lookup: name => name === "missing" ? null : result,
+  touch: value => { touched = value; },
+  resolve: async value => value,
+  wait: () => new Promise(resolve => {release = resolve;})
+}});
+for (const value of [a, [], new Date(), () => 42, Object.create(null)]) {
+  assert.equal(lib.echo(value), value);
+  assert.equal(lib.optional(value), value);
+  assert.equal(lib.closure(value), value);
+  assert.equal(await lib.optional_async(value), value);
+}
+assert.equal(lib.optional(null), null);
+assert.equal(await lib.optional_async(null), null);
+assert.equal(lib.same(a, a), true);
+assert.equal(lib.same(a, b), false);
+assert.equal(lib.same(a, null), false);
+assert.equal(lib.same(null, null), true);
+assert.equal(lib.collections(a, b), true);
+assert.equal(lib.find("a"), a); assert.equal(touched, a);
+assert.equal(lib.find("missing"), null);
+const pending = lib.hold(a);
+await new Promise(resolve => setTimeout(resolve, 0));
+assert.equal(typeof release, "function");
+release();
+assert.equal(await pending, a);
+for (const value of [null, undefined, 1, "text", true, 1n, Symbol(), Promise.resolve(a), {then() {}}])
+  assert.throws(() => lib.echo(value), /HostObject/);
+for (result of [undefined, 42]) assert.throws(() => lib.find("bad"), /HostObject/);
+result = a; assert.equal(lib.find("ok"), a);
+''')
+
+    def test_host_objects_remain_opaque(self):
+        from snekc.errors import CompileError
+        bad = [
+            'def bad(value: HostObject) -> str:\n    return value.name\n',
+            'def bad(value: HostObject) -> str:\n    return str(value)\n',
+            'def bad(value: HostObject) -> bool:\n    return value is "text"\n',
+            'def bad(value: HostObject) -> bool:\n    return "text" is value\n',
+            'def bad(value: HostObject) -> bool:\n    return value < value\n',
+            'def bad(value: HostObject) -> HostObject:\n    return HostObject()\n',
+            'def bad(value: HostObject) -> bool:\n    mapping: dict[HostObject, str] = {value: "x"}\n    return True\n',
+        ]
+        for source in bad:
+            with self.subTest(source=source):
+                self.src.write_text("from snek import HostObject\n" + source)
+                with self.assertRaises((CompileError, ValueError, RuntimeError, driver.ToolError)):
+                    self.build(["bad"])
+
+    def test_host_object_modules_and_command_rejection(self):
+        from snekc.errors import CompileError
+        (self.root / "objects.py").write_text('from snek import HostObject\ndef echo(value: HostObject) -> HostObject:\n    return value\n')
+        self.src.write_text('from snek import HostObject\nfrom objects import echo\ndef call(value: HostObject) -> HostObject:\n    return echo(value)\n')
+        self.build(["call"])
+        self.node('const lib = await instantiate(bytes); const object = {}; assert.equal(lib.call(object), object);')
+        command = [self.native] if self.native else [sys.executable, "-m", "snekc"]
+        result = subprocess.run([*command, "build", str(self.src)], cwd=ROOT, capture_output=True, timeout=60)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(b"HostObject requires a --library build", result.stderr)
+
     def test_argument_validation_and_reentry(self):
         self.build()
         self.node('''
@@ -349,7 +476,7 @@ assert.equal(lib.call("hi"), "hi🐍🐍");
             ('@host("x")\nasync def f() -> None:\n    return\n', "pass body"),
             ('@host("x")\ndef f() -> i32:\n    return 1\n', "pass body"),
             ('@host("x")\ndef f(x: i32 = 0) -> None:\n    pass\n', "default arguments"),
-            ('@host("x")\ndef f(x: list[i32]) -> None:\n    pass\n', "scalar and string"),
+            ('@host("x")\ndef f(x: list[i32]) -> None:\n    pass\n', "scalar, string, and HostObject"),
             ('@host("x")\ndef f() -> str | None:\n    pass\n', "scalar, string"),
             ('def outer() -> None:\n    @host("x")\n    def inner() -> None:\n        pass\n', "top-level"),
             ('@host("same")\ndef a() -> i32:\n    pass\n@host("same")\ndef b() -> str:\n    pass\n', "conflicting signatures"),

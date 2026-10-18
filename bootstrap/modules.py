@@ -338,7 +338,7 @@ class ModuleProject:
                 if name == "__name__":
                     value = "__main__" if owner.name == self.entry and not self.library else owner.name
                     return Node("Constant", "", node.line, node.column).put("value", string(value)).put("kind", missing())
-                if name in ("i32", "i64", "f32", "f64", "Final", "Optional", "final", "host", "Callable", "Iterator", "Generator", "Coroutine", "TracebackType", "run", "checkpoint", "read_bytes", "write_bytes"):
+                if name in ("i32", "i64", "f32", "f64", "HostObject", "Final", "Optional", "final", "host", "Callable", "Iterator", "Generator", "Coroutine", "TracebackType", "run", "checkpoint", "read_bytes", "write_bytes"):
                     self.error("'" + name + "' must be imported in this module", node)
         if node.kind in ("FunctionDef", "AsyncFunctionDef", "Lambda"):
             return self.function(owner, node, locals_, False)

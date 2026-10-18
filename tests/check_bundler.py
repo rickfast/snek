@@ -30,6 +30,9 @@ import {instantiate, type SnekLibrary} from "./generated/program.js";
 declare const library: SnekLibrary;
 const result: Promise<string> = library.load("url");
 const exact: bigint = library.twice(1n);
+const opaque: object = library.identity(document.body);
+// @ts-expect-error HostObject rejects primitive values
+library.identity(42);
 // @ts-expect-error i64 is bigint, not number
 library.twice(1);
 // @ts-expect-error async exports do not return a bare string
@@ -70,7 +73,7 @@ class BundlerTests(unittest.TestCase):
     def compile(self, optimize):
         driver.build(self.root / "program.py", self.root / "src/generated/program.wasm",
                      optimize=optimize, compiler=self.compiler, library=True,
-                     exports=["greet", "twice", "load"])
+                     exports=["greet", "twice", "load", "identity"])
         self.run_node("node_modules/typescript/bin/tsc", "--noEmit")
 
     def run_node(self, *args):

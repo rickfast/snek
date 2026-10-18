@@ -44,6 +44,7 @@ from .types import (
     I64,
     NONE,
     STR,
+    HOST_OBJECT,
     StreamT,
     TRACEBACK,
     TypeT,
@@ -126,6 +127,8 @@ def mangle(t: Type) -> str:
         return t.name
     if t == STR:
         return "str"
+    if t == HOST_OBJECT:
+        return "HostObject"
     if isinstance(t, StreamT):
         return "stream." + t.kind
     if isinstance(t, ListT):
@@ -198,6 +201,7 @@ class FnState:
 
 class Emitter(CollectionEmitter, ProtocolEmitter, MachineEmitter, ClosureEmitter):
     def __init__(self, module: ir.Module, component: bool = False, *, graph_factory=None, machine_backend=None):
+        self.host_objects = False
         self.m = module
         self.graph_factory = graph_factory
         self.machine_backend = machine_backend
@@ -233,6 +237,9 @@ class Emitter(CollectionEmitter, ProtocolEmitter, MachineEmitter, ClosureEmitter
 
     def heap(self, t: Type) -> str:
         t = strip_optional(t)
+        if t == HOST_OBJECT:
+            self.host_objects = True
+            return "extern"
         if isinstance(t, (CallableT, CellT, EnvT)):
             name = mangle(t)
             registry = (self.closure_types if isinstance(t, CallableT) else
@@ -525,6 +532,8 @@ class Emitter(CollectionEmitter, ProtocolEmitter, MachineEmitter, ClosureEmitter
         if t == OptionalT(STR):
             return f"(call $rt.opt_str_eq {a} {b})"
         inner = strip_optional(t)
+        if inner == HOST_OBJECT:
+            return f"(call $__snek_object_same {a} {b})"
         if isinstance(inner, ClassT):
             return self.object_eq(t, t, a, b, identity=True)
         if isinstance(inner, ListT):
@@ -1408,7 +1417,7 @@ class Emitter(CollectionEmitter, ProtocolEmitter, MachineEmitter, ClosureEmitter
         l, r = self.ex(e.left), self.ex(e.right)
         t = e.operand_ty
         if e.op in ("is", "isnot"):
-            code = f"(ref.eq {l} {r})"
+            code = f"(call $__snek_object_same {l} {r})" if strip_optional(t) == HOST_OBJECT else f"(ref.eq {l} {r})"
             return f"(i32.eqz {code})" if e.op == "isnot" else code
         if t == STR:
             if e.op == "eq":
@@ -1458,11 +1467,13 @@ def emit_module(module: ir.Module, component: bool = False, *, graph_factory=Non
             module = replace(module, unicode=replace(module.unicode, dynamic=True))
     emitter = Emitter(module, component=component, graph_factory=graph_factory, machine_backend=machine_backend)
     wat = emitter.emit()
+    if emitter.host_objects and not exports:
+        raise ValueError("HostObject requires a --library build")
     if exports:
         if component or emitter.main_async or emitter.byte_io or emitter.stdlib_io or emitter.wasi_features:
             raise ValueError("library targets support print(), not WASI services or async initialization")
         wat = wat.replace('(export "_start")', '(export "__snek_init")')
-        wat = wat.replace("(module\n", "(module\n" + library_host_imports(hosts) + "\n", 1)
+        wat = wat.replace("(module\n", "(module\n" + library_host_imports(hosts, emitter.host_objects) + "\n", 1)
         wrappers = "\n".join(library_host_wrapper(item, i) for i, item in enumerate(hosts))
         wat = wat.rstrip()[:-1] + wrappers + "\n" + library_code(selected, hosts) + "\n)\n"
     return wat

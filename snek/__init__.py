@@ -24,6 +24,7 @@ i32 = int
 i64 = int
 f32 = float
 f64 = float
+HostObject = object  # Opaque to Snek; CPython host mocks may pass ordinary objects.
 
 
 def host(name: str):
@@ -71,4 +72,4 @@ def write_bytes(data: list[i32]) -> None:
         raise RuntimeError("stdout write failed") from error
 
 
-__all__ = ["i32", "i64", "f32", "f64", "Final", "final", "host", "run", "checkpoint", "read_bytes", "write_bytes", "sys", "os", "time", "secrets", "io"]
+__all__ = ["i32", "i64", "f32", "f64", "HostObject", "Final", "final", "host", "run", "checkpoint", "read_bytes", "write_bytes", "sys", "os", "time", "secrets", "io"]

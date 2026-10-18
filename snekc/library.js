@@ -78,6 +78,7 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
   }};
   imports.snek_host = Object.create(null);
   imports.snek_host_async = Object.create(null);
+  imports.snek_object = { same: (a, b) => Number(a === b) };
   imports.snek_host_result = Object.create(null);
   function lowerResult(name, result, value) {
     if (value != null && typeof value.then === "function") {
@@ -184,6 +185,14 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
     finally { finish(); }
   }
   function lower(type, value) {
+    if (type === "HostObject" || type === "HostObject | None") {
+      if (value === null && type === "HostObject | None") return [null];
+      if (value === null || (typeof value !== "object" && typeof value !== "function"))
+        throw new TypeError("expected HostObject (a JavaScript object)");
+      if (typeof value.then === "function")
+        throw new TypeError("HostObject cannot be a Promise/thenable");
+      return [value];
+    }
     if (type === "str") {
       if (typeof value !== "string") throw new TypeError("expected string");
       // Reject lone UTF-16 surrogates instead of silently replacing them.
@@ -216,6 +225,7 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
   enter(() => wasm.__snek_init());
   const api = Object.create(null);
   function lift(result, value) {
+    if (result === "HostObject" || result === "HostObject | None") return lower(result, value)[0];
     if (result === "str") return decoder.decode(new Uint8Array(wasm.memory.buffer, value >>> 0, wasm.__snek_length.value >>> 0));
     return result === "bool" ? Boolean(value) : value;
   }

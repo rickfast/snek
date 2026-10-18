@@ -179,7 +179,7 @@ Serve `examples/library/` and open `async.html` for a runnable fetch example.
 Async exports return `Promise<T>`; async host declarations require
 `PromiseLike<T>` callbacks (`PromiseLike<void>` for `None`). Returning a bare
 value instead of a Promise/thenable is an error. Resolved values use the same
-scalar/string checks as synchronous calls. Merely creating a Snek coroutine does
+boundary checks as synchronous calls. Merely creating a Snek coroutine does
 not invoke the callback: it starts when that coroutine is awaited.
 
 The loader advances the existing GC-backed coroutine frames until they suspend,
@@ -218,6 +218,8 @@ its instance busy until the host settles it.
 | `f64` | `number` |
 | `bool` | `boolean` |
 | `str` | `string`, copied as UTF-8 |
+| `HostObject` | `object`, opaque GC-managed JavaScript reference |
+| `HostObject | None` | `object | null` |
 | `None` return | `void` / `undefined` |
 
 The generated `.d.ts` describes an instance's exported methods. Wrappers also
@@ -227,12 +229,73 @@ Float infinities, NaN and signed zero follow Wasm arithmetic. JavaScript strings
 must contain valid Unicode scalar values: lone UTF-16 surrogates are rejected.
 
 Strings are copied into the GC heap before user code runs and copied back for
-JavaScript results. No GC reference or ownership handle crosses the boundary.
+JavaScript results. Snek-owned GC objects do not cross the boundary; `HostObject`
+passes a JavaScript-owned external reference without copying it.
 Temporary linear memory is reused after each call, so callers never free values;
 its capacity can remain at the largest call's high-water mark.
 Exported string parameters and host string returns also enable full-Unicode tables for the operations used by the
 program, so case conversion and character classification work on host input even
 when those characters never appear in the source.
+
+## Opaque JavaScript objects
+
+Import `HostObject` from `snek` to receive, retain and pass JavaScript objects.
+JavaScript still owns their behavior. Snek cannot read properties, call methods,
+construct them, convert them to strings, order them or use them as dictionary
+keys. Instead, declare typed host functions for the operations you need:
+
+```python
+from snek import HostObject, host
+
+@host("query")
+def query(selector: str) -> HostObject | None:
+    pass
+
+@host("set_text")
+def set_text(element: HostObject, text: str) -> None:
+    pass
+
+def update(selector: str, text: str) -> bool:
+    element = query(selector)
+    if element is None:
+        return False
+    set_text(element, text)
+    return True
+```
+
+```javascript
+const library = await instantiate(wasmUrl, { imports: {
+  query: selector => document.querySelector(selector),
+  set_text: (element, text) => {
+    if (!(element instanceof Element)) throw new TypeError("Expected a DOM element");
+    element.textContent = text;
+  },
+}});
+library.update("#result", "Hello from Snek 🐍!");
+```
+
+The host checks any more specific shape it needs. The generated TypeScript type
+is `object`, not `Element` or `any`; narrow it in the callback. `HostObject | None`
+maps only `null` to `None`; `undefined` is rejected. Primitives are rejected too.
+JavaScript functions can be held as opaque objects, but cannot be called by Snek.
+Promises and thenables are not supported as opaque objects; use an async host
+function to resolve an object instead. Objects must remain non-thenable while
+crossing the boundary, including when returned from async exports.
+
+These values use Wasm external references. The engine keeps a JavaScript object
+alive while reachable from a Snek local, field, collection, closure, generator or
+coroutine. There are no integer IDs, reference tables or manual retain/release
+calls. Ordinary GC lifetime rules apply; explicit resources (event listeners,
+sockets, and so on) still need application cleanup. Identity is preserved:
+`is`, `is not`, `==` and `!=` compare the underlying JavaScript object by identity,
+including collection membership/equality. Nullable values support `is None`
+narrowing. Representations such as `str(value)` and `list.index(value)` remain
+unsupported because an opaque object has no Snek representation.
+
+`HostObject` requires a library build. It does not export Snek classes or
+collections, provide a DOM API, make an object transferable to another worker,
+or change the one-active-call-per-instance rule. The Vite example passes a DOM
+element through its `identity` export and verifies that it is the same object.
 
 ## Initialization, errors and output
 
@@ -260,7 +323,7 @@ functions appear on the returned, frozen API object.
 ## Current limits
 
 Exports must be entry-module functions with the boundary types above (or coroutines
-returning those types). Collections, classes, optionals, callbacks, generators and raw coroutine objects cannot cross
+returning those types). Collections, Snek classes, other optional types, typed callbacks, generators and raw coroutine objects cannot cross
 the boundary. Libraries can use these internally where supported by the language,
 but cannot perform async module initialization or use WASI services such as
 stdin, environment variables, clocks and randomness. Unsupported signatures and

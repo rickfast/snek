@@ -38,7 +38,7 @@ def emit_mangle(ty: DeclType) -> str:
         return parts[0] + "." + ty.name + ".view"
     if kind in ("list", "tuple", "dict", "type"):
         return kind + "<" + "~".join(parts) + ">"
-    if kind in ("i32", "i64", "f32", "f64", "bool", "str"):
+    if kind in ("i32", "i64", "f32", "f64", "bool", "str", "HostObject"):
         return kind
     raise ValueError("unknown emitter type: " + ty.display())
 
@@ -152,6 +152,7 @@ class EmitLiterals:
 
 
 class EmitTypes:
+    host_objects: bool
     lists: dict[str, DeclType]
     tuples: dict[str, DeclType]
     dicts: dict[str, DeclType]
@@ -162,6 +163,7 @@ class EmitTypes:
     machines: dict[str, DeclType]
 
     def __init__(self) -> None:
+        self.host_objects = False
         self.lists = {}
         self.tuples = {}
         self.dicts = {}
@@ -174,6 +176,9 @@ class EmitTypes:
     def heap(self, ty: DeclType) -> str:
         if ty.kind == "optional": return self.heap(ty.args[0])
         kind = ty.kind
+        if kind == "HostObject":
+            self.host_objects = True
+            return "extern"
         name = emit_mangle(ty)
         if kind == "Stream": return "$io.stream"
         if kind in ("Callable", "Cell", "Env", "Iterator", "Coroutine"):

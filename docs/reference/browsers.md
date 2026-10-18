@@ -7,6 +7,8 @@ Browser APIs stay in JavaScript. Snek can call application-supplied
 functions through [typed host imports](libraries.md#calling-javascript-from-snek),
 including DOM updates and reads. [Async host imports](libraries.md#async-imports-and-exports)
 let Snek await JavaScript Promises from APIs such as `fetch` and timers.
+[Opaque `HostObject` references](libraries.md#opaque-javascript-objects) let Snek
+retain and pass DOM nodes and other JavaScript objects without accessing their properties.
 
 ## Compatibility and loading
 
@@ -99,7 +101,7 @@ From the repository root, using the development compiler:
 
 ```sh
 mkdir -p examples/vite/src/generated
-python -m snekc build examples/vite/program.py --no-opt --library --export greet --export twice --export load -o examples/vite/src/generated/program.wasm
+python -m snekc build examples/vite/program.py --no-opt --library --export greet --export twice --export load --export identity -o examples/vite/src/generated/program.wasm
 cd examples/vite
 npm ci
 npm run dev
@@ -168,4 +170,5 @@ The first-class browser milestone is complete:
   typed host imports with a DOM example, Promise-based async interop with a fetch example,
   tested Vite/TypeScript bundling, and an [interactive documentation playground](../learn/playground.md)
   that compiles and runs programs locally in a worker.
-- Later: opaque object handles, callbacks crossing the boundary, and task concurrency.
+- Implemented separately: opaque, GC-managed `HostObject` references.
+- Later: typed callbacks crossing the boundary and task concurrency.

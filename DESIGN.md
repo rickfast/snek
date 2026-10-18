@@ -60,7 +60,8 @@ or `snek run examples/modules/main.py`.
 
 `--library --export FUNCTION` produces a core Wasm library and generated
 JavaScript/TypeScript bindings. Both exports and `@host("name")`
-imports support fixed-width numbers, booleans and copied strings, plus `None`
+imports support fixed-width numbers, booleans, copied strings and opaque `HostObject`
+references (including nullable references), plus `None`
 returns. Host declarations have typed signatures and `pass` bodies; their host
 names remain explicit metadata in checked IR, not ordinary function bodies.
 JavaScript supplies the functions when instantiating the library. There is no
@@ -69,7 +70,7 @@ ambient DOM, filesystem or network access.
 The shared ABI generator lowers strings to UTF-8 pointer/length pairs and copies
 them into the GC heap before use. Host string returns use Wasm multi-value
 results. Scratch frames are released after each callback, and the JavaScript
-entry guard resets the arena on exceptional exit. GC references never escape.
+entry guard resets the arena on exceptional exit. Snek-owned GC references never escape.
 Host string returns, like exported string parameters, enable the Unicode tables
 needed for open-world input.
 
@@ -85,9 +86,19 @@ or yields to the event loop for a cooperative checkpoint. No Wasm stack is retai
 Each instance permits one active exported call, including suspended time. Reentrant
 and overlapping calls are rejected, not queued. Scratch memory is reset at suspension
 and exit; exported roots are cleared on success and failure. Async initialization,
-task spawning, cancellation APIs and object handles remain unsupported. The CPython shim raises on a host call
+task spawning and cancellation APIs remain unsupported. The CPython shim raises on a host call
 unless the application replaces the declaration with a Python implementation.
 See the [library guide](docs/reference/libraries.md) for the public contract.
+
+`HostObject` uses `(ref extern)` and its optional form uses `(ref null extern)`.
+Only JavaScript objects/functions (not primitives or thenables) may cross this
+boundary. Both emitters preserve these references in ordinary GC fields and
+suspension frames. A private host equality import compares object identity,
+including collection equality, because `ref.eq` operates on internal equality
+references rather than external references. Snek cannot access properties,
+construct these values, stringify them or use them as dictionary keys. Native
+CLI and both compiler paths generate the same ABI and `object`/`object | null`
+TypeScript declarations. Command and component targets reject `HostObject`.
 
 ## Types and inference
 

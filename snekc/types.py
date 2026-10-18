@@ -1,8 +1,8 @@
 """Type representations.
 
 Numbers are machine types (i32, i64, f32, f64) and are never boxed. Every
-other value (strings, collections, class instances) is a reference to a WasmGC
-struct, and only reference types can be optional (`T | None`).
+other value is a reference: language objects use WasmGC structs, while opaque
+HostObject values use external references. Only references can be optional (`T | None`).
 """
 
 from __future__ import annotations
@@ -61,6 +61,18 @@ class StrT(Type):
 
 
 STR = StrT()
+
+
+@dataclass(frozen=True)
+class HostObjectT(Type):
+    """An opaque, GC-managed JavaScript object reference (library target only)."""
+    is_ref = True
+
+    def __str__(self) -> str:
+        return "HostObject"
+
+
+HOST_OBJECT = HostObjectT()
 
 
 @dataclass(frozen=True)

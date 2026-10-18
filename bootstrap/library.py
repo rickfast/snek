@@ -33,13 +33,17 @@ def library_target(name: str, entry: str) -> str:
 
 
 def library_type(ty: str) -> str:
+    if ty == "HostObject": return "(ref extern)"
+    if ty == "HostObject | None": return "(ref null extern)"
     if ty == "str": return "i32"
     if ty == "bool": return "i32"
     if ty in ("i32", "i64", "f32", "f64"): return ty
-    raise ValueError("library boundaries support only i32, i64, f32, f64, bool, str, and None returns; got " + ty)
+    raise ValueError("library boundaries support only i32, i64, f32, f64, bool, str, HostObject, HostObject | None, and None returns; got " + ty)
 
 
 def library_ts(ty: str) -> str:
+    if ty == "HostObject": return "object"
+    if ty == "HostObject | None": return "object | null"
     if ty == "None": return "void"
     if ty == "str": return "string"
     if ty == "bool": return "boolean"
@@ -47,8 +51,10 @@ def library_ts(ty: str) -> str:
     return "number"
 
 
-def library_host_imports(hosts: list[LibraryExport]) -> str:
+def library_host_imports(hosts: list[LibraryExport], objects: bool = False) -> str:
     lines: list[str] = []
+    if objects:
+        lines.append('(import "snek_object" "same" (func $__snek_object_same (param (ref null extern) (ref null extern)) (result i32)))')
     seen: dict[str, str] = {}
     for index in range(len(hosts)):
         item = hosts[index]
@@ -112,6 +118,7 @@ def library_async_host(item: LibraryExport, index: i32) -> str:
     B = item.heap
     F = "$__snek_host_frame_" + str(index)
     result_type = "(ref null $str)" if item.ret == "str" else library_type(item.ret) if item.ret != "None" else ""
+    if item.ret == "HostObject": result_type = "(ref null extern)"
     elem = Node("Type").put("none", Node("scalar", "true" if item.ret == "None" else "false")).put("storage", string(result_type))
     fields = machine_fields_wat(Node("Machine").put("heap", string(B)).put("elem", elem))
     params = ""
@@ -136,6 +143,7 @@ def library_async_host(item: LibraryExport, index: i32) -> str:
     start += " (call $__snek_host_" + str(index) + args + ") (global.set $__snek_bump (local.get $mark))"
     start += " (struct.set " + B + " $pc (local.get $a) (i32.const 1)) (struct.set " + B + " $busy (local.get $a) (i32.const 0)) (return (i32.const 1))"
     default = "" if item.ret == "None" else " (ref.null $str)" if item.ret == "str" else " (" + library_type(item.ret) + ".const 0)"
+    if item.ret in ("HostObject", "HostObject | None"): default = " (ref.null extern)"
     finish = "(struct.set " + B + " $pc (local.get $a) (i32.const -1)) (struct.set " + B + " $busy (local.get $a) (i32.const 0))"
     take = "(call $__snek_result_" + str(index) + ")"
     if item.ret == "str":
@@ -173,6 +181,7 @@ def library_async_export(item: LibraryExport, head: str, args: list[str]) -> str
         result = " (result " + library_type(item.ret) + ")"
         body = "(struct.get " + B + " $value " + value + ")"
         if item.ret == "str": body = "(call $__snek_write (ref.as_non_null " + body + "))"
+        elif item.ret == "HostObject": body = "(ref.as_non_null " + body + ")"
     lines.append('(func (export "__snek_result_' + item.name + '")' + result + " " + body + ")")
     lines.append('(func (export "__snek_drop_' + item.name + '") (global.set ' + task + " (ref.null " + B + ")))")
     return "\n".join(lines)
@@ -215,11 +224,14 @@ def library_code(exports: list[LibraryExport], hosts: list[LibraryExport]) -> st
         result = ""
         if item.ret != "None":
             result = library_type(item.ret)
-            head += " (result " + result + ") (local $result " + result + ")"
+            storage = "(ref null extern)" if item.ret == "HostObject" else result
+            head += " (result " + result + ") (local $result " + storage + ")"
         call = "(call $" + item.target + " " + " ".join(args) + ")"
         if item.ret == "str": call = "(call $__snek_write " + call + ")"
         if result != "": call = "(local.set $result " + call + ")"
-        lines.append(head + " (call $rt.uncaught (block $failed (result (ref $BaseException)) (try_table (catch $snek.exc $failed) " + call + ") (call $rt.flush) (return " + ("(local.get $result)" if result != "" else "") + "))) (unreachable))")
+        value = "(local.get $result)" if result != "" else ""
+        if item.ret == "HostObject": value = "(ref.as_non_null " + value + ")"
+        lines.append(head + " (call $rt.uncaught (block $failed (result (ref $BaseException)) (try_table (catch $snek.exc $failed) " + call + ") (call $rt.flush) (return " + value + "))) (unreachable))")
         signatures.append("[" + json_string(item.name) + ",[" + ",".join(types) + "]," + json_string(item.ret) + "]")
         declarations.append("  " + json_string(item.name) + "(" + ", ".join(ts) + "): " + library_ts(item.ret) + ";")
     host_signatures: list[str] = []

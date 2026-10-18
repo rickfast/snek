@@ -1,4 +1,4 @@
-from snek import host, i64
+from snek import HostObject, host, i64
 
 
 @host("fetch_text")
@@ -16,3 +16,7 @@ def twice(value: i64) -> i64:
 
 async def load(url: str) -> str:
     return (await fetch_text(url)).strip().upper()
+
+
+def identity(value: HostObject) -> HostObject:
+    return value

@@ -193,7 +193,10 @@ def emit_source_module(checked: BodyChecker, prelude_source: str, component: boo
     if e.byte_io or "stream_read" in e.io:
         imports += '\n(import "wasi_snapshot_preview1" "fd_read" (func $wasi.fd_read (param i32 i32 i32 i32) (result i32)))'
     imports = emit_component_imports("stream_read" in e.io, e.features) if component else imports + "\n" + emit_host_core_imports(e.features)
-    imports += "\n" + library_host_imports(host_functions)
+    e.types.close()
+    if e.types.host_objects and (exports is None or len(exports) == 0):
+        raise ValueError("HostObject requires a --library build")
+    imports += "\n" + library_host_imports(host_functions, e.types.host_objects)
     start = '(func $snek.start (export "_start") (call $lib.reset) (call $snek.sys.reset) (call $rt.uncaught (block $uncaught (result (ref $BaseException)) (try_table (catch $snek.exc $uncaught) (call $snek.main)) (call $rt.flush) (return))))'
     if main_async:
         start = '(func $snek.start (export "_start") (local $main (ref $coro<none>)) (call $lib.reset) (call $snek.sys.reset) (call $rt.uncaught (block $uncaught (result (ref $BaseException)) (try_table (catch $snek.exc $uncaught) (local.set $main (call $snek.main)) (loop $run (br_if $run (call $coro<none>.advance (local.get $main))))) (call $rt.flush) (return))))'

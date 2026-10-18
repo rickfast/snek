@@ -409,7 +409,7 @@ class Declarations:
         level = node.get("level").text
         allowed: list[str] = []
         if module == "snek":
-            allowed = ["i32", "i64", "f32", "f64", "Final", "final", "host", "run", "checkpoint", "read_bytes", "write_bytes"]
+            allowed = ["i32", "i64", "f32", "f64", "HostObject", "Final", "final", "host", "run", "checkpoint", "read_bytes", "write_bytes"]
         elif module in ("typing", "collections.abc"):
             allowed = ["Iterator", "Generator", "Coroutine", "Callable"]
             if module == "typing":
@@ -701,10 +701,10 @@ class Declarations:
             sig.ret = self.resolve_type(ret)
         if host != "":
             for param in sig.params:
-                if param.ty.kind not in ("i32", "i64", "f32", "f64", "bool", "str"):
-                    declaration_error("host boundaries support only scalar and string parameters", node)
-            if sig.ret.kind not in ("i32", "i64", "f32", "f64", "bool", "str", "None"):
-                declaration_error("host boundaries support only scalar, string, and None returns", node)
+                if param.ty.kind not in ("i32", "i64", "f32", "f64", "bool", "str", "HostObject") and param.ty.display() != "HostObject | None":
+                    declaration_error("host boundaries support only scalar, string, and HostObject parameters", node)
+            if sig.ret.kind not in ("i32", "i64", "f32", "f64", "bool", "str", "None", "HostObject") and sig.ret.display() != "HostObject | None":
+                declaration_error("host boundaries support only scalar, string, HostObject, and None returns", node)
         yields = direct_yield(node.get("body"))
         if node.kind == "AsyncFunctionDef":
             if yields:
@@ -782,6 +782,8 @@ class Declarations:
                 return self.resolve_type(inner, depth + 1)
         if node.kind == "Name":
             name = node.get("id").text
+            if name == "HostObject" and name in self.imported:
+                return DeclType(name)
             if name in ("i32", "i64", "f32", "f64"):
                 if name not in self.imported:
                     declaration_error("'" + name + "' must be imported: `from snek import " + name + "`", node)

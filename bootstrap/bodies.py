@@ -28,7 +28,7 @@ def numeric_type(ty: DeclType) -> bool:
 
 
 def body_type(ty: DeclType, node: Node) -> None:
-    if ty.kind in ("i32", "i64", "f32", "f64", "bool", "str", "None", "__Buf", "TracebackType"):
+    if ty.kind in ("i32", "i64", "f32", "f64", "bool", "str", "None", "__Buf", "TracebackType", "HostObject"):
         return
     if ty.kind in ("class", "Stream"):
         return
@@ -1202,6 +1202,8 @@ class BodyChecker:
             if not none_node(right):
                 a = self.expr(left, DeclType("unknown"))
                 b = self.expr(right, DeclType("unknown"))
+                if (inner_type(a.ty).kind == "HostObject" or inner_type(b.ty).kind == "HostObject") and inner_type(a.ty).kind != inner_type(b.ty).kind:
+                    declaration_error("HostObject identity requires two HostObject operands", node)
                 if inner_type(a.ty).kind == "TracebackType" or inner_type(b.ty).kind == "TracebackType":
                     declaration_error("tracebacks are opaque; only None checks are supported", node)
                 if not a.ty.reference() or not b.ty.reference():
@@ -1227,7 +1229,7 @@ class BodyChecker:
             operands = self.operands(left, right, DeclType("unknown"))
         a = operands[0]
         b = operands[1]
-        if inner_type(a.ty).kind in ("type", "Callable", "Stream") and inner_type(b.ty).kind == inner_type(a.ty).kind and op in ("Eq", "NotEq"):
+        if inner_type(a.ty).kind in ("type", "Callable", "Stream", "HostObject") and inner_type(b.ty).kind == inner_type(a.ty).kind and op in ("Eq", "NotEq"):
             return BodyExpr("Compare", DeclType("bool"), node, "is" if op == "Eq" else "isnot").add(a).add(b)
         if inner_type(a.ty).kind in ("list", "tuple", "dict", "class") or inner_type(b.ty).kind == "class":
             if op not in ("Eq", "NotEq"):
@@ -1709,7 +1711,7 @@ class BodyChecker:
         return BodyExpr("Const", DeclType("i32"), node, str(value))
 
     def has_repr(self, ty: DeclType) -> bool:
-        if ty.kind in ("class", "TracebackType", "type", "Iterator", "Coroutine", "Callable", "Stream"):
+        if ty.kind in ("class", "TracebackType", "type", "Iterator", "Coroutine", "Callable", "Stream", "HostObject"):
             return False
         if ty.kind == "view":
             return self.has_repr(self.view_element(ty))

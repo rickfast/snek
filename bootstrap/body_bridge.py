@@ -33,7 +33,7 @@ class IRBridge:
             raise ValueError("expected an owned Type record")
         kind, name, args = value["kind"], value["name"], value["args"]
         primitives = {"i32": t.I32, "i64": t.I64, "f32": t.F32, "f64": t.F64,
-                      "bool": t.BOOL, "str": t.STR, "None": t.NONE, "__Buf": t.BUF, "TracebackType": t.TRACEBACK}
+                      "bool": t.BOOL, "str": t.STR, "HostObject": t.HOST_OBJECT, "None": t.NONE, "__Buf": t.BUF, "TracebackType": t.TRACEBACK}
         if kind in primitives and not args and not name:
             return primitives[kind]
         if kind == "Stream" and not args and name in ("TextInput", "TextOutput", "BinaryInput", "BinaryOutput"):

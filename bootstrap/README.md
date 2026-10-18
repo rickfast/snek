@@ -34,7 +34,7 @@ The linker embeds this module into both parser probes and the full compiler.
 Compiler entry and profiling builds share the phase definitions in
 `build_emitter.py`.
 
-`library.py` generates the scalar/string host ABI and JavaScript/TypeScript
+`library.py` generates the scalar/string/opaque-object host ABI and JavaScript/TypeScript
 bindings for both compilers. `snekc/library_runtime.wat` and `snekc/library.js`
 are embedded resources, not dependencies of the resulting standalone CLI.
 Typed `@host("name")` declarations retain their host name in the signature IR.

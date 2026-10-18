@@ -33,6 +33,8 @@ def type_tree(ty):
         kind = "None"
     elif ty == t.STR:
         kind = "str"
+    elif ty == t.HOST_OBJECT:
+        kind = "HostObject"
     elif ty == t.TRACEBACK:
         kind = "TracebackType"
     elif isinstance(ty, t.StreamT):

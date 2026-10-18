@@ -34,6 +34,10 @@ imports also cover missing callbacks, copied strings, scalar return validation,
 sync-Promise/reentry rejection, async resolved-value validation, rejection/awaited
 cleanup, overlapping-call guards, lazy coroutine startup, and scratch-memory reuse
 within long-running calls. Browser checks include a real awaited-fetch example.
+`HostObject` cases cover identity, nullability, containers, closures, generators,
+retention across awaits, primitive/thenable rejection and opaque-operation
+diagnostics. Browser cases pass real DOM elements through raw and optimized
+modules; the Vite fixture also checks the generated `object` TypeScript boundary.
 
 Use `python tests/run_suites.py` as the test entry point (default: `fast`). These
 tests use `check_*.py`, not unittest's default `test_*.py` discovery convention.

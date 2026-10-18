@@ -131,6 +131,7 @@ class SourceEmitter:
         if inner.kind == "class": return self.object_eq(ty, ty, a, b, True)
         if inner.kind in ("list", "tuple", "dict"):
             return f"(call {self.operation(inner, 'eq')} {a} {b})"
+        if inner_type(ty).kind == "HostObject": return f"(call $__snek_object_same {a} {b})"
         return f"(ref.eq {a} {b})"
 
     def to_string(self, ty: DeclType, code: str, representation: bool = False) -> str:
@@ -240,7 +241,7 @@ class SourceEmitter:
             right = self.ex(args[1])
             operand = args[0].ty
             if text in ("is", "isnot"):
-                code = f"(ref.eq {left} {right})"
+                code = f"(call $__snek_object_same {left} {right})" if inner_type(operand).kind == "HostObject" else f"(ref.eq {left} {right})"
                 return f"(i32.eqz {code})" if text == "isnot" else code
             if operand.kind == "str":
                 if text in ("eq", "ne"):

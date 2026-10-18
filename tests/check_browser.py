@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from snekc import driver
 from check_library import SOURCE, EXPORTS, HOST_SOURCE, HOST_EXPORTS, ASYNC_SOURCE, ASYNC_EXPORTS
+from check_library import OBJECT_SOURCE, OBJECT_EXPORTS
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -42,6 +43,10 @@ class BrowserTests(unittest.TestCase):
         for name, optimize in (("async", False), ("async-optimized", True)):
             driver.build(source, root / (name + ".wasm"), optimize=optimize,
                          compiler=compiler, library=True, exports=ASYNC_EXPORTS)
+        source.write_text(OBJECT_SOURCE)
+        for name, optimize in (("objects", False), ("objects-optimized", True)):
+            driver.build(source, root / (name + ".wasm"), optimize=optimize,
+                         compiler=compiler, library=True, exports=OBJECT_EXPORTS)
         driver.build(ROOT / "examples/library/greetings.py", root / "greetings.wasm", optimize=False,
                      compiler=compiler, library=True, exports=["greet", "add", "twice"])
         shutil.copyfile(ROOT / "examples/library/worker.mjs", root / "worker.mjs")
@@ -146,6 +151,28 @@ class BrowserTests(unittest.TestCase):
         self.assertEqual(self.page.locator("#result").text_content(), "Hello, Snek 🐍! Clicks: 1")
         self.page.locator("#increment").click()
         self.assertEqual(self.page.locator("#result").text_content(), "Hello, Snek 🐍! Clicks: 2")
+
+    def test_opaque_dom_objects(self):
+        for target in ("objects", "objects-optimized"):
+            with self.subTest(target=target):
+                result = self.page.evaluate('''async target => {
+                  const {instantiate} = await import(`./${target}.js`);
+                  const node = document.createElement("output"), other = document.createElement("span");
+                  document.body.append(node);
+                  const lib = await instantiate(`./${target}.wasm`, {imports: {
+                    lookup: name => name === "missing" ? null : node,
+                    touch: value => {value.textContent = "DOM from Snek 🐍";},
+                    resolve: async value => value,
+                    wait: () => new Promise(resolve => setTimeout(resolve, 1))
+                  }});
+                  const values = [lib.echo(node) === node, lib.find("node") === node, node.textContent,
+                    lib.find("missing"), lib.optional(null), lib.same(node, node), lib.same(node, other),
+                    lib.collections(node, other), lib.closure(node) === node,
+                    await lib.hold(node) === node, await lib.optional_async(null)];
+                  node.remove();
+                  return values;
+                }''', target)
+                self.assertEqual(result, [True, True, "DOM from Snek 🐍", None, None, True, False, True, True, True, None])
 
     def test_async_host_imports(self):
         for target in ("async", "async-optimized"):
