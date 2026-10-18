@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from snekc import driver
 from check_library import LIST_SOURCE, LIST_EXPORTS, NESTED_LIST_SOURCE, NESTED_LIST_EXPORTS
+from check_library import LIST_CALLBACK_SOURCE, LIST_CALLBACK_EXPORTS
 
 EXAMPLE = ROOT / "examples/vite"
 SERVER = '''
@@ -27,6 +28,16 @@ console.log(JSON.stringify({url: server.resolvedUrls.local[0]}));
 '''
 
 TYPES = '''
+import {type SnekLibrary as ListCallbackLibrary} from "./generated/list-callbacks.js";
+declare const listCallbacks: ListCallbackLibrary;
+const transformed: SnekList<string> = listCallbacks.apply(items => items, listCallbacks.words());
+const asyncTransformed: Promise<SnekList<SnekList<string>>> = listCallbacks.apply_async(async items => items, listCallbacks.rows());
+// @ts-expect-error callback results require handles, not arrays
+listCallbacks.apply(items => items.toArray(), listCallbacks.words());
+// @ts-expect-error async callback result element types must match
+listCallbacks.apply_async(async items => items.get(0), listCallbacks.rows());
+// @ts-expect-error callbacks accept their declared list element type
+listCallbacks.apply((items: SnekList<number>) => items, listCallbacks.words());
 import {type SnekLibrary as NestedLibrary} from "./generated/nested.js";
 declare const nested: NestedLibrary;
 const rows: SnekList<SnekList<string>> = nested.rows();
@@ -127,6 +138,10 @@ class BundlerTests(unittest.TestCase):
         source.write_text(NESTED_LIST_SOURCE)
         driver.build(source, self.root / "src/generated/nested.wasm", optimize=optimize,
                      compiler=self.compiler, library=True, exports=NESTED_LIST_EXPORTS)
+        source = self.root / "list_callbacks.py"
+        source.write_text(LIST_CALLBACK_SOURCE)
+        driver.build(source, self.root / "src/generated/list-callbacks.wasm", optimize=optimize,
+                     compiler=self.compiler, library=True, exports=LIST_CALLBACK_EXPORTS)
         driver.build(self.root / "program.py", self.root / "src/generated/program.wasm",
                      optimize=optimize, compiler=self.compiler, library=True,
                      exports=["greet", "twice", "load", "identity", "apply", "make_greeter", "notify", "apply_async"])

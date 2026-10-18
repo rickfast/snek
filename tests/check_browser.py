@@ -18,6 +18,7 @@ from check_library import ASYNC_CALLBACK_SOURCE, ASYNC_CALLBACK_EXPORTS
 from check_library import WAIT_ALL_SOURCE, WAIT_ALL_EXPORTS
 from check_library import LIST_SOURCE, LIST_EXPORTS
 from check_library import NESTED_LIST_SOURCE, NESTED_LIST_EXPORTS
+from check_library import LIST_CALLBACK_SOURCE, LIST_CALLBACK_EXPORTS
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -73,6 +74,10 @@ class BrowserTests(unittest.TestCase):
         for name, optimize in (("nested-lists", False), ("nested-lists-optimized", True)):
             driver.build(source, root / (name + ".wasm"), optimize=optimize,
                          compiler=compiler, library=True, exports=NESTED_LIST_EXPORTS)
+        source.write_text(LIST_CALLBACK_SOURCE)
+        for name, optimize in (("list-callbacks", False), ("list-callbacks-optimized", True)):
+            driver.build(source, root / (name + ".wasm"), optimize=optimize,
+                         compiler=compiler, library=True, exports=LIST_CALLBACK_EXPORTS)
         shutil.copyfile(ROOT / "examples/library/worker.mjs", root / "worker.mjs")
         driver.build(ROOT / "examples/library/host_demo.py", root / "host_demo.wasm", optimize=False,
                      compiler=compiler, library=True, exports=["increment"])
@@ -103,6 +108,27 @@ class BrowserTests(unittest.TestCase):
         self.page = context.new_page()
         self.page.set_default_timeout(15000)
         self.page.goto(self.url)
+
+    def test_list_callback_boundaries(self):
+        for target in ("list-callbacks", "list-callbacks-optimized"):
+            with self.subTest(target=target):
+                result = self.page.evaluate('''async target => {
+                  const {instantiate, SnekError} = await import(`/${target}.js`);
+                  const lib = await instantiate(`/${target}.wasm`, {imports: {
+                    install: fn => fn, install_async: async fn => fn,
+                  }});
+                  const words = lib.words(), append = lib.make("Snek"), rows = lib.rows();
+                  const same = append(words) === words && lib.roundtrip(append) === append &&
+                    lib.combine((a, text, b) => {a.append(text); return b;}, words) === words;
+                  const asyncAppend = lib.make_async("awaited");
+                  const asyncSame = await lib.apply_async(async items => items, rows) === rows &&
+                    await asyncAppend(rows) === rows && await lib.roundtrip_async(asyncAppend) === asyncAppend;
+                  let rejected = false;
+                  try {await lib.apply_async(async () => [], rows);} catch (e) {rejected = e instanceof SnekError;}
+                  return {same, asyncSame, rejected, words: words.toArray(), row: rows.get(0).toArray()};
+                }''', target)
+                self.assertEqual(result, {"same": True, "asyncSame": True, "rejected": True,
+                    "words": ["word", "Snek", "between"], "row": ["row", "awaited"]})
 
     def test_nested_list_handles(self):
         for target in ("nested-lists", "nested-lists-optimized"):

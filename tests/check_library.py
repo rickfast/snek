@@ -113,6 +113,50 @@ def nullable(value: HostObject | None) -> list[list[HostObject | None]]:
 '''
 NESTED_LIST_EXPORTS = ["rows", "echo", "child", "upper", "from_host", "delayed", "collected", "cube", "nullable"]
 
+LIST_CALLBACK_SOURCE = '''from snek import host, checkpoint
+from typing import Callable, Coroutine
+@host("install")
+def install(fn: Callable[[list[str]], list[str]]) -> Callable[[list[str]], list[str]]:
+    pass
+@host("install_async")
+async def install_async(fn: Callable[[list[list[str]]], Coroutine[None, None, list[list[str]]]]) -> Callable[[list[list[str]]], Coroutine[None, None, list[list[str]]]]:
+    pass
+def words() -> list[str]:
+    return ["word"]
+def rows() -> list[list[str]]:
+    return [["row"]]
+def make(text: str) -> Callable[[list[str]], list[str]]:
+    def append(items: list[str]) -> list[str]:
+        items.append(text)
+        return items
+    return append
+def make_async(text: str) -> Callable[[list[list[str]]], Coroutine[None, None, list[list[str]]]]:
+    async def append(items: list[list[str]]) -> list[list[str]]:
+        await checkpoint()
+        items[0].append(text)
+        return items
+    return append
+def apply(fn: Callable[[list[str]], list[str]], items: list[str]) -> list[str]:
+    return fn(items)
+async def apply_async(fn: Callable[[list[list[str]]], Coroutine[None, None, list[list[str]]]], items: list[list[str]]) -> list[list[str]]:
+    return await fn(items)
+def roundtrip(fn: Callable[[list[str]], list[str]]) -> Callable[[list[str]], list[str]]:
+    return install(fn)
+async def roundtrip_async(fn: Callable[[list[list[str]]], Coroutine[None, None, list[list[str]]]]) -> Callable[[list[list[str]]], Coroutine[None, None, list[list[str]]]]:
+    return await install_async(fn)
+def factory() -> Callable[[], list[list[str]]]:
+    def create() -> list[list[str]]:
+        return [["created"]]
+    return create
+def visit(fn: Callable[[list[list[str]]], list[list[str]]]) -> str:
+    return fn([["visit"]])[0][0]
+def combine(fn: Callable[[list[str], str, list[str]], list[str]], items: list[str]) -> list[str]:
+    return fn(items, "between", items)
+async def combine_async(fn: Callable[[list[list[str]], str], Coroutine[None, None, list[list[str]]]], items: list[list[str]]) -> list[list[str]]:
+    return await fn(items, "between async")
+'''
+LIST_CALLBACK_EXPORTS = ["words", "rows", "make", "make_async", "apply", "apply_async", "roundtrip", "roundtrip_async", "factory", "visit", "combine", "combine_async"]
+
 OBJECT_SOURCE = '''from snek import HostObject, host, checkpoint
 from typing import Callable, Iterator
 @host("lookup")
@@ -478,6 +522,77 @@ assert.equal(lib.__snek_init, undefined);
 assert.ok(Object.isFrozen(lib));
 const second = await instantiate(await WebAssembly.compile(bytes));
 assert.equal(second.add(2, 3), 5);
+''')
+
+    def test_list_callback_values_and_identity(self):
+        self.src.write_text(LIST_CALLBACK_SOURCE)
+        self.build(LIST_CALLBACK_EXPORTS)
+        self.node('''
+const options = {imports: {install: fn => fn, install_async: async fn => fn}};
+const lib = await instantiate(bytes, options);
+const words = lib.words();
+assert.equal(lib.combine((a, text, b) => {assert.equal(a, b); assert.equal(text, "between"); return a;}, words), words);
+const append = lib.make("🐍");
+assert.equal(append(words), words);
+assert.deepEqual(words.toArray(), ["word", "🐍"]);
+assert.equal(lib.roundtrip(append), append);
+const js = items => {items.append("JS"); return items;};
+assert.equal(lib.roundtrip(js), js);
+assert.equal(lib.apply(js, words), words);
+assert.equal(words.get(-1), "JS");
+assert.throws(() => append(["array"]), /handle from this Snek instance/);
+assert.throws(() => lib.apply(() => [], words), /handle from this Snek instance/);
+const other = await instantiate(bytes, options);
+assert.throws(() => append(other.words()), /handle from this Snek instance/);
+assert.throws(() => lib.apply(() => other.words(), words), /handle from this Snek instance/);
+assert.throws(() => lib.apply(async items => items, words), /must be synchronous/);
+assert.equal(append(words), words);
+const rows = lib.rows(), asyncAppend = lib.make_async("awaited");
+assert.equal(await lib.combine_async(async (a, text) => {assert.equal(text, "between async"); return a;}, rows), rows);
+assert.equal(await asyncAppend(rows), rows);
+assert.equal(await lib.roundtrip_async(asyncAppend), asyncAppend);
+const asyncJS = async items => {items.get(0).append("async JS"); return items;};
+assert.equal(await lib.roundtrip_async(asyncJS), asyncJS);
+assert.equal(await lib.apply_async(asyncJS, rows), rows);
+assert.deepEqual(rows.get(0).toArray(), ["row", "awaited", "async JS"]);
+await assert.rejects(lib.apply_async(async () => [], rows), SnekError);
+await assert.rejects(lib.apply_async(async () => other.rows(), rows), SnekError);
+await assert.rejects(asyncAppend(other.rows()), /handle from this Snek instance/);
+const [a, b] = await Promise.all([asyncAppend(rows), asyncAppend(rows)]);
+assert.equal(a, rows); assert.equal(b, rows);
+''')
+
+    def test_list_callback_element_types(self):
+        source = 'from snek import i32, i64, f32, f64, HostObject\nfrom typing import Callable\n'
+        exports = []
+        for i, elem in enumerate(("i32", "i64", "f32", "f64", "bool", "HostObject", "HostObject | None")):
+            source += f'def make{i}(value: {elem}) -> list[{elem}]:\n    return [value]\n'
+            source += f'def apply{i}(fn: Callable[[list[{elem}], list[{elem}]], list[{elem}]], items: list[{elem}]) -> list[{elem}]:\n    return fn(items, items)\n'
+            exports += [f"make{i}", f"apply{i}"]
+        self.src.write_text(source)
+        self.build(exports)
+        self.node('''
+const lib = await instantiate(bytes);
+const values = [42, 1n << 55n, 1.25, -Infinity, true, {}, null];
+for (const [i, value] of values.entries()) {
+  const list = lib[`make${i}`](value);
+  assert.equal(lib[`apply${i}`]((a, b) => {
+    assert.equal(a, b); assert.equal(a.get(0), value); a.append(value); return b;
+  }, list), list);
+  assert.deepEqual(list.toArray(), [value, value]);
+}
+''')
+
+    def test_lists_only_reachable_through_callback_signatures(self):
+        self.src.write_text(LIST_CALLBACK_SOURCE)
+        self.build(["factory", "visit"])
+        self.node('''
+const lib = await instantiate(bytes, {imports: {install: fn => fn, install_async: async fn => fn}});
+const rows = lib.factory()();
+assert.deepEqual(rows.get(0).toArray(), ["created"]);
+let received;
+assert.equal(lib.visit(items => {received = items; items.get(0).set(0, "changed"); return items;}), "changed");
+assert.deepEqual(received.toArray().map(row => row.toArray()), [["changed"]]);
 ''')
 
     def test_nested_list_handles_preserve_aliases_and_types(self):
@@ -897,9 +1012,10 @@ await assert.rejects(lib.apply_bool(async () => 1, true), /expected boolean/);
 ''')
 
     def test_unsupported_callback_signatures(self):
-        for signature in ("Callable[[list[str]], str]", "Callable[[str], list[str]]",
+        for signature in ("Callable[[tuple[str, str]], str]", "Callable[[str], tuple[str, str]]",
                           "Callable[[Callable[[], str]], str]", "Callable[[], Coroutine[str]]",
-                          "Callable[[], Coroutine[None, None, list[str]]]",
+                          "Callable[[], Coroutine[None, None, tuple[str, str]]]",
+                          "Callable[[list[Callable[[], str]]], str]",
                           "Callable[[Coroutine[None, None, str]], str]",
                           "Callable[[None], str]", "Callable[[str], str] | None"):
             for host in (False, True):

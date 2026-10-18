@@ -416,8 +416,8 @@ Create lists in Snek, then pass their handles back. JavaScript arrays, lookalike
 objects, handles for different element types, and handles from another instance
 are rejected. Handles are not transferable between workers; send `toArray()` data
 instead. Dictionary/tuple/class handles, callback elements and
-optional lists are not supported yet. `Callable` boundary signatures still use
-scalar/string/object types, not lists.
+optional lists are not supported yet. Supported lists can also be parameters and
+results of [typed callbacks](#typed-callbacks).
 
 ### Nested lists
 
@@ -532,8 +532,9 @@ greet("browser"); // Hello, browser
 ```
 
 Callback arguments and results can be numbers, booleans, strings, `HostObject`,
-or `HostObject | None`; results can also be `None`. Nested callbacks, collections
-and optional callbacks are not supported. Callbacks with these result types
+or `HostObject | None`, plus supported `list[T]` handles (including nested lists);
+results can also be `None`. Nested callbacks, collections other than supported
+lists, and optional callbacks are not supported. Callbacks with these result types
 are synchronous: returning a Promise is an error, including for `None` results.
 The generated TypeScript uses `undefined` for a `None` callback result to catch
 accidentally async functions.
@@ -581,7 +582,7 @@ Their JavaScript wrappers return Promises, and calls can overlap with other asyn
 invocations. Passing a returned closure back into the same instance preserves its
 identity. Host declarations may accept or return async callbacks as well.
 
-Async callback results use the same scalar/string/opaque-object types as sync
+Async callback results use the same scalar/string/opaque-object/list types as sync
 callbacks, plus `None`. `Coroutine[None, None, None]` maps to `PromiseLike<void>`.
 Returning a bare value is rejected. Promise rejections, synchronous throws, and
 invalid resolved values become catchable Snek `RuntimeError`s; awaited `finally`
@@ -592,6 +593,35 @@ Creating a Snek coroutine does not start its callback until it is awaited. A
 JavaScript call to a returned async closure starts immediately, just like an async
 export. Synchronous re-entry remains forbidden; an async callback must not call a
 Snek wrapper on the same instance before first yielding back to JavaScript.
+
+### Callbacks with list handles
+
+List parameters and results follow the same identity, mutation and instance
+ownership rules as ordinary exports. A JavaScript callback may read or mutate a
+received handle and return it to Snek:
+
+```python
+from typing import Callable
+
+def transform(fn: Callable[[list[str]], list[str]], items: list[str]) -> list[str]:
+    return fn(items)
+```
+
+```javascript
+const transformed = lib.transform(items => {
+  items.append("from JavaScript");
+  return items;
+}, words);
+console.log(transformed === words); // true
+```
+
+Snek closures exposed to JavaScript can likewise accept or return list handles.
+Async signatures use `Coroutine[None, None, list[T]]`; JavaScript callbacks must
+return a Promise resolving to the correct handle, not an array. Nested lists and
+multiple list parameters are supported. Types used only inside callback signatures
+still get their list wrappers and TypeScript declarations. Calling a Snek closure
+during a synchronous Snek step remains forbidden; primitive list-handle operations
+inside a JavaScript callback are allowed.
 
 ## Initialization, errors and output
 

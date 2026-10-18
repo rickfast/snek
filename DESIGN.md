@@ -89,6 +89,10 @@ Callback elements, optional lists and class handles are not yet part of this bou
 Async callback signatures use `Coroutine[None, None, T]`. Imported callback frames
 reuse the async host protocol and exported callback frames reuse the async export
 driver, including per-invocation pending results and exception translation.
+Callback parameters/results can use supported list types. Signature decoding
+tracks bracket depth, and list metadata includes types reachable only through a
+callback signature. Both directions use the same list identity maps and ownership
+checks; async callbacks resolve handles through the ordinary host-result protocol.
 Host string returns, like exported string parameters, enable the Unicode tables
 needed for open-world input.
 

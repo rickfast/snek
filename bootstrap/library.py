@@ -34,16 +34,31 @@ def library_target(name: str, entry: str) -> str:
 
 def library_callback_types(ty: str) -> list[str]:
     """Decode the checker's canonical display form; nested boundaries are explicit errors."""
-    end = ty.find("], ")
-    if not ty.startswith("Callable[[") or end < 0 or not ty.endswith("]"):
+    if not ty.startswith("Callable[[") or not ty.endswith("]"):
         raise ValueError("invalid callback signature: " + ty)
-    params = ty[10:end]
-    types: list[str] = params.split(", ") if params != "" else []
+    end = -1
+    depth = 0
+    start = 10
+    types: list[str] = []
+    for i in range(10, len(ty)):
+        char = ty[i]
+        if char == "[": depth += 1
+        elif char == "]":
+            if depth == 0:
+                end = i
+                if i > start: types.append(ty[start:i])
+                break
+            depth -= 1
+        elif char == "," and depth == 0:
+            types.append(ty[start:i])
+            start = i + 2
+    if end < 0 or ty[end:end + 3] != "], ":
+        raise ValueError("invalid callback signature: " + ty)
     types.append(ty[end + 3:-1])
     for i in range(len(types)):
         value = library_callback_result(types[i]) if i == len(types) - 1 else types[i]
-        if "[" in value:
-            raise ValueError("callback signatures cannot contain collections, nested callbacks, or coroutines: " + ty)
+        if "[" in value and not value.startswith("list["):
+            raise ValueError("callback signatures cannot contain unsupported collections, nested callbacks, or coroutines: " + ty)
         if value != "None" or i != len(types) - 1: library_type(value)
     return types
 
@@ -63,7 +78,7 @@ def library_callback_heap(ty: str) -> str:
     parts: list[str] = []
     for value in types:
         inner = library_callback_result(value)
-        part = "none" if inner == "None" else inner.replace(" | None", "?")
+        part = "none" if inner == "None" else inner.replace(" | None", "?").replace("[", "<").replace("]", ">")
         parts.append("coro<" + part + ">" if value.startswith("Coroutine[") else part)
     return "$callable<" + "~".join(parts[:-1]) + ":" + parts[-1] + ">"
 
@@ -96,12 +111,17 @@ def library_list_heap(ty: str) -> str:
 
 def library_lists(exports: list[LibraryExport], hosts: list[LibraryExport]) -> list[str]:
     lists: list[str] = []
+    types: list[str] = []
     for item in exports + hosts:
         for ty in item.params + [item.ret]:
-            while ty.startswith("list[") and ty not in lists:
-                elem = library_list_element(ty)
-                lists.append(ty)
-                ty = elem
+            if ty.startswith("Callable["):
+                for value in library_callback_types(ty): types.append(library_callback_result(value))
+            else: types.append(ty)
+    for ty in types:
+        while ty.startswith("list[") and ty not in lists:
+            elem = library_list_element(ty)
+            lists.append(ty)
+            ty = elem
     return lists
 
 
@@ -205,7 +225,7 @@ def library_callback_code(callbacks: list[str], offset: i32) -> str:
         ret = library_callback_result(types[-1])
         async_heap = ""
         if types[-1].startswith("Coroutine["):
-            async_heap = "$coro<" + ("none" if ret == "None" else ret.replace(" | None", "?")) + ">"
+            async_heap = "$coro<" + ("none" if ret == "None" else ret.replace(" | None", "?").replace("[", "<").replace("]", ">")) + ">"
         heap = library_callback_heap(ty)
         prefix = "$__snek_callback_" + str(i)
         env = prefix + ".env"
