@@ -101,7 +101,7 @@ From the repository root, using the development compiler:
 
 ```sh
 mkdir -p examples/vite/src/generated
-python -m snekc build examples/vite/program.py --no-opt --library --export greet --export twice --export load --export identity -o examples/vite/src/generated/program.wasm
+python -m snekc build examples/vite/program.py --no-opt --library --export greet --export twice --export load --export identity --export apply --export make_greeter --export notify -o examples/vite/src/generated/program.wasm
 cd examples/vite
 npm ci
 npm run dev
@@ -171,4 +171,5 @@ The first-class browser milestone is complete:
   tested Vite/TypeScript bundling, and an [interactive documentation playground](../learn/playground.md)
   that compiles and runs programs locally in a worker.
 - Implemented separately: opaque, GC-managed `HostObject` references.
-- Later: typed callbacks crossing the boundary and task concurrency.
+- Typed synchronous callbacks cross the boundary in either direction, including closures and deferred event handlers. See [typed callbacks](libraries.md#typed-callbacks).
+- Later: task concurrency.

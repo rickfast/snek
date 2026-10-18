@@ -117,6 +117,13 @@ class CallableT(Type):
         return f"Callable[[{', '.join(map(str, self.params))}], {self.ret}]"
 
 
+def host_boundary(t: Type) -> bool:
+    leaf = (I32, I64, F32, F64, BOOL, STR, HOST_OBJECT, OptionalT(HOST_OBJECT))
+    if isinstance(t, CallableT):
+        return all(p in leaf for p in t.params) and t.ret in (*leaf, NONE)
+    return t in (*leaf, NONE)
+
+
 @dataclass(frozen=True)
 class CellT(Type):
     """Compiler-only shared lexical binding; the payload remains unboxed."""

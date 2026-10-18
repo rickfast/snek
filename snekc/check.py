@@ -43,6 +43,7 @@ from .types import (
     NUMERIC,
     STR,
     HOST_OBJECT,
+    host_boundary,
     StreamT,
     TRACEBACK,
     TypeT,
@@ -679,10 +680,10 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
         else:
             ret = self.resolve_type(node.returns)
         if host:
-            if any(t not in (I32, I64, F32, F64, BOOL, STR, HOST_OBJECT, OptionalT(HOST_OBJECT)) for _, t in params):
-                raise CompileError("host boundaries support only scalar, string, and HostObject parameters", node)
-            if ret not in (I32, I64, F32, F64, BOOL, STR, NONE, HOST_OBJECT, OptionalT(HOST_OBJECT)):
-                raise CompileError("host boundaries support only scalar, string, HostObject, and None returns", node)
+            if any(not host_boundary(t) for _, t in params):
+                raise CompileError("host boundaries require scalar, string, HostObject, or supported Callable parameters", node)
+            if not host_boundary(ret):
+                raise CompileError("host boundaries require scalar, string, HostObject, supported Callable, or None returns", node)
         yields = any(isinstance(n, (ast.Yield, ast.YieldFrom)) for n in scope_walk(body_nodes(node)))
         if isinstance(node, ast.AsyncFunctionDef):
             if yields:

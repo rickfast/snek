@@ -1,4 +1,5 @@
 from snek import HostObject, host, i64
+from typing import Callable
 
 
 @host("fetch_text")
@@ -20,3 +21,15 @@ async def load(url: str) -> str:
 
 def identity(value: HostObject) -> HostObject:
     return value
+
+
+def apply(fn: Callable[[str], str], text: str) -> str:
+    return fn(text)
+
+
+def make_greeter() -> Callable[[str], str]:
+    return greet
+
+
+def notify(fn: Callable[[str], None], text: str) -> None:
+    fn(text)

@@ -10,7 +10,7 @@ from bootstrap.emit_support import EmitUnicode
 from bootstrap.emit_runtime import emit_collection_helpers, emit_keyed_builtin, emit_byte_io
 from bootstrap.emit_host import emit_host_helpers, emit_host_core_imports, emit_io_helpers, emit_component_imports
 from bootstrap.emit_suspension import OwnedMachine, owned_has_await, owned_machine_types, owned_machine_helpers, owned_runtime_machines, owned_runtime_machine
-from bootstrap.library import LibraryExport, library_target, library_code, library_host_imports, library_host_wrapper
+from bootstrap.library import LibraryExport, library_target, library_code, library_host_imports, library_host_wrapper, library_callbacks, library_callback_imports
 
 
 def emit_closures(e: SourceEmitter) -> str:
@@ -144,7 +144,10 @@ def emit_source_module(checked: BodyChecker, prelude_source: str, component: boo
             if exports is None or len(exports) == 0 or component:
                 raise ValueError("host imports require a --library build")
             params: list[str] = []
-            for param in f.sig.params: params.append(param.ty.display())
+            for param in f.sig.params:
+                params.append(param.ty.display())
+                e.types.valtype(param.ty)
+            if f.sig.ret.kind != "None": e.types.valtype(f.sig.ret)
             async_host = f.sig.ret.kind == "Coroutine"
             item = LibraryExport(f.sig.host, f.name, params, f.sig.ret.args[0].display() if async_host else f.sig.ret.display(), e.types.heap(f.sig.ret) if async_host else "")
             funcs.append(library_host_wrapper(item, len(host_functions)))
@@ -222,6 +225,9 @@ def emit_source_module(checked: BodyChecker, prelude_source: str, component: boo
                     break
             if not found: raise ValueError("library export must name a function defined in the entry module: " + name)
         library = library_code(selected, host_functions)
+        callbacks = library_callbacks(selected, host_functions)
+        imports += "\n" + library_callback_imports(callbacks, len(host_functions))
+        if len(callbacks) > 0: unicode_dynamic = True
         start = start.replace('(export "_start")', '(export "__snek_init")')
     # Host strings are open-world input, even when every source literal is ASCII.
     unicode.build(e.literals.texts, checked.unicode_flags, checked.unicode_cases, checked.unicode_decimal, unicode_dynamic, checked.unicode_extra)

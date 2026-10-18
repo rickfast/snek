@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from snekc import driver
 from check_library import SOURCE, EXPORTS, HOST_SOURCE, HOST_EXPORTS, ASYNC_SOURCE, ASYNC_EXPORTS
-from check_library import OBJECT_SOURCE, OBJECT_EXPORTS
+from check_library import OBJECT_SOURCE, OBJECT_EXPORTS, CALLBACK_SOURCE, CALLBACK_EXPORTS
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -49,6 +49,10 @@ class BrowserTests(unittest.TestCase):
                          compiler=compiler, library=True, exports=OBJECT_EXPORTS)
         driver.build(ROOT / "examples/library/greetings.py", root / "greetings.wasm", optimize=False,
                      compiler=compiler, library=True, exports=["greet", "add", "twice"])
+        source.write_text(CALLBACK_SOURCE)
+        for name, optimize in (("callbacks", False), ("callbacks-optimized", True)):
+            driver.build(source, root / (name + ".wasm"), optimize=optimize,
+                         compiler=compiler, library=True, exports=CALLBACK_EXPORTS)
         shutil.copyfile(ROOT / "examples/library/worker.mjs", root / "worker.mjs")
         driver.build(ROOT / "examples/library/host_demo.py", root / "host_demo.wasm", optimize=False,
                      compiler=compiler, library=True, exports=["increment"])
@@ -173,6 +177,37 @@ class BrowserTests(unittest.TestCase):
                   return values;
                 }''', target)
                 self.assertEqual(result, [True, True, "DOM from Snek 🐍", None, None, True, False, True, True, True, None])
+
+    def test_typed_callbacks_and_deferred_dom_events(self):
+        for target in ("callbacks", "callbacks-optimized"):
+            with self.subTest(target=target):
+                result = self.page.evaluate('''async target => {
+                  const {instantiate} = await import(`./${target}.js`);
+                  const button = document.createElement("button");
+                  document.body.append(button);
+                  let output = "";
+                  const supplied = text => text + "🐍";
+                  const lib = await instantiate(`./${target}.wasm`, {stdout: text => output += text, imports: {
+                    store: callback => button.addEventListener("click", () => callback("Straße")),
+                    get_callback: () => supplied, get_async_callback: async () => supplied
+                  }});
+                  lib.install("event: ");
+                  button.click();
+                  const closure = lib.make("prefix: "), count = lib.counter(40);
+                  const values = [output, lib.apply(supplied, "中"), lib.echo(supplied) === supplied,
+                    lib.echo(closure) === closure, closure("Straße"), count(), count(),
+                    await lib.deferred(supplied, "中"), (await lib.deferred_make("async: "))("Straße"),
+                    lib.object_callback()(button) === button];
+                  let error;
+                  try {lib.apply(async text => text, "bad");} catch (e) {error = e.message;}
+                  values.push(error, closure("ok"));
+                  button.remove();
+                  return values;
+                }''', target)
+                self.assertEqual(result[:-2], ["event: Straße\n", "中🐍", True, True,
+                    "prefix: STRASSE", 41, 42, "中🐍", "async: STRASSE", True])
+                self.assertIn("must be synchronous", result[-2])
+                self.assertEqual(result[-1], "prefix: OK")
 
     def test_async_host_imports(self):
         for target in ("async", "async-optimized"):

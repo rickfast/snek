@@ -31,6 +31,16 @@ declare const library: SnekLibrary;
 const result: Promise<string> = library.load("url");
 const exact: bigint = library.twice(1n);
 const opaque: object = library.identity(document.body);
+const greeting: string = library.apply(library.make_greeter(), "typed");
+library.notify(text => { console.log(text); }, "typed");
+// @ts-expect-error callbacks must return their declared value
+library.apply(text => 42, "typed");
+// @ts-expect-error callback parameters are typed
+library.apply((value: number) => String(value), "typed");
+// @ts-expect-error callbacks are synchronous
+library.apply(async text => text, "typed");
+// @ts-expect-error None callbacks cannot return a Promise
+library.notify(async text => { console.log(text); }, "typed");
 // @ts-expect-error HostObject rejects primitive values
 library.identity(42);
 // @ts-expect-error i64 is bigint, not number
@@ -73,7 +83,7 @@ class BundlerTests(unittest.TestCase):
     def compile(self, optimize):
         driver.build(self.root / "program.py", self.root / "src/generated/program.wasm",
                      optimize=optimize, compiler=self.compiler, library=True,
-                     exports=["greet", "twice", "load", "identity"])
+                     exports=["greet", "twice", "load", "identity", "apply", "make_greeter", "notify"])
         self.run_node("node_modules/typescript/bin/tsc", "--noEmit")
 
     def run_node(self, *args):

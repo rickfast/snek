@@ -178,6 +178,15 @@ class DeclType:
     def reference(self) -> bool:
         return self.kind not in ("i32", "i64", "f32", "f64", "bool", "None")
 
+    def host_boundary(self) -> bool:
+        if self.kind == "Callable":
+            for i in range(len(self.args)):
+                arg = self.args[i]
+                if arg.kind == "Callable" or (arg.kind == "None" and i != len(self.args) - 1) or not arg.host_boundary():
+                    return False
+            return True
+        return self.kind in ("i32", "i64", "f32", "f64", "bool", "str", "HostObject", "None") or self.display() == "HostObject | None"
+
     def display(self) -> str:
         if self.kind == "Stream":
             return "io." + self.name
@@ -701,10 +710,10 @@ class Declarations:
             sig.ret = self.resolve_type(ret)
         if host != "":
             for param in sig.params:
-                if param.ty.kind not in ("i32", "i64", "f32", "f64", "bool", "str", "HostObject") and param.ty.display() != "HostObject | None":
-                    declaration_error("host boundaries support only scalar, string, and HostObject parameters", node)
-            if sig.ret.kind not in ("i32", "i64", "f32", "f64", "bool", "str", "None", "HostObject") and sig.ret.display() != "HostObject | None":
-                declaration_error("host boundaries support only scalar, string, HostObject, and None returns", node)
+                if not param.ty.host_boundary():
+                    declaration_error("host boundaries require scalar, string, HostObject, or supported Callable parameters", node)
+            if not sig.ret.host_boundary():
+                declaration_error("host boundaries require scalar, string, HostObject, supported Callable, or None returns", node)
         yields = direct_yield(node.get("body"))
         if node.kind == "AsyncFunctionDef":
             if yields:

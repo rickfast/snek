@@ -58,6 +58,7 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
   const outputDecoder = new TextDecoder("utf-8", { ignoreBOM: true });
   const errorDecoder = new TextDecoder("utf-8", { ignoreBOM: true });
   let wasm, busy = false, asyncActive = false, pending = null, errorText = "";
+  const callbackStates = callbackSignatures.map(() => ({toWasm: new WeakMap(), toJS: new WeakMap()}));
   const imports = { wasi_snapshot_preview1: {
     fd_write(fd, iovs, count, written) {
       const view = new DataView(wasm.memory.buffer);
@@ -113,18 +114,23 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
       return lower("str", message);
     },
   };
+  function liftArguments(params, values) {
+    let cursor = 0;
+    return params.map(type => {
+      const value = values[cursor++];
+      if (type === "str") return decoder.decode(new Uint8Array(wasm.memory.buffer, value >>> 0, values[cursor++] >>> 0));
+      return lift(type, value);
+    });
+  }
+  imports.snek_callback = Object.create(null);
+  callbackSignatures.forEach(([, params, result], index) => {
+    imports.snek_callback[index] = (callback, ...values) =>
+      lowerResult("callback", result, Reflect.apply(callback, undefined, liftArguments(params, values)));
+  });
   for (const [name, params, result, isAsync] of hostSignatures) {
-    const argumentsFromWasm = values => {
-      let cursor = 0;
-      return params.map(type => {
-        const value = values[cursor++];
-        if (type === "str") return decoder.decode(new Uint8Array(wasm.memory.buffer, value >>> 0, values[cursor++] >>> 0));
-        return type === "bool" ? Boolean(value) : value;
-      });
-    };
     if (!isAsync) {
       imports.snek_host[name] = (...values) => lowerResult(name, result,
-        Reflect.apply(callbacks[name], undefined, argumentsFromWasm(values)));
+        Reflect.apply(callbacks[name], undefined, liftArguments(params, values)));
       continue;
     }
     imports.snek_host_async[name] = (...values) => {
@@ -133,7 +139,7 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
       const state = {name, result, settled: false, failed: false};
       pending = state;
       try {
-        const value = Reflect.apply(callbacks[name], undefined, argumentsFromWasm(values));
+        const value = Reflect.apply(callbacks[name], undefined, liftArguments(params, values));
         if (value == null || typeof value.then !== "function")
           throw new TypeError(`Async host import ${name} must return a Promise/thenable`);
         state.ready = Promise.resolve(value).then(
@@ -159,7 +165,7 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
   }
   wasm = instance.exports;
   if (!(wasm.memory instanceof WebAssembly.Memory) || !(wasm.__snek_length instanceof WebAssembly.Global) ||
-      ["__snek_init", "__snek_reset", "__snek_alloc", ...signatures.flatMap(([name, , , isAsync]) =>
+      ["__snek_init", "__snek_reset", "__snek_alloc", ...callbackSignatures.flatMap((_, i) => [`__snek_wrap_${i}`, `__snek_call_${i}`]), ...signatures.flatMap(([name, , , isAsync]) =>
         isAsync ? [name, `__snek_step_${name}`, `__snek_result_${name}`, `__snek_drop_${name}`] : [name])]
         .some(name => typeof wasm[name] !== "function"))
     throw new SnekLoadError("Invalid Snek library exports. Use the .wasm and .js files from the same --library build.");
@@ -185,6 +191,18 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
     finally { finish(); }
   }
   function lower(type, value) {
+    const callback = callbackSignatures.findIndex(([signature]) => signature === type);
+    if (callback !== -1) {
+      if (typeof value !== "function") throw new TypeError("expected function for " + type);
+      const state = callbackStates[callback];
+      let wrapped = state.toWasm.get(value);
+      if (!wrapped) {
+        wrapped = wasm[`__snek_wrap_${callback}`](value);
+        state.toWasm.set(value, wrapped);
+        state.toJS.set(wrapped, value);
+      }
+      return [wrapped];
+    }
     if (type === "HostObject" || type === "HostObject | None") {
       if (value === null && type === "HostObject | None") return [null];
       if (value === null || (typeof value !== "object" && typeof value !== "function"))
@@ -225,6 +243,22 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
   enter(() => wasm.__snek_init());
   const api = Object.create(null);
   function lift(result, value) {
+    const callback = callbackSignatures.findIndex(([signature]) => signature === result);
+    if (callback !== -1) {
+      const state = callbackStates[callback];
+      let wrapped = state.toJS.get(value);
+      if (!wrapped) {
+        const [, params, ret] = callbackSignatures[callback];
+        wrapped = (...args) => enter(() => {
+          if (args.length !== params.length) throw new TypeError(`callback expects ${params.length} arguments`);
+          const lowered = params.flatMap((type, i) => lower(type, args[i]));
+          return lift(ret, wasm[`__snek_call_${callback}`](value, ...lowered));
+        });
+        state.toJS.set(value, wrapped);
+        state.toWasm.set(wrapped, value);
+      }
+      return wrapped;
+    }
     if (result === "HostObject" || result === "HostObject | None") return lower(result, value)[0];
     if (result === "str") return decoder.decode(new Uint8Array(wasm.memory.buffer, value >>> 0, wasm.__snek_length.value >>> 0));
     return result === "bool" ? Boolean(value) : value;

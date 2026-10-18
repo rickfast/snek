@@ -120,7 +120,7 @@ must have a matching own function property, including unused declarations. The
 loader snapshots the functions before initialization and calls them without a
 receiver; use an arrow function or `.bind()` for methods that need `this`.
 
-Synchronous callbacks receive copied JavaScript values. Their return types and integer ranges
+Synchronous callbacks receive decoded JavaScript values. Their return types and integer ranges
 are checked, including `undefined` for a `None` return. `None` callbacks use
 `undefined` rather than `void` in TypeScript so async callbacks are not accepted.
 Promises and thenables are rejected at runtime, including for `None` callbacks.
@@ -220,6 +220,7 @@ its instance busy until the host settles it.
 | `str` | `string`, copied as UTF-8 |
 | `HostObject` | `object`, opaque GC-managed JavaScript reference |
 | `HostObject | None` | `object | null` |
+| `Callable[[T, ...], R]` | Typed synchronous function |
 | `None` return | `void` / `undefined` |
 
 The generated `.d.ts` describes an instance's exported methods. Wrappers also
@@ -229,8 +230,9 @@ Float infinities, NaN and signed zero follow Wasm arithmetic. JavaScript strings
 must contain valid Unicode scalar values: lone UTF-16 surrogates are rejected.
 
 Strings are copied into the GC heap before user code runs and copied back for
-JavaScript results. Snek-owned GC objects do not cross the boundary; `HostObject`
-passes a JavaScript-owned external reference without copying it.
+JavaScript results. Snek-owned collections and class instances do not cross the
+boundary; `HostObject` passes a JavaScript-owned external reference without copying
+it, and `Callable` exposes a JavaScript function backed by a GC-managed closure.
 Temporary linear memory is reused after each call, so callers never free values;
 its capacity can remain at the largest call's high-water mark.
 Exported string parameters and host string returns also enable full-Unicode tables for the operations used by the
@@ -297,6 +299,56 @@ collections, provide a DOM API, make an object transferable to another worker,
 or change the one-active-call-per-instance rule. The Vite example passes a DOM
 element through its `identity` export and verifies that it is the same object.
 
+## Typed callbacks
+
+Use `Callable` to pass JavaScript functions to Snek or return Snek functions and
+closures to JavaScript:
+
+```python
+from typing import Callable
+
+def apply(fn: Callable[[str], str], text: str) -> str:
+    return fn(text)
+
+def greeter(prefix: str) -> Callable[[str], str]:
+    def greet(name: str) -> str:
+        return prefix + name
+    return greet
+```
+
+Export `apply` and `greeter`, then call them through the generated bindings:
+
+```javascript
+lib.apply(text => text.toUpperCase(), "hello"); // HELLO
+const greet = lib.greeter("Hello, ");
+greet("browser"); // Hello, browser
+```
+
+Callback arguments and results can be numbers, booleans, strings, `HostObject`,
+or `HostObject | None`; results can also be `None`. Nested callbacks, collections,
+optional callbacks and coroutine-returning callbacks are not supported. Callbacks
+are synchronous: returning a Promise is an error, including for `None` results.
+The generated TypeScript uses `undefined` for a `None` callback result to catch
+accidentally async functions.
+
+Host declarations can accept and return callbacks too. An async host declaration
+or async export may resolve to a synchronous callback. For DOM events, a host
+function can retain a Snek callback and register a JavaScript listener that calls
+it later. Adapt the event to the declared parameter types; a callback does not
+automatically receive browser globals or a `this` receiver.
+
+Closures retain their captures, including shared `nonlocal` state, for as long as
+they are reachable. There is no manual release operation. Remove event listeners
+and other application references when no longer needed. Round trips through the
+same instance and signature preserve function identity. A callback from another
+instance is treated as a JavaScript function owned by that instance.
+
+Calling a Snek callback enters its instance just like an export. It fails if that
+instance is already executing or awaiting a host Promise, so host functions must
+not invoke a received Snek callback inline. Deferred events can invoke it after
+the current call finishes. Exceptions and boundary validation follow the same
+rules as exports and synchronous host imports.
+
 ## Initialization, errors and output
 
 Each `instantiate` creates an independent instance and runs module initialization
@@ -323,7 +375,7 @@ functions appear on the returned, frozen API object.
 ## Current limits
 
 Exports must be entry-module functions with the boundary types above (or coroutines
-returning those types). Collections, Snek classes, other optional types, typed callbacks, generators and raw coroutine objects cannot cross
+returning those types). Collections, Snek classes, other optional types, generators and raw coroutine objects cannot cross
 the boundary. Libraries can use these internally where supported by the language,
 but cannot perform async module initialization or use WASI services such as
 stdin, environment variables, clocks and randomness. Unsupported signatures and

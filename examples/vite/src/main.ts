@@ -12,7 +12,7 @@ const workerResult = document.querySelector<HTMLElement>("#worker-result")!;
 async function start() {
   const library = await instantiate(wasmUrl, { imports });
   if (library.identity(greeting) !== greeting) throw new Error("DOM object identity was lost");
-  greeting.textContent = library.greet("Vite 🐍");
+  greeting.textContent = library.apply(library.make_greeter(), "Vite 🐍");
   document.querySelector("#integer")!.textContent = library.twice(9007199254740993n).toString();
   load.disabled = false;
   load.onclick = async () => {

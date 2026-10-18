@@ -19,6 +19,24 @@ from snekc.wasm import encode
 
 
 class RepeatEmissionTests(unittest.TestCase):
+    def test_callback_types_survive_owned_bridge_and_repeat_emission(self):
+        import json
+        from bootstrap.body_bridge import to_module
+        from snekc.emit_wat import emit_module
+        from check_library import CALLBACK_SOURCE, CALLBACK_EXPORTS
+        owned = check(CALLBACK_SOURCE)
+        before = owned.tree().json()
+        reference = to_module(json.loads(before))
+        prelude = (ROOT / "snekc/prelude.wat").read_text()
+        for build in (lambda: emit_source_module(owned, prelude, exports=CALLBACK_EXPORTS),
+                      lambda: emit_module(reference, exports=CALLBACK_EXPORTS)):
+            wat = build()
+            self.assertIn('(import "snek_callback" "0"', wat)
+            self.assertIn('(export "__snek_wrap_0")', wat)
+            self.assertEqual(build(), wat)
+            self.assertTrue(encode(wat).startswith(b"\0asm"))
+        self.assertEqual(owned.tree().json(), before)
+
     def test_host_object_types_survive_owned_bridge_and_repeat_emission(self):
         import json
         from bootstrap.body_bridge import to_module

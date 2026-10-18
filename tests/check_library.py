@@ -105,6 +105,62 @@ async def optional_async(value: HostObject | None) -> HostObject | None:
 '''
 OBJECT_EXPORTS = ["echo", "optional", "same", "find", "collections", "closure", "hold", "optional_async"]
 
+CALLBACK_SOURCE = '''from snek import host, i32, HostObject, checkpoint
+from typing import Callable
+@host("store")
+def store(callback: Callable[[str], None]) -> None:
+    pass
+@host("get_callback")
+def get_callback() -> Callable[[str], str]:
+    pass
+@host("get_async_callback")
+async def get_async_callback() -> Callable[[str], str]:
+    pass
+def apply(fn: Callable[[str], str], text: str) -> str:
+    return fn(text).upper()
+def echo(fn: Callable[[str], str]) -> Callable[[str], str]:
+    return fn
+def same(a: Callable[[str], str], b: Callable[[str], str]) -> bool:
+    return a is b
+def make(prefix: str) -> Callable[[str], str]:
+    def callback(text: str) -> str:
+        return prefix + text.upper()
+    return callback
+def counter(start: i32) -> Callable[[], i32]:
+    def next() -> i32:
+        nonlocal start
+        start += 1
+        return start
+    return next
+def install(prefix: str) -> None:
+    def event(text: str) -> None:
+        print(prefix + text)
+    store(event)
+def from_host(text: str) -> str:
+    fn = get_callback()
+    return fn(text)
+async def from_async_host(text: str) -> str:
+    fn = await get_async_callback()
+    return fn(text)
+async def deferred(fn: Callable[[str], str], text: str) -> str:
+    await checkpoint()
+    return fn(text)
+async def deferred_make(prefix: str) -> Callable[[str], str]:
+    await checkpoint()
+    return make(prefix)
+def apply_void(fn: Callable[[HostObject | None], None], value: HostObject | None) -> None:
+    fn(value)
+def object_callback() -> Callable[[HostObject | None], HostObject | None]:
+    def echo_object(value: HostObject | None) -> HostObject | None:
+        return value
+    return echo_object
+def failer() -> Callable[[], None]:
+    def fail() -> None:
+        raise ValueError("callback failed")
+    return fail
+'''
+CALLBACK_EXPORTS = ["apply", "echo", "same", "make", "counter", "install", "from_host", "from_async_host", "deferred", "deferred_make", "apply_void", "object_callback", "failer"]
+
 HOST_SOURCE = '''from snek import host, i32, i64, f32, f64
 @host("render")
 def render(value: str) -> None:
@@ -320,6 +376,90 @@ result = a; assert.equal(lib.find("ok"), a);
                 with self.assertRaises((CompileError, ValueError, RuntimeError, driver.ToolError)):
                     self.build(["bad"])
 
+    def test_typed_callbacks_cross_both_directions(self):
+        self.src.write_text(CALLBACK_SOURCE)
+        result = self.build(CALLBACK_EXPORTS)
+        self.assertIn('((arg0: string) => string)', result.dts_path.read_text())
+        self.assertIn('((arg0: string) => undefined)', result.dts_path.read_text())
+        self.node('''
+let saved, output = "", mode = "ok";
+const supplied = value => value + " 🐍";
+const lib = await instantiate(bytes, {stdout: text => output += text, imports: {
+  store: fn => { saved = fn; if (mode === "reenter") fn("immediate"); },
+  get_callback: () => supplied,
+  get_async_callback: async () => supplied
+}});
+assert.equal(lib.apply(value => value + "Straße", "hi "), "HI STRASSE");
+assert.equal(lib.echo(supplied), supplied);
+assert.equal(lib.same(supplied, supplied), true);
+assert.equal(lib.same(supplied, value => value), false);
+const made = lib.make("prefix: ");
+assert.equal(made("Straße 🐍"), "prefix: STRASSE 🐍");
+assert.equal(lib.echo(made), made);
+assert.equal(lib.apply(made, "Straße"), "PREFIX: STRASSE");
+const count = lib.counter(40);
+assert.equal(count(), 41); assert.equal(count(), 42);
+lib.install("event: "); saved("later 🐍");
+assert.equal(output, "event: later 🐍\\n");
+assert.equal(lib.from_host("host"), "host 🐍");
+assert.equal(await lib.from_async_host("async"), "async 🐍");
+assert.equal(await lib.deferred(supplied, "held"), "held 🐍");
+assert.equal((await lib.deferred_make("async: "))("Straße"), "async: STRASSE");
+let seen;
+const object = {};
+lib.apply_void(value => {seen = value;}, object);
+assert.equal(seen, object);
+assert.equal(lib.object_callback()(object), object);
+assert.equal(lib.object_callback()(null), null);
+assert.throws(() => lib.failer()(), error => error instanceof SnekError && error.message.includes("callback failed"));
+assert.throws(() => lib.apply(null, "x"), /expected function/);
+assert.throws(() => made(), /expects 1/);
+assert.throws(() => made(42), /expected string/);
+assert.throws(() => lib.apply(() => 42, "x"), /expected string/);
+assert.throws(() => lib.apply(async () => "x", "x"), /must be synchronous/);
+assert.throws(() => lib.apply_void(async () => {}, null), /must be synchronous/);
+const failure = new Error("JS callback failure");
+assert.throws(() => lib.apply(() => {throw failure;}, "x"), error => error === failure);
+mode = "reenter";
+assert.throws(() => lib.install("bad"), /not reentrant/);
+mode = "ok";
+assert.equal(made("still works"), "prefix: STILL WORKS");
+''')
+
+    def test_callback_scalar_signatures(self):
+        types = ("i32", "i64", "f32", "f64", "bool")
+        self.src.write_text('from snek import i32, i64, f32, f64\nfrom typing import Callable\n' + ''.join(
+            f'def echo_{ty}(fn: Callable[[{ty}], {ty}]) -> Callable[[{ty}], {ty}]:\n    return fn\n'
+            f'def apply_{ty}(fn: Callable[[{ty}], {ty}], value: {ty}) -> {ty}:\n    return fn(value)\n'
+            f'def make_{ty}() -> Callable[[{ty}], {ty}]:\n    def identity(value: {ty}) -> {ty}:\n        return value\n    return identity\n'
+            for ty in types))
+        self.build([prefix + ty for ty in types for prefix in ("echo_", "apply_", "make_")])
+        self.node('''
+const lib = await instantiate(bytes);
+for (const [type, value] of [["i32", -2147483648], ["i64", 9007199254740993n], ["f32", 1.1], ["f64", -0], ["bool", true]]) {
+  const fn = lib[`make_${type}`]();
+  const expected = type === "f32" ? Math.fround(value) : value;
+  assert.ok(Object.is(fn(value), expected));
+  assert.equal(lib[`echo_${type}`](fn), fn);
+  assert.ok(Object.is(lib[`apply_${type}`](value => value, value), expected));
+}
+assert.throws(() => lib.apply_i32(() => 2147483648, 0), RangeError);
+assert.throws(() => lib.apply_i64(() => 1, 0n), TypeError);
+assert.throws(() => lib.apply_bool(() => 1, true), TypeError);
+''')
+
+    def test_unsupported_callback_signatures(self):
+        for signature in ("Callable[[list[str]], str]", "Callable[[str], list[str]]",
+                          "Callable[[Callable[[], str]], str]", "Callable[[], Coroutine[str]]",
+                          "Callable[[None], str]", "Callable[[str], str] | None"):
+            for host in (False, True):
+                with self.subTest(signature=signature, host=host):
+                    self.src.write_text('from snek import host\nfrom typing import Callable, Coroutine\n' +
+                        ('@host("f")\n' if host else '') +
+                        f'def f(fn: {signature}) -> None:\n    pass\n')
+                    with self.assertRaises(Exception):
+                        self.build(["f"])
+
     def test_host_object_modules_and_command_rejection(self):
         from snekc.errors import CompileError
         (self.root / "objects.py").write_text('from snek import HostObject\ndef echo(value: HostObject) -> HostObject:\n    return value\n')
@@ -476,7 +616,7 @@ assert.equal(lib.call("hi"), "hi🐍🐍");
             ('@host("x")\nasync def f() -> None:\n    return\n', "pass body"),
             ('@host("x")\ndef f() -> i32:\n    return 1\n', "pass body"),
             ('@host("x")\ndef f(x: i32 = 0) -> None:\n    pass\n', "default arguments"),
-            ('@host("x")\ndef f(x: list[i32]) -> None:\n    pass\n', "scalar, string, and HostObject"),
+            ('@host("x")\ndef f(x: list[i32]) -> None:\n    pass\n', "host boundaries"),
             ('@host("x")\ndef f() -> str | None:\n    pass\n', "scalar, string"),
             ('def outer() -> None:\n    @host("x")\n    def inner() -> None:\n        pass\n', "top-level"),
             ('@host("same")\ndef a() -> i32:\n    pass\n@host("same")\ndef b() -> str:\n    pass\n', "conflicting signatures"),
