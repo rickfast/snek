@@ -119,8 +119,8 @@ def library_callback_imports(callbacks: list[str], offset: i32) -> str:
         ret = library_callback_result(types[-1])
         result = "" if ret == "None" else " (result " + ("i32 i32" if ret == "str" else library_type(ret)) + ")"
         if types[-1].startswith("Coroutine["):
-            lines.append('(import "snek_callback_async" "' + str(i) + '" (func $__snek_host_' + str(offset + i) + params + '))')
-            lines.append('(import "snek_callback_result" "' + str(i) + '" (func $__snek_result_' + str(offset + i) + result + '))')
+            lines.append('(import "snek_callback_async" "' + str(i) + '" (func $__snek_host_' + str(offset + i) + params + ' (result (ref extern))))')
+            lines.append('(import "snek_callback_result" "' + str(i) + '" (func $__snek_result_' + str(offset + i) + ' (param (ref extern))' + result + '))')
         else:
             lines.append('(import "snek_callback" "' + str(i) + '" (func $__snek_host_' + str(offset + i) + params + result + '))')
     return "\n".join(lines)
@@ -197,8 +197,8 @@ def library_host_imports(hosts: list[LibraryExport], objects: bool = False, asyn
             params += " (param " + ("i32 i32" if ty == "str" else library_type(ty)) + ")"
         result = "" if item.ret == "None" else " (result " + ("i32 i32" if item.ret == "str" else library_type(item.ret)) + ")"
         if item.heap != "":
-            lines.append('(import "snek_host_async" ' + json_string(item.name) + ' (func $__snek_host_' + str(index) + params + '))')
-            lines.append('(import "snek_host_result" ' + json_string(item.name) + ' (func $__snek_result_' + str(index) + result + '))')
+            lines.append('(import "snek_host_async" ' + json_string(item.name) + ' (func $__snek_host_' + str(index) + params + ' (result (ref extern))))')
+            lines.append('(import "snek_host_result" ' + json_string(item.name) + ' (func $__snek_result_' + str(index) + ' (param (ref extern))' + result + '))')
         else:
             lines.append('(import "snek_host" ' + json_string(item.name) + ' (func $__snek_host_' + str(index) + params + result + '))')
     for item in hosts:
@@ -206,8 +206,9 @@ def library_host_imports(hosts: list[LibraryExport], objects: bool = False, asyn
             async_callbacks = True
             break
     if async_callbacks:
-        lines.append('(import "snek_async" "status" (func $__snek_async_status (result i32)))')
-        lines.append('(import "snek_async" "error" (func $__snek_async_error (result i32 i32)))')
+        lines.append('(import "snek_async" "status" (func $__snek_async_status (param (ref extern)) (result i32)))')
+        lines.append('(import "snek_async" "error" (func $__snek_async_error (param (ref extern)) (result i32 i32)))')
+        lines.append('(import "snek_async" "drop" (func $__snek_async_drop (param (ref extern))))')
     return "\n".join(lines)
 
 
@@ -272,27 +273,32 @@ def library_async_host(item: LibraryExport, index: i32) -> str:
             start += " (local.set " + p + "ptr (call $__snek_write " + value + ")) (local.set " + p + "len (global.get $__snek_length))"
             args += " (local.get " + p + "ptr) (local.get " + p + "len)"
         else: args += " " + value
-    start += " (call $__snek_host_" + str(index) + args + ") (global.set $__snek_bump (local.get $mark))"
+    frame = "(ref.cast (ref " + F + ") (local.get $a))"
+    request = "(struct.get " + F + " $request " + frame + ")"
+    clear = "(struct.set " + F + " $request " + frame + " (ref.null extern))"
+    start += " (struct.set " + F + " $request " + frame + " (call $__snek_host_" + str(index) + args + ")) (global.set $__snek_bump (local.get $mark))"
     start += " (struct.set " + B + " $pc (local.get $a) (i32.const 1)) (struct.set " + B + " $busy (local.get $a) (i32.const 0)) (return (i32.const 1))"
     default = "" if item.ret == "None" else " (ref.null $str)" if item.ret == "str" else " (" + library_type(item.ret) + ".const 0)"
     if item.ret in ("HostObject", "HostObject | None"): default = " (ref.null extern)"
     if item.ret.startswith("Callable["): default = " (ref.null " + library_callback_heap(item.ret) + ")"
-    finish = "(struct.set " + B + " $pc (local.get $a) (i32.const -1)) (struct.set " + B + " $busy (local.get $a) (i32.const 0))"
-    take = "(call $__snek_result_" + str(index) + ")"
+    finish = "(struct.set " + B + " $pc (local.get $a) (i32.const -1)) (struct.set " + B + " $busy (local.get $a) (i32.const 0)) " + clear
+    take = "(call $__snek_result_" + str(index) + " (local.get $request))"
     if item.ret == "str":
         take += " (local.set $len) (local.set $ptr)"
         take += " (struct.set " + B + " $value (local.get $a) (call $__snek_read (local.get $ptr) (local.get $len)))"
     elif item.ret != "None":
         take = "(struct.set " + B + " $value (local.get $a) " + take + ")"
-    return ("(type " + F + " (sub final " + B + " (struct " + fields + extra + ")))\n"
+    return ("(type " + F + " (sub final " + B + " (struct " + fields + " (field $request (mut (ref null extern)))" + extra + ")))\n"
             + "(elem declare func " + F + ".step)\n"
-            + "(func $" + item.target + params + " (result (ref " + B + ")) (struct.new " + F + " (i32.const 0) (i32.const 0) (i32.const -1) (i32.const 0) (i32.const 0) (ref.func " + F + ".step)" + default + values + "))\n"
+            + "(func $" + item.target + params + " (result (ref " + B + ")) (struct.new " + F + " (i32.const 0) (i32.const 0) (i32.const -1) (i32.const 0) (i32.const 0) (ref.func " + F + ".step)" + default + " (ref.null extern)" + values + "))\n"
             + "(func " + F + ".step (type " + B + ".sig) (param $a (ref " + B + ")) (param $error (ref null $BaseException)) (result i32)"
-            + " (local $mark i32) (local $ptr i32) (local $len i32) (local $message (ref $str))" + locals
-            + " (if (i32.eqz (ref.is_null (local.get $error))) (then " + finish + " (throw $snek.exc (ref.as_non_null (local.get $error)))))"
+            + " (local $mark i32) (local $ptr i32) (local $len i32) (local $status i32) (local $request (ref extern)) (local $message (ref $str))" + locals
+            + " (if (i32.eqz (ref.is_null (local.get $error))) (then (if (i32.eqz (ref.is_null " + request + ")) (then (call $__snek_async_drop (ref.as_non_null " + request + ")))) " + finish + " (throw $snek.exc (ref.as_non_null (local.get $error)))))"
             + " (if (i32.eqz (struct.get " + B + " $pc (local.get $a))) (then " + start + ")) "
-            + finish + " (local.set $mark (global.get $__snek_bump))"
-            + " (if (i32.lt_s (call $__snek_async_status) (i32.const 0)) (then (call $__snek_async_error) (local.set $len) (local.set $ptr)"
+            + " (local.set $request (ref.as_non_null " + request + ")) (local.set $mark (global.get $__snek_bump))"
+            + " (local.set $status (call $__snek_async_status (local.get $request)))"
+            + " (if (i32.eqz (local.get $status)) (then (struct.set " + B + " $busy (local.get $a) (i32.const 0)) (return (i32.const 1)))) " + finish
+            + " (if (i32.lt_s (local.get $status) (i32.const 0)) (then (call $__snek_async_error (local.get $request)) (local.set $len) (local.set $ptr)"
             + " (local.set $message (call $__snek_read (local.get $ptr) (local.get $len))) (global.set $__snek_bump (local.get $mark))"
             + " (throw $snek.exc (call $RuntimeError.__new__ (local.get $message))))) "
             + take + " (global.set $__snek_bump (local.get $mark)) (i32.const 0))")

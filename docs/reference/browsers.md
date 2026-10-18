@@ -173,4 +173,5 @@ The first-class browser milestone is complete:
 - Implemented separately: opaque, GC-managed `HostObject` references.
 - Typed synchronous and async callbacks cross the boundary in either direction, including closures and deferred event handlers. See [typed callbacks](libraries.md#typed-callbacks).
 - Concurrent JavaScript-driven async calls share one instance with isolated frames and host results. See [concurrent calls](libraries.md#concurrent-calls).
-- Later: Snek-side task spawning and cancellation.
+- Snek-side [structured concurrency](libraries.md#structured-concurrency-with-wait_all) starts and unwinds sibling coroutines through `wait_all`.
+- Later: result-collecting task groups, detached spawning and public cancellation.

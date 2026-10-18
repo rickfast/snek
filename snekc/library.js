@@ -57,7 +57,7 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
   const decoder = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
   const outputDecoder = new TextDecoder("utf-8", { ignoreBOM: true });
   const errorDecoder = new TextDecoder("utf-8", { ignoreBOM: true });
-  let wasm, busy = false, asyncActive = false, pending = null, errorText = "";
+  let wasm, busy = false, activeTask = null, errorText = "";
   const callbackStates = callbackSignatures.map(() => ({toWasm: new WeakMap(), toJS: new WeakMap()}));
   const imports = { wasi_snapshot_preview1: {
     fd_write(fd, iovs, count, written) {
@@ -95,24 +95,26 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
     return result === "str" ? lowered : lowered[0];
   }
   imports.snek_async = {
-    status() {
-      if (!pending?.settled)
-        throw new Error("Cannot synchronously run an async host import; use await in an async export, not run()");
+    status(pending) {
+      if (!activeTask?.requests.has(pending)) throw new Error("Invalid async host request state");
+      if (!pending.settled) return 0;
       if (!pending.failed) {
         try { pending.lowered = lowerResult(pending.name, pending.result, pending.value); }
         catch (error) { pending.failed = true; pending.error = error; }
       }
       return pending.failed ? -1 : 1;
     },
-    error() {
+    error(pending) {
+      if (!activeTask?.requests.has(pending)) throw new Error("Invalid async host request state");
       let message;
       try { message = String(pending.error instanceof Error ? pending.error.message : pending.error); }
       catch { message = "JavaScript callback failed"; }
       // Even arbitrary rejection values must yield a valid Snek string.
       message = decoder.decode(encoder.encode(`Host import ${pending.name}: ${message}`));
-      pending = null;
+      activeTask.requests.delete(pending);
       return lower("str", message);
     },
+    drop(pending) { activeTask?.requests.delete(pending); },
   };
   function liftArguments(params, values) {
     let cursor = 0;
@@ -129,17 +131,16 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
     if (isAsync) {
       const name = `callback ${index}`;
       imports.snek_callback_async[index] = (callback, ...values) => startAsync(name, params, result, callback, values);
-      imports.snek_callback_result[index] = () => takeAsync(name);
+      imports.snek_callback_result[index] = pending => takeAsync(name, pending);
     } else {
       imports.snek_callback[index] = (callback, ...values) =>
         lowerResult("callback", result, Reflect.apply(callback, undefined, liftArguments(params, values)));
     }
   });
   function startAsync(name, params, result, callback, values) {
-    if (!asyncActive) throw new Error("Async host imports require an async export; use await, not run()");
-    if (pending) throw new Error("An async host import is already pending");
+    if (!activeTask) throw new Error("Async host imports require an async export; use await, not run()");
     const state = {name, result, settled: false, failed: false};
-    pending = state;
+    activeTask.requests.add(state);
     try {
       const value = Reflect.apply(callback, undefined, liftArguments(params, values));
       if (value == null || typeof value.then !== "function")
@@ -151,12 +152,13 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
       state.error = error; state.failed = true; state.settled = true;
       state.ready = Promise.resolve();
     }
+    return state;
   }
-  function takeAsync(name) {
-    if (!pending || pending.name !== name || !pending.settled || pending.failed)
+  function takeAsync(name, pending) {
+    if (!activeTask?.requests.has(pending) || pending.name !== name || !pending.settled || pending.failed)
       throw new Error("Invalid async host result state");
     const value = pending.lowered;
-    pending = null;
+    activeTask.requests.delete(pending);
     return value;
   }
   for (const [name, params, result, isAsync] of hostSignatures) {
@@ -166,7 +168,7 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
       continue;
     }
     imports.snek_host_async[name] = (...values) => startAsync(name, params, result, callbacks[name], values);
-    imports.snek_host_result[name] = () => takeAsync(name);
+    imports.snek_host_result[name] = pending => takeAsync(name, pending);
   }
   let instance;
   try { instance = await WebAssembly.instantiate(module, imports); }
@@ -174,24 +176,23 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
     throw new SnekLoadError("Unable to instantiate Snek library. Use the .wasm and .js files from the same --library build.", { cause });
   }
   wasm = instance.exports;
-  if (!(wasm.memory instanceof WebAssembly.Memory) || !(wasm.__snek_length instanceof WebAssembly.Global) ||
+  if (wasm.__snek_abi?.value !== 2 || !(wasm.__snek_yielded instanceof WebAssembly.Global) || !(wasm.memory instanceof WebAssembly.Memory) || !(wasm.__snek_length instanceof WebAssembly.Global) ||
       ["__snek_init", "__snek_reset", "__snek_alloc", ...callbackSignatures.flatMap(([, , , isAsync], i) =>
         [`__snek_wrap_${i}`, `__snek_call_${i}`, ...(isAsync ? [`__snek_step___snek_callback_${i}`, `__snek_result___snek_callback_${i}`] : [])]), ...signatures.flatMap(([name, , , isAsync]) =>
         isAsync ? [name, `__snek_step_${name}`, `__snek_result_${name}`] : [name])]
         .some(name => typeof wasm[name] !== "function"))
     throw new SnekLoadError("Invalid Snek library exports. Use the .wasm and .js files from the same --library build.");
-  function begin(isAsync = false) {
+  function begin(task = null) {
     if (busy) throw new Error("Snek library calls are not reentrant");
     busy = true;
-    asyncActive = isAsync;
+    activeTask = task;
     errorText = "";
     wasm.__snek_reset();
   }
   function finish() {
     wasm.__snek_reset();
     busy = false;
-    asyncActive = false;
-    pending = null;
+    activeTask = null;
     // Reset incremental decoders even when a host callback throws.
     outputDecoder.decode();
     errorDecoder.decode();
@@ -204,11 +205,10 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
   // Only synchronous execution owns the instance. Each suspended invocation
   // retains its own GC frame and pending host result, never borrowed memory.
   function enterTask(task, action) {
-    begin(true);
-    pending = task.pending;
+    begin(task);
     try { return action(); }
     finally {
-      task.pending = pending;
+      task.runnable = Boolean(wasm.__snek_yielded.value);
       finish();
     }
   }
@@ -288,18 +288,18 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
     return result === "bool" ? Boolean(value) : value;
   }
   async function runAsync(name, result, create) {
-    const task = {pending: null};
+    const task = {requests: new Set()};
     let frame;
     try {
       frame = enterTask(task, create);
       while (enterTask(task, () => wasm[`__snek_step_${name}`](frame))) {
-        if (task.pending) await task.pending.ready;
+        if (task.requests.size && !task.runnable) await Promise.race([...task.requests].map(request => request.ready));
         else await new Promise(resolve => setTimeout(resolve, 0)); // cooperative checkpoint
       }
       return enterTask(task, () => lift(result, wasm[`__snek_result_${name}`](frame)));
     } finally {
       frame = null;
-      task.pending = null;
+      task.requests.clear();
     }
   }
   for (const [name, params, result, isAsync] of signatures) {

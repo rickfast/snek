@@ -124,6 +124,8 @@ def machine_frame_wat(request: Node) -> str:
             code += f"(if {cond} (then {machine_setpc(next_)}) (else {machine_setpc(other)})) (br $sm.dispatch)"
         elif kind == "yield" or kind == "await":
             resume = next_
+            if kind == "yield" and not machine_flag(machine, "generator"):
+                code += "(global.set $sm.yielded (i32.const 1)) "
             if kind == "await":
                 child_type = state.get("child_type")
                 C = child_type.get("heap").text

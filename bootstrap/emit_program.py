@@ -63,6 +63,7 @@ class SourceEmitter:
     byte_io: bool
     component: bool
     frames: list[Node]
+    wait_groups: dict[str, list[str]]
 
     def __init__(self, checked: BodyChecker, component: bool = False) -> None:
         self.checked = checked
@@ -86,6 +87,7 @@ class SourceEmitter:
         self.byte_io = False
         self.component = component
         self.frames = []
+        self.wait_groups = {}
 
     def temp(self, ty: str) -> str:
         name = "$e." + str(len(self.temps))
@@ -271,6 +273,17 @@ class SourceEmitter:
         if kind == "IsInstance": return "(ref.test (ref $" + text + ") " + self.ex(args[0]) + ")"
         if kind == "IfExpr": return f"(if (result {self.types.valtype(ty)}) {self.ex(args[0])} (then {self.ex(args[1])}) (else {self.ex(args[2])}))"
         if kind == "Call":
+            if text == "snek.wait_all":
+                if self.component: raise ValueError("wait_all() is not yet supported for components")
+                wait_heaps: list[str] = []
+                wait_parts: list[str] = []
+                for arg in args:
+                    wait_heap = self.types.heap(arg.ty)
+                    wait_heaps.append(wait_heap)
+                    wait_parts.append(wait_heap[1:])
+                name = "$snek.wait_all<" + "~".join(wait_parts) + ">"
+                self.wait_groups[name] = wait_heaps
+                return self.call(name, args)
             if text.startswith("snek.lib."):
                 operations = abi_library_operations()
                 feature = operations[text[9:]]

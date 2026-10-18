@@ -218,12 +218,54 @@ shared captured state can change across an `await`. Synchronous re-entry from a
 host function or stdout handler is still rejected. Scratch memory is reset between
 steps; no borrowed string buffers survive suspension.
 
-Async module initialization, task spawning, and a Snek cancellation API are not
+Async module initialization, detached task spawning, and a public cancellation API are not
 supported. `run()` is a command entry mechanism, not a way to block JavaScript
 waiting for a Promise. Start library coroutines through an async export. The
 application can own an `AbortController` inside its host implementation; a rejected
 fetch then follows normal Snek error/cleanup handling. An unsettled Promise retains
 its invocation's frame until the host settles it, but does not block other calls.
+
+### Structured concurrency with `wait_all`
+
+Snek can start sibling coroutines within one invocation:
+
+```python
+from snek import host, wait_all
+
+@host("fetch_and_render")
+async def fetch_and_render(url: str) -> None:
+    pass
+
+async def load_both() -> None:
+    await wait_all(fetch_and_render("./first.txt"), fetch_and_render("./second.txt"))
+```
+
+`wait_all` takes one or more distinct, unawaited coroutines. Calling it creates a
+coroutine; awaiting it claims and starts the children. Children run cooperatively
+in argument order and may finish in any order. Their return values are discarded,
+and the group returns `None` after every child finishes. Nested groups and async
+callbacks work too. Duplicate or already-awaited coroutines raise `RuntimeError`
+before any child starts.
+
+On the first child failure, unfinished siblings are unwound with `GeneratorExit`.
+Their `finally` blocks may await cleanup; the group waits for that cleanup before
+re-raising the failure that escaped the first failing child. Sibling cleanup
+failures do not replace it; a child's own `finally` still follows normal exception
+replacement rules. Use
+`finally` for cleanup rather than catching and suppressing cancellation. A child
+that never yields can block the whole instance, and cleanup that never finishes
+keeps the group pending.
+
+Unwinding a host wait detaches its result, but does not abort the underlying
+JavaScript operation. Late resolutions/rejections are handled and ignored. Use
+an application-owned `AbortController` in your cleanup host function when the
+operation itself needs to be stopped.
+
+This first structured-concurrency API supports core commands and JavaScript
+libraries. Core WASI I/O remains blocking; actual overlapping host I/O requires
+the library target. Component builds reject `wait_all` until their host-service
+state supports multiple pending operations. The CPython shim uses asyncio tasks
+and asyncio cancellation for sibling cleanup.
 
 ## Boundary types
 

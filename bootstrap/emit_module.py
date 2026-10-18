@@ -10,6 +10,7 @@ from bootstrap.emit_support import EmitUnicode
 from bootstrap.emit_runtime import emit_collection_helpers, emit_keyed_builtin, emit_byte_io
 from bootstrap.emit_host import emit_host_helpers, emit_host_core_imports, emit_io_helpers, emit_component_imports
 from bootstrap.emit_suspension import OwnedMachine, owned_has_await, owned_machine_types, owned_machine_helpers, owned_runtime_machines, owned_runtime_machine
+from bootstrap.tasks import wait_all_code
 from bootstrap.library import LibraryExport, library_target, library_code, library_host_imports, library_host_wrapper, library_callbacks, library_callback_imports, library_callback_async
 
 
@@ -184,6 +185,8 @@ def emit_source_module(checked: BodyChecker, prelude_source: str, component: boo
         component_runtime += e.literals.expand(emit_input_source()) if "stream_read" in e.io else '(func $io.input-pump (param i32 i32 i32) (result i32) (i32.const 0))\n(func $io.input-close)'
     collections = emit_collection_helpers(e)
     protocols = emit_protocols(e)
+    for name in e.wait_groups:
+        funcs.append(wait_all_code(name, e.wait_groups[name], e.literals.lit("wait_all() requires distinct, unawaited coroutines")))
     builders = emit_builders(e)
     machines = owned_machine_helpers(e)
     literals = e.literals.functions()

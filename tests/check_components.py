@@ -12,7 +12,7 @@ from pathlib import Path
 
 from run_tests import ROOT, check_example
 
-from snekc import driver
+from snekc import CompileError, driver
 
 
 def main():
@@ -36,7 +36,17 @@ def main():
         for src in sorted((ROOT / "examples").glob("*.py")):
             if ns.k not in src.stem:
                 continue
-            problems = check_example(src, Path(d))
+            first = src.read_text().splitlines()[0]
+            if first.startswith("# component-error: "):
+                expected = first.removeprefix("# component-error: ")
+                try:
+                    driver.build(src, Path(d) / (src.stem + ".wasm"), optimize=False)
+                except (CompileError, ValueError, RuntimeError) as error:
+                    problems = [] if expected in str(error) else [f"wrong component rejection: {error}"]
+                else:
+                    problems = ["unsupported component program compiled without error"]
+            else:
+                problems = check_example(src, Path(d))
             if problems:
                 failed += 1
                 print("FAIL", src.stem, "\n" + "\n".join(problems))

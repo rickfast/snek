@@ -12,6 +12,7 @@
   ;;   [8, 12)       nwritten out-param
   ;;   [1024, 65536) stdout buffer, also used as stderr scratch
   ;; ======================================================================
+  (global $sm.yielded (mut i32) (i32.const 0))
 
   (global $rt.out_len (mut i32) (i32.const 0))
 

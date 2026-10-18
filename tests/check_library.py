@@ -195,6 +195,58 @@ def object_callback() -> Callable[[HostObject | None], Coroutine[None, None, Hos
 '''
 ASYNC_CALLBACK_EXPORTS = ["apply", "echo", "make", "recover", "failer", "apply_void", "object_callback"]
 
+WAIT_ALL_SOURCE = '''from snek import host, checkpoint, wait_all
+from typing import Callable, Coroutine
+@host("read")
+async def read(name: str) -> str:
+    pass
+@host("cleanup")
+async def cleanup(name: str) -> None:
+    pass
+@host("report")
+def report(text: str) -> None:
+    pass
+async def child(name: str) -> str:
+    try:
+        value = await read(name)
+        report(name + ":" + value)
+        return value
+    finally:
+        await cleanup(name)
+        report("done:" + name)
+async def pair() -> str:
+    await wait_all(child("a"), child("b"))
+    return "finished"
+async def breaker() -> None:
+    await checkpoint()
+    await checkpoint()
+    raise ValueError("first failure")
+async def failfast() -> None:
+    await wait_all(child("blocked"), breaker())
+async def nested() -> None:
+    await wait_all(child("outer"), failfast())
+async def duplicate() -> str:
+    value = child("reuse")
+    try:
+        await wait_all(value, value)
+    except RuntimeError:
+        return await value
+    return "unexpected"
+async def reused() -> str:
+    value = child("used")
+    await value
+    try:
+        await wait_all(value)
+    except RuntimeError as error:
+        return str(error)
+    return "unexpected"
+async def invoke(fn: Callable[[str], Coroutine[None, None, str]], name: str) -> None:
+    report(await fn(name))
+async def callbacks(fn: Callable[[str], Coroutine[None, None, str]]) -> None:
+    await wait_all(invoke(fn, "one"), invoke(fn, "two"))
+'''
+WAIT_ALL_EXPORTS = ["pair", "failfast", "nested", "duplicate", "reused", "callbacks"]
+
 HOST_SOURCE = '''from snek import host, i32, i64, f32, f64
 @host("render")
 def render(value: str) -> None:
@@ -969,6 +1021,81 @@ assert.equal(closures[1]("b"), "two: B");
 resolve(text => text + "!");
 assert.equal(await waiting, "held!");
 assert.equal(count(), 2);
+''')
+
+    def test_wait_all_host_requests_and_cleanup(self):
+        self.src.write_text(WAIT_ALL_SOURCE)
+        self.build(WAIT_ALL_EXPORTS)
+        self.node('''
+const reads = new Map(), cleanups = new Map(), events = [];
+let immediate = false, cleanupFails = false;
+const lib = await instantiate(bytes, {imports: {
+  read: name => immediate ? Promise.resolve(name) : new Promise((resolve, reject) => reads.set(name, {resolve, reject})),
+  cleanup: name => {
+    events.push("cleanup:" + name);
+    if (cleanupFails) return name === "b" ? Promise.resolve() : Promise.reject(new Error("cleanup failure"));
+    return immediate ? Promise.resolve() : new Promise(resolve => cleanups.set(name, resolve));
+  }, report: text => {events.push(text);}
+}});
+const pair = lib.pair();
+assert.deepEqual([...reads.keys()], ["a", "b"]);
+reads.get("b").resolve("🐍".repeat(10000));
+await new Promise(resolve => setTimeout(resolve, 0));
+assert.ok(cleanups.has("b"));
+cleanups.get("b")();
+reads.get("a").resolve("Straße");
+await new Promise(resolve => setTimeout(resolve, 0));
+cleanups.get("a")();
+assert.equal(await pair, "finished");
+assert.ok(events.indexOf("done:b") < events.indexOf("done:a"));
+cleanupFails = true;
+const hostFailure = lib.pair();
+const hostRejected = assert.rejects(hostFailure, /host failure/);
+reads.get("b").reject(new Error("host failure"));
+await hostRejected;
+cleanupFails = false;
+events.length = 0; reads.clear(); cleanups.clear();
+let settled = false;
+const failure = lib.failfast();
+const rejected = assert.rejects(failure, /ValueError: first failure/).then(() => {settled = true;});
+// Checkpoints must progress even though another child has an unresolved host request.
+for (let i = 0; i < 30 && !cleanups.has("blocked"); i++) await new Promise(resolve => setTimeout(resolve, 2));
+assert.ok(cleanups.has("blocked"));
+assert.equal(settled, false); // awaited cleanup must finish before failure escapes
+cleanups.get("blocked")();
+await rejected;
+assert.deepEqual(events, ["cleanup:blocked", "done:blocked"]);
+reads.get("blocked").reject(new Error("late rejection is handled"));
+immediate = true;
+assert.equal(await lib.duplicate(), "reuse");
+assert.match(await lib.reused(), /distinct, unawaited/);
+immediate = false; cleanupFails = true;
+await assert.rejects(lib.nested(), /ValueError: first failure/);
+assert.ok(events.includes("cleanup:outer"));
+immediate = true; cleanupFails = false;
+assert.equal(await lib.pair(), "finished");
+const callbackRequests = new Map();
+const callbacks = lib.callbacks(name => new Promise(resolve => callbackRequests.set(name, resolve)));
+assert.deepEqual([...callbackRequests.keys()], ["one", "two"]);
+callbackRequests.get("two")("second"); callbackRequests.get("one")("first");
+await callbacks;
+assert.ok(events.includes("first") && events.includes("second"));
+''')
+
+    def test_library_abi_mismatch_is_rejected(self):
+        self.build()
+        self.node('''
+const original = WebAssembly.instantiate;
+try {
+  for (const version of [undefined, 1, 3]) {
+    WebAssembly.instantiate = async (...args) => {
+      const instance = await original(...args);
+      return {exports: {...instance.exports, __snek_abi: version === undefined ? undefined : new WebAssembly.Global({value: "i32"}, version)}};
+    };
+    await assert.rejects(instantiate(bytes), /Invalid Snek library exports/);
+  }
+} finally {WebAssembly.instantiate = original;}
+assert.equal((await instantiate(bytes)).add(1, 2), 3);
 ''')
 
     def test_browser_loader_response_and_url(self):

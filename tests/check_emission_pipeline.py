@@ -19,6 +19,26 @@ from snekc.wasm import encode
 
 
 class RepeatEmissionTests(unittest.TestCase):
+    def test_wait_groups_survive_owned_bridge_and_repeat_emission(self):
+        import json
+        from bootstrap.body_bridge import to_module
+        from snekc.emit_wat import emit_module
+        source = (ROOT / "examples/wait_all.py").read_text()
+        owned = check(source)
+        before = owned.tree().json()
+        reference = to_module(json.loads(before))
+        prelude = (ROOT / "snekc/prelude.wat").read_text()
+        for build in (lambda: emit_source_module(owned, prelude), lambda: emit_module(reference)):
+            wat = build()
+            self.assertIn("$snek.wait_all<", wat)
+            self.assertEqual(build(), wat)
+            self.assertTrue(encode(wat).startswith(b"\0asm"))
+        self.assertEqual(owned.tree().json(), before)
+        for build in (lambda: emit_source_module(owned, prelude, component=True),
+                      lambda: emit_module(reference, component=True)):
+            with self.assertRaisesRegex(ValueError, "wait_all.*not yet supported for components"):
+                build()
+
     def test_async_callback_types_survive_owned_bridge_and_repeat_emission(self):
         import json
         from bootstrap.body_bridge import to_module

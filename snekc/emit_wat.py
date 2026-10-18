@@ -222,6 +222,7 @@ class Emitter(CollectionEmitter, ProtocolEmitter, MachineEmitter, ClosureEmitter
         self.fn: FnState | None = None
         self.machine_types = {}
         self.machine_graphs = []
+        self.wait_groups: dict[str, list[str]] = {}
         self.main_async = True
         self.closure_types = {}
         self.cell_types = {}
@@ -339,6 +340,9 @@ class Emitter(CollectionEmitter, ProtocolEmitter, MachineEmitter, ClosureEmitter
         funcs.extend(stdlib_io.machines(self))
         from . import stdlib_host
         funcs.extend(stdlib_host.machines(self))
+        from bootstrap.tasks import wait_all_code
+        for name, heaps in self.wait_groups.items():
+            funcs.append(wait_all_code(name, heaps, self.lit("wait_all() requires distinct, unawaited coroutines")))
         class_types = self.class_types()
         vtables = self.vtable_globals()
         closures = self.closure_artifacts()
@@ -1215,6 +1219,13 @@ class Emitter(CollectionEmitter, ProtocolEmitter, MachineEmitter, ClosureEmitter
             return (f"(if (result {self.valtype(e.ty)}) {self.ex(e.cond)} "
                     f"(then {self.ex(e.then)}) (else {self.ex(e.else_)}))")
         if isinstance(e, ir.Call):
+            if e.func == "snek.wait_all":
+                if self.component:
+                    raise ValueError("wait_all() is not yet supported for components")
+                heaps = [self.heap(arg.ty) for arg in e.args]
+                name = "$snek.wait_all<" + "~".join(h[1:] for h in heaps) + ">"
+                self.wait_groups[name] = heaps
+                return self.call(name, e.args)
             if e.func.startswith("snek.lib."):
                 from .wasi_bindings import OPERATIONS
                 self.wasi_features.add(OPERATIONS[e.func.removeprefix("snek.lib.")])

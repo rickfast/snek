@@ -1422,6 +1422,15 @@ class BodyChecker:
 
     def builtin_call(self, name: str, node: Node, expected: DeclType) -> BodyExpr:
         args = node.get("args").items
+        if name == "wait_all" and name in self.decl.imported:
+            if len(node.get("keywords").items) != 0 or len(args) == 0:
+                declaration_error("wait_all() requires one or more positional coroutines", node)
+            result = BodyExpr("Call", DeclType("Coroutine").add(DeclType("None")), node, "snek.wait_all")
+            for arg in args:
+                value = self.expr(arg, DeclType("unknown"))
+                if value.ty.kind != "Coroutine": declaration_error("wait_all() arguments must be coroutines", arg)
+                result.add(value)
+            return result
         if name in ("run", "checkpoint") and name in self.decl.imported:
             if len(node.get("keywords").items) != 0:
                 declaration_error(name + "() takes positional arguments only", node)

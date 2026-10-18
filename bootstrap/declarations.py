@@ -384,7 +384,7 @@ class Declarations:
         if name in self.classes or name in self.function_nodes:
             declaration_error("'" + name + "' is already defined", node)
         if (name in self.reserved or name in self.library_imports
-                or (name in ("host", "run", "checkpoint", "read_bytes", "write_bytes") and name in self.imported)):
+                or (name in ("host", "run", "checkpoint", "wait_all", "read_bytes", "write_bytes") and name in self.imported)):
             declaration_error("'" + name + "' is a reserved name", node)
 
     def library_binding(self, name: str, path: list[str], node: Node) -> None:
@@ -419,7 +419,7 @@ class Declarations:
         level = node.get("level").text
         allowed: list[str] = []
         if module == "snek":
-            allowed = ["i32", "i64", "f32", "f64", "HostObject", "Final", "final", "host", "run", "checkpoint", "read_bytes", "write_bytes"]
+            allowed = ["i32", "i64", "f32", "f64", "HostObject", "Final", "final", "host", "run", "checkpoint", "wait_all", "read_bytes", "write_bytes"]
         elif module in ("typing", "collections.abc"):
             allowed = ["Iterator", "Generator", "Coroutine", "Callable"]
             if module == "typing":
@@ -452,7 +452,7 @@ class Declarations:
                 declaration_error("cannot import '" + name + "' from " + module, node)
             if name in self.library_imports:
                 declaration_error("'" + name + "' is already imported", node)
-            if name in ("host", "run", "checkpoint", "read_bytes", "write_bytes") and (name in self.classes or name in self.function_nodes):
+            if name in ("host", "run", "checkpoint", "wait_all", "read_bytes", "write_bytes") and (name in self.classes or name in self.function_nodes):
                 declaration_error("'" + name + "' is already defined", node)
             if name not in self.imported:
                 self.imported.append(name)

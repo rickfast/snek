@@ -15,6 +15,7 @@ from snekc import driver
 from check_library import SOURCE, EXPORTS, HOST_SOURCE, HOST_EXPORTS, ASYNC_SOURCE, ASYNC_EXPORTS
 from check_library import OBJECT_SOURCE, OBJECT_EXPORTS, CALLBACK_SOURCE, CALLBACK_EXPORTS
 from check_library import ASYNC_CALLBACK_SOURCE, ASYNC_CALLBACK_EXPORTS
+from check_library import WAIT_ALL_SOURCE, WAIT_ALL_EXPORTS
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -58,6 +59,10 @@ class BrowserTests(unittest.TestCase):
         for name, optimize in (("async-callbacks", False), ("async-callbacks-optimized", True)):
             driver.build(source, root / (name + ".wasm"), optimize=optimize,
                          compiler=compiler, library=True, exports=ASYNC_CALLBACK_EXPORTS)
+        source.write_text(WAIT_ALL_SOURCE)
+        for name, optimize in (("tasks", False), ("tasks-optimized", True)):
+            driver.build(source, root / (name + ".wasm"), optimize=optimize,
+                         compiler=compiler, library=True, exports=WAIT_ALL_EXPORTS)
         shutil.copyfile(ROOT / "examples/library/worker.mjs", root / "worker.mjs")
         driver.build(ROOT / "examples/library/host_demo.py", root / "host_demo.wasm", optimize=False,
                      compiler=compiler, library=True, exports=["increment"])
@@ -266,6 +271,29 @@ class BrowserTests(unittest.TestCase):
                 self.assertEqual(result[1:4], [["prefix: STRASSE", "prefix: 中🐍"], True, True])
                 self.assertIn("browser callback rejected", result[4])
                 self.assertEqual(result[5:], ["cleaned\n", True])
+
+    def test_wait_all_starts_sibling_requests_and_unwinds(self):
+        for target in ("tasks", "tasks-optimized"):
+            with self.subTest(target=target):
+                result = self.page.evaluate('''async target => {
+                  const {instantiate} = await import(`./${target}.js`);
+                  const requests = new Map(), events = [];
+                  const lib = await instantiate(`./${target}.wasm`, {imports: {
+                    read: name => new Promise(resolve => requests.set(name, resolve)),
+                    cleanup: async name => {await new Promise(resolve => setTimeout(resolve, 1)); events.push(name);},
+                    report: text => {}
+                  }});
+                  const pair = lib.pair();
+                  const started = [...requests.keys()];
+                  requests.get("b")("second"); requests.get("a")("first");
+                  const value = await pair;
+                  let error;
+                  try {await lib.failfast();} catch (e) {error = e.message;}
+                  return [started, value, events, error];
+                }''', target)
+                self.assertEqual(result[:2], [["a", "b"], "finished"])
+                self.assertEqual(sorted(result[2]), ["a", "b", "blocked"])
+                self.assertIn("first failure", result[3])
 
     def test_concurrent_async_host_results(self):
         for target in ("async", "async-optimized"):

@@ -91,11 +91,15 @@ or yields to the event loop for a cooperative checkpoint. No Wasm stack is retai
 
 Each instance permits overlapping async invocations. A synchronous entry guard
 protects shared scratch memory and transient import state; the driver restores and
-saves each invocation's pending host state around every step. No scratch allocations
+saves each invocation's host request set around every step. Each async host frame
+owns a GC-managed external request record; status/result/error imports take that
+record explicitly. This permits multiple host waits within one invocation. A
+checkpoint flag distinguishes runnable children from waits, so the driver can
+sleep until a request settles without starving a sibling at a checkpoint. No scratch allocations
 survive suspension. Sync exports and typed callbacks may run between steps, but
 synchronous re-entry remains rejected. Invocation roots are released on success and
 failure; an unresolved host Promise retains its frame. Async initialization,
-task spawning and cancellation APIs remain unsupported. The CPython shim raises on a host call
+detached task spawning and public cancellation APIs remain unsupported. The CPython shim raises on a host call
 unless the application replaces the declaration with a Python implementation.
 See the [library guide](docs/reference/libraries.md) for the public contract.
 
@@ -372,7 +376,8 @@ def __exit__(self, exc_type: type[BaseException] | None,
 - **Cleanup is part of the graph.** Finally suites are cloned on normal, exceptional, return, break and continue edges. Pending return values and original exceptions are saved separately, so suspension or a caught exception inside cleanup does not overwrite them. Context managers use the existing `try` lowering. Exceptions injected with `throw()` or `close()` enter the handler at the suspension point. `close()` injects `GeneratorExit`; yielding during close raises `RuntimeError`. Closing an unstarted generator executes no body. Escaping `StopIteration` is converted to `RuntimeError` once the body has started (PEP 479).
 - **Generator operations:** `for`, `iter(g)` (identity), `next(g)`, `next(g, same_type_default)`, `list(g)`, `g.send(None)`, `g.throw(exception_instance)` and `g.close()`. Iteration catches exhaustion only, never exceptions from the loop body. Exhausted generators stay exhausted; reentrancy raises `ValueError`. Tuples can be yielded and unpacked, references can be optional, and generators can be passed/stored by their annotated iterator type.
 - **Coroutine operations:** `await` accepts a typed coroutine and produces its annotated result. `snek.run(coro)` is supported at module scope; `snek.checkpoint()` yields cooperatively once. The CPython shim uses `asyncio.run` and `asyncio.sleep(0)`. A coroutine can be awaited only once. Async methods and `super()` share ordinary virtual dispatch. Core modules drive the root frame to completion; components return to the host at scheduling points.
-- **Explicit limits:** no sent values other than `None`, yield expressions, `yield from`, generator return values, asynchronous generators/iteration/context managers, task spawning, arbitrary awaitables or general `asyncio` imports. Async timers are supported through `snek.time.sleep`. `Iterator[T]` currently denotes snek generators, not arbitrary user-defined iterator protocols. Unawaited-coroutine warnings and GC-triggered generator finalization are not emulated. Close unfinished generators explicitly, especially if a suspended `with` or `finally` owns resources. Breaking a loop does not itself close its iterator.
+- **Structured siblings:** `wait_all(*coroutines)` returns a `Coroutine[None, None, None]`, claims distinct fresh children on first resume, advances each unfinished child once per group step, and discards results. Typed group frames are emitted by shared `bootstrap/tasks.py`. The first failure triggers one `GeneratorExit` injection per unfinished sibling; subsequent resumes allow awaited finalizers to finish. The group then rethrows the original failure. Host wait records are detached during unwinding; the application owns cancellation of external operations. Core commands and libraries support this; components reject groups until their service state is per-operation.
+- **Explicit limits:** no sent values other than `None`, yield expressions, `yield from`, generator return values, asynchronous generators/iteration/context managers, detached task spawning, arbitrary awaitables or general `asyncio` imports. Async timers are supported through `snek.time.sleep`. `Iterator[T]` currently denotes snek generators, not arbitrary user-defined iterator protocols. Unawaited-coroutine warnings and GC-triggered generator finalization are not emulated. Close unfinished generators explicitly, especially if a suspended `with` or `finally` owns resources. Breaking a loop does not itself close its iterator.
 
 ## The WASI boundary
 

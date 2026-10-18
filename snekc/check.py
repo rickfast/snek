@@ -75,7 +75,7 @@ from .types import (
 INT_RANGE = {"i32": (-(2**31), 2**31 - 1), "i64": (-(2**63), 2**63 - 1)}
 
 ALLOWED_IMPORTS = {
-    "snek": {"i32", "i64", "f32", "f64", "HostObject", "Final", "final", "host", "run", "checkpoint", "read_bytes", "write_bytes"},
+    "snek": {"i32", "i64", "f32", "f64", "HostObject", "Final", "final", "host", "run", "checkpoint", "wait_all", "read_bytes", "write_bytes"},
     "typing": {"Final", "Optional", "final", "Iterator", "Generator", "Coroutine", "Callable"},
     "collections.abc": {"Iterator", "Generator", "Coroutine", "Callable"},
     "types": {"TracebackType"},
@@ -444,7 +444,7 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
                         raise CompileError(f"cannot import '{a.name}' from {s.module}", s)
                     if a.name in self.library_imports:
                         raise CompileError(f"'{a.name}' is already imported", s)
-                    if a.name in ("host", "run", "checkpoint", "read_bytes", "write_bytes") and (a.name in self.funcs or a.name in self.classes):
+                    if a.name in ("host", "run", "checkpoint", "wait_all", "read_bytes", "write_bytes") and (a.name in self.funcs or a.name in self.classes):
                         raise CompileError(f"'{a.name}' is already defined", s)
                     self.imported.add(a.name)
             elif isinstance(s, ast.Import):
@@ -483,7 +483,7 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
         if name in self.classes or name in self.funcs:
             raise CompileError(f"'{name}' is already defined", node)
         if (name in BUILTINS or name in ("str", "u8s", "rt", "lit", "snek") or name in self.bnodes or name in self.library_imports
-                or (name in ("host", "run", "checkpoint", "read_bytes", "write_bytes") and name in self.imported)):
+                or (name in ("host", "run", "checkpoint", "wait_all", "read_bytes", "write_bytes") and name in self.imported)):
             raise CompileError(f"'{name}' is a reserved name", node)
         if not name.isascii():
             raise CompileError("identifiers must be ASCII", node)
@@ -2251,6 +2251,13 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
                 ty = ListT(I32)
                 values = [] if n == "read_bytes" else [self.coerce(self.check_expr(args[0], ty), ty, args[0])]
                 return ir.Call(ty if n == "read_bytes" else NONE, f"snek.{n}", values)
+            if n == "wait_all" and n in self.imported:
+                if node.keywords or not args:
+                    raise CompileError("wait_all() requires one or more positional coroutines", node)
+                values = [self.check_expr(arg) for arg in args]
+                if any(not isinstance(value.ty, CoroutineT) for value in values):
+                    raise CompileError("wait_all() arguments must be coroutines", node)
+                return ir.Call(CoroutineT(NONE), "snek.wait_all", values)
             if n in ("run", "checkpoint") and n in self.imported:
                 if node.keywords:
                     raise CompileError(f"{n}() does not take keyword arguments", node)

@@ -270,6 +270,8 @@ class MachineEmitter:
                     resume = i
                 else:
                     resume = state.next
+                    if isinstance(f.ret, CoroutineT):
+                        code += "(global.set $sm.yielded (i32.const 1)) "
                     if s.value is not None:
                         code += f"(struct.set {B} $value {base} {self.ex(s.value)}) "
                 code += f"{save} (struct.set {B} $pc {base} (i32.const {resume})) (struct.set {B} $handler {base} (i32.const {state.error})) (struct.set {B} $busy {base} (i32.const 0)) (return (i32.const 1))"

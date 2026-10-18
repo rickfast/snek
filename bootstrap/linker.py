@@ -31,8 +31,9 @@ MANIFEST = {
     "emit_host": ("__future__", "snek", "bootstrap.declarations", "bootstrap.emit_program", "bootstrap.emit_data", "snekc.runtime_abi"),
     "machine_lower": ("__future__", "snek", "bootstrap.parser"),
     "machine_emit": ("__future__", "snek", "bootstrap.parser"),
+    "tasks": ("__future__", "bootstrap.parser", "bootstrap.machine_emit"),
     "emit_suspension": ("__future__", "snek", "bootstrap.parser", "bootstrap.declarations", "bootstrap.bodies", "bootstrap.emit_program", "bootstrap.machine_lower", "bootstrap.machine_emit"),
-    "emit_module": ("__future__", "snek", "bootstrap.declarations", "bootstrap.bodies", "bootstrap.parser", "bootstrap.emit_data", "bootstrap.emit_program", "bootstrap.emit_support", "bootstrap.emit_runtime", "bootstrap.emit_host", "bootstrap.emit_suspension", "bootstrap.library"),
+    "emit_module": ("__future__", "snek", "bootstrap.declarations", "bootstrap.bodies", "bootstrap.parser", "bootstrap.emit_data", "bootstrap.emit_program", "bootstrap.emit_support", "bootstrap.emit_runtime", "bootstrap.emit_host", "bootstrap.emit_suspension", "bootstrap.library", "bootstrap.tasks"),
 }
 HEADER = "from __future__ import annotations\nfrom snek import i32, i64, read_bytes, write_bytes, sys\n"
 PARSER_PRIMITIVES = ("fail", "utf8", "json_string", "Node", "string", "scalar", "missing", "sequence")

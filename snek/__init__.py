@@ -20,6 +20,29 @@ async def checkpoint() -> None:
     await sleep(0)
 
 
+async def wait_all(*coroutines) -> None:
+    """Run distinct fresh coroutines together; unwind siblings on failure."""
+    import asyncio
+    import inspect
+    if not coroutines or any(not inspect.iscoroutine(value) for value in coroutines):
+        raise TypeError("wait_all() requires one or more positional coroutines")
+    if len({id(value) for value in coroutines}) != len(coroutines) or any(
+        inspect.getcoroutinestate(value) != inspect.CORO_CREATED for value in coroutines
+    ):
+        raise RuntimeError("wait_all() requires distinct, unawaited coroutines")
+    tasks = [asyncio.create_task(value) for value in coroutines]
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        for task in tasks:
+            if task in done and task.exception() is not None:
+                raise task.exception()
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            if not task.done(): task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 i32 = int
 i64 = int
 f32 = float
@@ -72,4 +95,4 @@ def write_bytes(data: list[i32]) -> None:
         raise RuntimeError("stdout write failed") from error
 
 
-__all__ = ["i32", "i64", "f32", "f64", "HostObject", "Final", "final", "host", "run", "checkpoint", "read_bytes", "write_bytes", "sys", "os", "time", "secrets", "io"]
+__all__ = ["i32", "i64", "f32", "f64", "HostObject", "Final", "final", "host", "run", "checkpoint", "wait_all", "read_bytes", "write_bytes", "sys", "os", "time", "secrets", "io"]
