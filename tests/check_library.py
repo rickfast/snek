@@ -545,6 +545,71 @@ def collection_list() -> list[list[str | None] | None]:
 '''
 OPTIONAL_EXPORTS = ["echo", "upper", "upper_async", "mixed", "make_list", "maybe_list", "later_list", "make_dict", "maybe_dict", "make_key", "keys", "maybe_tuple", "make_callback", "maybe_callback", "call_optional", "async_callback", "apply_async", "holder", "factory", "callback_list", "collection_list"]
 
+ITERATOR_SOURCE = '''
+from typing import Iterator, Callable
+from snek import i32, HostObject, host, checkpoint
+@host("inspect")
+def inspect(values: Iterator[i32]) -> Iterator[i32]:
+    pass
+@host("touch")
+def touch() -> None:
+    pass
+def numbers(count: i32) -> Iterator[i32]:
+    try:
+        for i in range(count):
+            yield i
+    finally:
+        print("closed")
+def words() -> Iterator[str | None]:
+    yield "straße 🐍"
+    yield None
+    yield ""
+def echo(values: Iterator[i32]) -> Iterator[i32]:
+    return values
+def maybe(values: Iterator[i32] | None) -> Iterator[i32] | None:
+    return values
+def visit(values: Iterator[i32]) -> Iterator[i32]:
+    return inspect(values)
+def consume(values: Iterator[i32]) -> i32:
+    total = 0
+    for value in values:
+        total += value
+    return total
+def apply(fn: Callable[[Iterator[i32]], Iterator[i32]], values: Iterator[i32]) -> Iterator[i32]:
+    return fn(values)
+def grouped() -> list[Iterator[i32]]:
+    return [numbers(2), numbers(1)]
+def nested() -> Iterator[Iterator[i32]]:
+    yield numbers(2)
+    yield numbers(1)
+def rows() -> Iterator[dict[str, list[str]]]:
+    yield {"row": ["one"]}
+    yield {"row": ["two"]}
+async def delayed() -> Iterator[str | None]:
+    await checkpoint()
+    return words()
+def fail() -> Iterator[i32]:
+    try:
+        yield 1
+        raise ValueError("generator failed")
+    finally:
+        print("failure cleanup")
+def foreign_error() -> Iterator[i32]:
+    try:
+        touch()
+        yield 1
+    finally:
+        print("foreign cleanup")
+def ignores_close() -> Iterator[i32]:
+    try:
+        yield 1
+    except GeneratorExit:
+        yield 2
+def retained(value: HostObject) -> Iterator[HostObject]:
+    yield value
+'''
+ITERATOR_EXPORTS = ["numbers", "words", "echo", "maybe", "visit", "consume", "apply", "grouped", "nested", "rows", "delayed", "fail", "foreign_error", "ignores_close", "retained"]
+
 OBJECT_SOURCE = '''from snek import HostObject, host, checkpoint
 from typing import Callable, Iterator
 @host("lookup")
@@ -910,6 +975,76 @@ assert.equal(lib.__snek_init, undefined);
 assert.ok(Object.isFrozen(lib));
 const second = await instantiate(await WebAssembly.compile(bytes));
 assert.equal(second.add(2, 3), 5);
+''')
+
+    def test_iterator_handles_and_cleanup(self):
+        self.src.write_text(ITERATOR_SOURCE)
+        self.build(ITERATOR_EXPORTS)
+        self.node('''
+let output = "";
+const options = {stdout: text => {output += text;}, imports: {inspect: x => x, touch: () => {}}};
+const lib = await instantiate(bytes, options), foreign = await instantiate(bytes, options);
+const values = lib.numbers(3);
+assert.ok(Object.isFrozen(values)); assert.equal(values[Symbol.iterator](), values);
+assert.equal(lib.echo(values), values); assert.equal(lib.maybe(values), values); assert.equal(lib.maybe(null), null);
+assert.deepEqual(values.next(), {done: false, value: 0});
+assert.equal(lib.consume(values), 3); assert.deepEqual(values.next(), {done: true, value: undefined});
+assert.deepEqual(values.return(), {done: true, value: undefined}); assert.equal(output, "closed\\n");
+output = ""; const early = lib.numbers(10);
+for (const value of early) {assert.equal(value, 0); break;}
+assert.equal(output, "closed\\n"); assert.equal(early.next().done, true);
+output = "";
+assert.throws(() => {for (const value of lib.numbers(3)) throw new Error("loop body");}, /loop body/);
+assert.equal(output, "closed\\n");
+output = ""; const unopened = lib.numbers(2); unopened.return(); assert.equal(output, ""); assert.equal(unopened.next().done, true);
+const finite = lib.numbers(2);
+assert.throws(() => finite.next(1), TypeError); assert.throws(() => finite.return(null), TypeError);
+assert.deepEqual([...finite], [0, 1]);
+for (const wrong of [[1][Symbol.iterator](), foreign.numbers(1), lib.words(), {}]) assert.throws(() => lib.echo(wrong), TypeError);
+assert.deepEqual([...lib.words()], ["straße 🐍", null, ""]);
+assert.deepEqual([...(await lib.delayed())], ["straße 🐍", null, ""]);
+assert.deepEqual(lib.grouped().toArray().map(iterator => [...iterator]), [[0, 1], [0]]);
+assert.deepEqual([...lib.nested()].map(iterator => [...iterator]), [[0, 1], [0]]);
+assert.deepEqual([...lib.rows()].map(row => row.get("row").toArray()), [["one"], ["two"]]);
+const pass = lib.numbers(1); assert.equal(lib.apply(x => x, pass), pass); pass.return();
+''')
+
+    def test_iterator_handle_roots_frame_without_api(self):
+        self.src.write_text(ITERATOR_SOURCE)
+        self.build(ITERATOR_EXPORTS)
+        self.node('''
+const [iterator, weak] = await (async () => {
+  const lib = await instantiate(bytes, {imports: {inspect: x => x, touch: () => {}}});
+  const object = {retained: true};
+  return [lib.retained(object), new WeakRef(object)];
+})();
+for (let i = 0; i < 6; i++) {await new Promise(resolve => setImmediate(resolve)); global.gc();}
+assert.ok(weak.deref()); assert.equal(iterator.next().value, weak.deref());
+assert.equal(iterator.return().done, true);
+''', gc=True)
+
+    def test_iterator_errors_and_reentry(self):
+        self.src.write_text(ITERATOR_SOURCE)
+        self.build(ITERATOR_EXPORTS)
+        self.node('''
+let output = "", touchError = null, rejectOutput = false;
+const lib = await instantiate(bytes, {stdout: text => {if (rejectOutput) throw new Error("output failed"); output += text;}, imports: {
+  inspect: iterator => {assert.throws(() => iterator.next(), /not reentrant/); assert.throws(() => iterator.return(), /not reentrant/); return iterator;},
+  touch: () => {if (touchError) throw touchError;},
+}});
+const visited = lib.numbers(2); assert.equal(lib.visit(visited), visited); assert.deepEqual([...visited], [0, 1]);
+output = ""; const failing = lib.fail(); assert.deepEqual(failing.next(), {done: false, value: 1});
+assert.throws(() => failing.next(), e => e instanceof SnekError && /generator failed/.test(e.message));
+assert.equal(failing.next().done, true); assert.equal(output, "failure cleanup\\n");
+output = ""; touchError = new Error("foreign failure"); const broken = lib.foreign_error();
+assert.throws(() => broken.next(), error => error === touchError);
+assert.equal(output, ""); assert.equal(broken.next().done, true); assert.equal(broken.return().done, true);
+assert.equal(lib.consume(broken), 0);
+touchError = null; assert.deepEqual([...lib.foreign_error()], [1]); assert.equal(output, "foreign cleanup\\n");
+const stubborn = lib.ignores_close(); stubborn.next();
+assert.throws(() => stubborn.return(), /ignored GeneratorExit/); assert.equal(stubborn.next().done, true);
+const stdout = lib.numbers(1); stdout.next(); rejectOutput = true;
+assert.throws(() => stdout.return(), /output failed/); rejectOutput = false; assert.equal(stdout.next().done, true);
 ''')
 
     def test_optional_reference_boundaries(self):
@@ -2519,7 +2654,7 @@ assert.equal(output, "loop cleaned\\n");
         self.node('''
 const original = WebAssembly.instantiate;
 try {
-  for (const version of [undefined, 1, 2, 3, 4, 5, 6, 7, 9]) {
+  for (const version of [undefined, 1, 2, 3, 4, 5, 6, 7, 8, 10]) {
     WebAssembly.instantiate = async (...args) => {
       const instance = await original(...args);
       return {exports: {...instance.exports, __snek_abi: version === undefined ? undefined : new WebAssembly.Global({value: "i32"}, version)}};

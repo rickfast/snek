@@ -66,6 +66,7 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
   const listStates = listSignatures.map(() => ({toWasm: new WeakMap(), toJS: new WeakMap()}));
   const dictStates = dictSignatures.map(() => ({toWasm: new WeakMap(), toJS: new WeakMap()}));
   const tupleStates = tupleSignatures.map(() => ({toWasm: new WeakMap(), toJS: new WeakMap()}));
+  const iteratorStates = iteratorSignatures.map(() => ({toWasm: new WeakMap(), toJS: new WeakMap()}));
   // The private field roots the GC object even if the API object is discarded.
   // A fresh private brand per instance rejects foreign handles, and a single
   // identity map preserves wrappers across base/derived boundary types.
@@ -200,11 +201,12 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
     throw new SnekLoadError("Unable to instantiate Snek library. Use the .wasm and .js files from the same --library build.", { cause });
   }
   wasm = instance.exports;
-  if (wasm.__snek_abi?.value !== 8 || !(wasm.__snek_yielded instanceof WebAssembly.Global) || !(wasm.memory instanceof WebAssembly.Memory) || !(wasm.__snek_length instanceof WebAssembly.Global) ||
+  if (wasm.__snek_abi?.value !== 9 || !(wasm.__snek_yielded instanceof WebAssembly.Global) || !(wasm.memory instanceof WebAssembly.Memory) || !(wasm.__snek_length instanceof WebAssembly.Global) ||
       ["__snek_init", "__snek_reset", "__snek_alloc", "__snek_mark", "__snek_restore", "__snek_string_from", "__snek_string_to",
         ...listSignatures.flatMap((_, i) => ["len", "get", "set", "append", "pop"].map(op => `__snek_list_${op}_${i}`)),
         ...dictSignatures.flatMap((_, i) => ["len", "next", "get", "contains", "set", "delete", "clear", "copy", "keys_at", "values_at"].map(op => `__snek_dict_${op}_${i}`)),
         ...tupleSignatures.flatMap(([, fields], i) => fields.map((_, field) => `__snek_tuple_get_${i}_${field}`)),
+        ...iteratorSignatures.flatMap((_, i) => ["advance", "value", "close", "abort"].map(op => `__snek_iter_${op}_${i}`)),
         ...classSignatures.map((_, i) => `__snek_class_test_${i}`),
         ...callbackSignatures.flatMap(([, , , isAsync], i) =>
         [`__snek_wrap_${i}`, `__snek_call_${i}`, ...(isAsync ? [`__snek_step___snek_callback_${i}`, `__snek_result___snek_callback_${i}`] : [])]), ...signatures.flatMap(([name, , , isAsync]) =>
@@ -280,6 +282,12 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
     const tuple = tupleSignatures.findIndex(([signature]) => signature === type);
     if (tuple !== -1) {
       const raw = tupleStates[tuple].toWasm.get(value);
+      if (!raw) throw new TypeError(`expected ${type} handle from this Snek instance`);
+      return [raw];
+    }
+    const iterator = iteratorSignatures.findIndex(([signature]) => signature === type);
+    if (iterator !== -1) {
+      const raw = iteratorStates[iterator].toWasm.get(value);
       if (!raw) throw new TypeError(`expected ${type} handle from this Snek instance`);
       return [raw];
     }
@@ -440,6 +448,37 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
             return lift(fields[index], wasm[`__snek_tuple_get_${tuple}_${index}`](value));
           }); },
           toArray() { return Object.freeze(fields.map((_, index) => wrapped.get(index))); },
+        });
+        state.toJS.set(value, wrapped);
+        state.toWasm.set(wrapped, value);
+      }
+      return wrapped;
+    }
+    const iterator = iteratorSignatures.findIndex(([signature]) => signature === result);
+    if (iterator !== -1) {
+      const state = iteratorStates[iterator];
+      let wrapped = state.toJS.get(value);
+      if (!wrapped) {
+        const [, element] = iteratorSignatures[iterator];
+        const call = (op, args) => {
+          if (args.length > 1 || (args.length === 1 && args[0] !== undefined))
+            throw new TypeError("Snek iterators do not accept sent or return values");
+          return enter(() => {
+            try {
+              const more = wasm[`__snek_iter_${op}_${iterator}`](value);
+              return op === "advance" && more
+                ? {done: false, value: lift(element, wasm[`__snek_iter_value_${iterator}`](value))}
+                : {done: true, value: undefined};
+            } catch (error) {
+              wasm[`__snek_iter_abort_${iterator}`](value);
+              throw error;
+            }
+          });
+        };
+        wrapped = Object.freeze({
+          [Symbol.iterator]() { return wrapped; },
+          next(...args) { return call("advance", args); },
+          return(...args) { return call("close", args); },
         });
         state.toJS.set(value, wrapped);
         state.toWasm.set(wrapped, value);

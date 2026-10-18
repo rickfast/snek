@@ -25,6 +25,7 @@ from check_library import HIGHER_CALLBACK_SOURCE, HIGHER_CALLBACK_EXPORTS
 from check_library import DICT_SOURCE, DICT_EXPORTS
 from check_library import TUPLE_SOURCE, TUPLE_EXPORTS
 from check_library import OPTIONAL_SOURCE, OPTIONAL_EXPORTS
+from check_library import ITERATOR_SOURCE, ITERATOR_EXPORTS
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -104,6 +105,10 @@ class BrowserTests(unittest.TestCase):
         for name, optimize in (("optional", False), ("optional-optimized", True)):
             driver.build(source, root / (name + ".wasm"), optimize=optimize,
                          compiler=compiler, library=True, exports=OPTIONAL_EXPORTS)
+        source.write_text(ITERATOR_SOURCE)
+        for name, optimize in (("iterators", False), ("iterators-optimized", True)):
+            driver.build(source, root / (name + ".wasm"), optimize=optimize,
+                         compiler=compiler, library=True, exports=ITERATOR_EXPORTS)
         source.write_text(CLASS_VALUE_SOURCE)
         for name, optimize in (("classes", False), ("classes-optimized", True)):
             driver.build(source, root / (name + ".wasm"), optimize=optimize,
@@ -138,6 +143,42 @@ class BrowserTests(unittest.TestCase):
         self.page = context.new_page()
         self.page.set_default_timeout(15000)
         self.page.goto(self.url)
+
+    def test_iterator_handles(self):
+        for target in ("iterators", "iterators-optimized"):
+            with self.subTest(target=target):
+                result = self.page.evaluate('''async target => {
+                  const {instantiate, SnekError} = await import(`/${target}.js`);
+                  let output = "", reentry = false;
+                  const failure = new Error("host failed");
+                  const options = {stdout: text => {output += text;}, imports: {
+                    inspect: value => {try {value.next();} catch(e) {reentry = /not reentrant/.test(e.message);} return value;},
+                    touch: () => {throw failure;},
+                  }};
+                  const lib = await instantiate(`/${target}.wasm`, options);
+                  const foreign = await instantiate(`/${target}.wasm`, options);
+                  const values = lib.numbers(3);
+                  const identity = lib.echo(values) === values && lib.visit(values) === values &&
+                    lib.apply(value => value, values) === values && values[Symbol.iterator]() === values;
+                  const first = values.next().value, rest = lib.consume(values);
+                  const early = lib.numbers(3); for (const value of early) break;
+                  let wrongInstance = false, sent = false, snekError = false, hostError = false;
+                  try {lib.echo(foreign.numbers(1));} catch(e) {wrongInstance = e instanceof TypeError;}
+                  try {values.next(1);} catch(e) {sent = e instanceof TypeError;}
+                  const failed = lib.fail(); failed.next();
+                  try {failed.next();} catch(e) {snekError = e instanceof SnekError;}
+                  const interrupted = lib.foreign_error();
+                  try {interrupted.next();} catch(e) {hostError = e === failure;}
+                  return {identity, reentry, first, rest, wrongInstance, sent, snekError, hostError,
+                    done: [values.next().done, early.next().done, failed.next().done, interrupted.next().done],
+                    output, words: [...await lib.delayed()], nested: [...lib.nested()].map(value => [...value]),
+                    rows: [...lib.rows()].map(value => value.get("row").toArray()), absent: lib.maybe(null)};
+                }''', target)
+                self.assertEqual(result, {"identity": True, "reentry": True, "first": 0, "rest": 3,
+                    "wrongInstance": True, "sent": True, "snekError": True, "hostError": True,
+                    "done": [True] * 4, "output": "closed\nclosed\nfailure cleanup\n",
+                    "words": ["straße 🐍", None, ""], "nested": [[0, 1], [0]],
+                    "rows": [["one"], ["two"]], "absent": None})
 
     def test_nullable_references(self):
         for target in ("optional", "optional-optimized"):

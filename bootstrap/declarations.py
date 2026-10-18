@@ -181,7 +181,7 @@ class DeclType:
     def host_boundary(self) -> bool:
         if self.kind == "optional": return self.args[0].reference() and self.args[0].host_boundary()
         if self.kind == "class": return True
-        if self.kind == "list":
+        if self.kind in ("list", "Iterator"):
             return self.args[0].kind != "None" and self.args[0].host_boundary()
         if self.kind == "dict":
             return self.args[0].hashable() and self.args[0].host_boundary() and self.args[1].kind != "None" and self.args[1].host_boundary()
@@ -722,9 +722,9 @@ class Declarations:
         if host != "":
             for param in sig.params:
                 if not param.ty.host_boundary():
-                    declaration_error("host boundaries require scalar, string, object handles, or supported list/dict/tuple/Callable parameters", node)
+                    declaration_error("host boundaries require scalar, string, object handles, or supported list/dict/tuple/Callable/Iterator parameters", node)
             if not sig.ret.host_boundary():
-                declaration_error("host boundaries require scalar, string, object handles, supported list/dict/tuple/Callable, or None returns", node)
+                declaration_error("host boundaries require scalar, string, object handles, supported list/dict/tuple/Callable/Iterator, or None returns", node)
         yields = direct_yield(node.get("body"))
         if node.kind == "AsyncFunctionDef":
             if yields:

@@ -353,6 +353,7 @@ reject `gather`, just as they reject `wait_all`.
 | `list[T]` with supported elements | Live, GC-managed `SnekList<T>` handle |
 | `dict[K, V]` with supported keys/values | Live, GC-managed `SnekDict<K, V>` handle |
 | `tuple[T, ...]` with a fixed supported shape | Immutable, GC-managed `SnekTuple<readonly [...]>` handle |
+| `Iterator[T]` with a supported yield type | GC-managed `SnekIterator<T>` implementing JavaScript iteration |
 | `Callable[[T, ...], R]` | Typed synchronous function, or async function when `R` is a `Coroutine` |
 | `None` return | `void` / `undefined` |
 | Other supported reference `T | None` | The same function/handle/object type, or `null` |
@@ -404,7 +405,7 @@ Dictionary keys may be nullable strings or nullable tuples of supported key
 fields. A present key whose value is `None` returns `null` from `get()`; a missing
 key returns `undefined`, and `has()` distinguishes membership. Numeric and bool
 optionals remain unsupported by the language, as do bare `None` collection fields.
-Raw coroutine and generator values remain unsupported even when nullable.
+Raw coroutine values remain unsupported even when nullable.
 
 ## Snek-owned list handles
 
@@ -921,6 +922,55 @@ still get their list wrappers and TypeScript declarations. Calling a Snek closur
 during a synchronous Snek step remains forbidden; primitive list-handle operations
 inside a JavaScript callback are allowed.
 
+## Snek-owned iterator handles
+
+Export a generator annotated with `Iterator[T]` to consume it lazily from
+JavaScript. Each handle retains its frame and captured values, even after the
+library object is discarded:
+
+```python
+from typing import Iterator
+from snek import i32
+
+def count(limit: i32) -> Iterator[i32]:
+    try:
+        for value in range(limit):
+            yield value
+    finally:
+        print("closed")
+```
+
+```javascript
+const values = lib.count(10);
+console.log(values.next()); // {done: false, value: 0}
+for (const value of values) {
+  if (value === 3) break; // JavaScript calls return(), running Snek cleanup
+}
+console.log(values.next()); // {done: true, value: undefined}
+```
+
+`SnekIterator<T>` implements `[Symbol.iterator]()`, `next()` and `return()`.
+Calling `return()` explicitly closes an unfinished generator. JavaScript `for…of`
+also closes it on a break or loop-body exception; Snek's own `for` loop does not
+automatically close on a break. Closing before the first advance executes no body.
+GC keeps frames alive but does not run cleanup: close abandoned generators yourself.
+
+Handles preserve identity across exports, host functions and callbacks. Supported
+yield types include nested iterators, collections, class handles, callbacks and
+nullable references. `Iterator[T] | None` maps to a handle or `null`.
+`Iterator[None]` is not a boundary type; use a supported nullable reference yield
+type where appropriate. Async exports may resolve to a synchronous iterator handle.
+Only handles from the same library instance and with the exact yield type can be
+passed back. JavaScript generators and other iterables cannot impersonate them.
+
+Advancement and closing execute Snek code, so they cannot re-enter an active
+synchronous Snek call, including from a host callback. `next()` and `return()`
+accept no value other than `undefined`; `.throw()`, sent values, generator return
+values and asynchronous iteration are not exposed. Snek exceptions become
+`SnekError` and run ordinary Snek cleanup. If a synchronous JavaScript host exception
+interrupts advancement or closing, that exception propagates unchanged, bypasses
+Snek cleanup, and makes the interrupted frame terminal.
+
 ## Initialization, errors and output
 
 Each `instantiate` creates an independent instance and runs module initialization
@@ -947,8 +997,8 @@ functions appear on the returned, frozen API object.
 ## Current limits
 
 Exports must be entry-module functions with the boundary types above (or coroutines
-returning those types). Collections other than the supported list/dictionary/tuple handles,
-generators and raw coroutine objects cannot cross
+returning those types). Collections other than the supported list/dictionary/tuple handles
+and raw coroutine objects cannot cross
 the boundary. Libraries can use these internally where supported by the language,
 but cannot perform async module initialization or use WASI services such as
 stdin, environment variables, clocks and randomness. Unsupported signatures and

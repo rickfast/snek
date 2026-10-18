@@ -54,6 +54,7 @@ def library_boundary_types(exports: list[LibraryExport], hosts: list[LibraryExpo
         elif ty.startswith("list["): children.append(library_list_element(ty))
         elif ty.startswith("dict["): children = library_dict_types(ty)
         elif ty.startswith("tuple["): children = library_tuple_types(ty)
+        elif ty.startswith("Iterator["): children.append(library_iterator_element(ty))
         elif ty.startswith("Callable["): children = library_callback_types(ty)
         for child in children:
             child = library_callback_result(child)
@@ -135,7 +136,7 @@ def library_callback_types(ty: str) -> list[str]:
     types.append(ty[end + 3:-1])
     for i in range(len(types)):
         value = library_callback_result(types[i]) if i == len(types) - 1 else types[i]
-        if "[" in value and not (value.startswith("list[") or value.startswith("dict[") or value.startswith("tuple[") or value.startswith("Callable[")):
+        if "[" in value and not (value.startswith("list[") or value.startswith("dict[") or value.startswith("tuple[") or value.startswith("Iterator[") or value.startswith("Callable[")):
             raise ValueError("callback signatures cannot contain unsupported collections or bare coroutines: " + ty)
         if value != "None" or i != len(types) - 1: library_type(value)
     return types
@@ -170,13 +171,14 @@ def library_type(ty: str) -> str:
     if ty.startswith("list["): return "(ref " + library_list_heap(ty) + ")"
     if ty.startswith("dict["): return "(ref $" + library_mangle(ty) + ")"
     if ty.startswith("tuple["): return "(ref $" + library_mangle(ty) + ")"
+    if ty.startswith("Iterator["): return "(ref $" + library_mangle(ty) + ")"
     if ty.startswith("Callable["): return "(ref " + library_callback_heap(ty) + ")"
     if ty == "HostObject": return "(ref extern)"
     if ty == "HostObject | None": return "(ref null extern)"
     if ty == "str": return "i32"
     if ty == "bool": return "i32"
     if ty in ("i32", "i64", "f32", "f64"): return ty
-    raise ValueError("library boundaries support only i32, i64, f32, f64, bool, str, object handles, supported list/dict/tuple/Callable, and None returns; got " + ty)
+    raise ValueError("library boundaries support only i32, i64, f32, f64, bool, str, object handles, supported list/dict/tuple/Callable/Iterator, and None returns; got " + ty)
 
 
 def library_list_element(ty: str) -> str:
@@ -199,7 +201,46 @@ def library_mangle(ty: str) -> str:
         parts: list[str] = []
         for value in library_tuple_types(ty): parts.append(library_mangle(value))
         return "tuple<" + "~".join(parts) + ">"
+    if ty.startswith("Iterator["): return "iter<" + library_mangle(library_iterator_element(ty)) + ">"
     return "none" if ty == "None" else ty.replace(" | None", "?")
+
+
+def library_iterator_element(ty: str) -> str:
+    if not ty.startswith("Iterator[") or not ty.endswith("]"):
+        raise ValueError("invalid library iterator type: " + ty)
+    elem = ty[9:-1]
+    library_type(elem)
+    return elem
+
+
+def library_iterators(exports: list[LibraryExport], hosts: list[LibraryExport]) -> list[str]:
+    types: list[str] = []
+    for ty in library_boundary_types(exports, hosts):
+        if ty.startswith("Iterator[") and not ty.endswith(" | None"): types.append(ty)
+    return types
+
+
+def library_iterator_code(iterators: list[str]) -> str:
+    lines: list[str] = []
+    for i in range(len(iterators)):
+        elem = library_iterator_element(iterators[i])
+        heap = "$" + library_mangle(iterators[i])
+        param = " (param $iterator (ref " + heap + "))"
+        value = "(local.get $iterator)"
+        for op in ("advance", "close"):
+            head = '(func (export "__snek_iter_' + op + '_' + str(i) + '")' + param
+            item = LibraryExport("", heap[1:] + "." + op, [], "bool" if op == "advance" else "None")
+            lines.append(library_sync_export(item, head, [value]))
+        result = "(struct.get " + heap + " $value " + value + ")"
+        field_heap = library_reference_heap(elem)
+        if field_heap != "" and not elem.endswith(" | None"): result = "(ref.as_non_null " + result + ")"
+        if elem == "str": result = "(call $__snek_write " + result + ")"
+        lines.append('(func (export "__snek_iter_value_' + str(i) + '")' + param + ' (result ' + library_type(elem) + ') ' + result + ')')
+        # Foreign JS exceptions bypass Snek EH and leave a running frame busy.
+        # Retire only such a frame; completed/yielded frames stay resumable.
+        clear = "(ref.null " + field_heap + ")" if field_heap != "" else "(" + library_type(elem) + ".const 0)"
+        lines.append('(func (export "__snek_iter_abort_' + str(i) + '")' + param + ' (if (struct.get ' + heap + ' $busy ' + value + ') (then (struct.set ' + heap + ' $busy ' + value + ' (i32.const 0)) (struct.set ' + heap + ' $pc ' + value + ' (i32.const -1)) (struct.set ' + heap + ' $value ' + value + ' ' + clear + '))))')
+    return "\n".join(lines)
 
 
 def library_tuple_types(ty: str) -> list[str]:
@@ -367,6 +408,7 @@ def library_ts(ty: str) -> str:
         parts: list[str] = []
         for value in library_tuple_types(ty): parts.append(library_ts(value))
         return "SnekTuple<readonly [" + ", ".join(parts) + "]>"
+    if ty.startswith("Iterator["): return "SnekIterator<" + library_ts(library_iterator_element(ty)) + ">"
     if ty.startswith("Coroutine["): return "PromiseLike<" + library_ts(library_callback_result(ty)) + ">"
     if ty.startswith("Callable["):
         types = library_callback_types(ty)
@@ -389,6 +431,7 @@ def library_reference_heap(ty: str) -> str:
     if ty.startswith("class:"): return "$" + library_class_name(ty)
     if ty.startswith("list["): return library_list_heap(ty)
     if ty.startswith("dict[") or ty.startswith("tuple["): return "$" + library_mangle(ty)
+    if ty.startswith("Iterator["): return "$" + library_mangle(ty)
     if ty.startswith("Callable["): return library_callback_heap(ty)
     return ""
 
@@ -633,9 +676,10 @@ def library_code(exports: list[LibraryExport], hosts: list[LibraryExport], class
     lists = library_lists(exports, hosts)
     dicts = library_dicts(exports, hosts)
     tuples = library_tuples(exports, hosts)
+    iterators = library_iterators(exports, hosts)
     objects = library_class_types(exports, hosts)
     class_declarations = library_class_declarations(objects, classes)
-    lines: list[str] = [emit_library_runtime(), library_callback_code(callbacks, len(hosts)), library_list_code(lists), library_dict_code(dicts), library_tuple_code(tuples), library_class_code(objects)]
+    lines: list[str] = [emit_library_runtime(), library_callback_code(callbacks, len(hosts)), library_list_code(lists), library_dict_code(dicts), library_tuple_code(tuples), library_iterator_code(iterators), library_class_code(objects)]
     signatures: list[str] = []
     declarations: list[str] = []
     seen: list[str] = []
@@ -707,6 +751,9 @@ def library_code(exports: list[LibraryExport], hosts: list[LibraryExport], class
         for value in library_tuple_types(ty): fields.append(json_string(value))
         tuple_signatures.append("[" + json_string(ty) + ",[" + ",".join(fields) + "]]")
     js = "const tupleSignatures = [" + ",".join(tuple_signatures) + "];\nconst dictSignatures = [" + ",".join(dict_signatures) + "];\n" + js
+    iterator_signatures: list[str] = []
+    for ty in iterators: iterator_signatures.append("[" + json_string(ty) + "," + json_string(library_iterator_element(ty)) + "]")
+    js = "const iteratorSignatures = [" + ",".join(iterator_signatures) + "];\n" + js
     dts = "// Generated by Snek.\nexport interface SnekLibrary {\n" + "\n".join(declarations) + "\n}\n"
     dts += "export interface SnekImports {\n" + "\n".join(host_declarations) + "\n}\n"
     dts += "export interface LibraryOptions { stdout?: (text: string) => void; imports" + ("" if len(hosts) > 0 else "?") + ": SnekImports; }\n"
@@ -715,6 +762,7 @@ def library_code(exports: list[LibraryExport], hosts: list[LibraryExport], class
     dts += "export interface SnekList<T> { readonly length: number; get(index: number): T; set: (index: number, value: T) => void; append: (value: T) => void; pop(): T; toArray(): T[]; }\n"
     dts += "export interface SnekDict<K, V> { readonly size: number; get: (key: K) => V | undefined; has: (key: K) => boolean; set: (key: K, value: V) => void; delete: (key: K) => boolean; clear(): void; entries(): [K, V][]; }\n"
     dts += "declare const snekTupleType: unique symbol;\nexport interface SnekTuple<T extends readonly unknown[]> { readonly [snekTupleType]: (fields: T) => T; readonly length: T['length']; get<I extends number>(index: I): T[I]; toArray(): T; }\n"
+    dts += "declare const snekIteratorType: unique symbol;\nexport interface SnekIterator<T> extends IterableIterator<T, undefined, undefined> { readonly [snekIteratorType]: (value: T) => T; return(value?: undefined): IteratorReturnResult<undefined>; }\n"
     dts += "export interface SnekCallOptions { signal?: AbortSignal; }\nexport class SnekCancelledError extends Error { constructor(reason?: unknown); }\n"
     dts += "export class SnekCompatibilityError extends Error {}\nexport class SnekLoadError extends Error {}\n"
     dts += "export function assertSupported(): void;\n"

@@ -22,6 +22,7 @@ from check_library import HIGHER_CALLBACK_SOURCE, HIGHER_CALLBACK_EXPORTS
 from check_library import DICT_SOURCE, DICT_EXPORTS
 from check_library import TUPLE_SOURCE, TUPLE_EXPORTS
 from check_library import OPTIONAL_SOURCE, OPTIONAL_EXPORTS
+from check_library import ITERATOR_SOURCE, ITERATOR_EXPORTS
 
 EXAMPLE = ROOT / "examples/vite"
 SERVER = '''
@@ -34,6 +35,27 @@ console.log(JSON.stringify({url: server.resolvedUrls.local[0]}));
 '''
 
 TYPES = '''
+import {type SnekLibrary as IteratorLibrary, type SnekIterator} from "./generated/iterators.js";
+declare const iterators: IteratorLibrary;
+const sequence: SnekIterator<number> = iterators.numbers(3);
+for (const value of sequence) { const number: number = value; }
+const step = sequence.next(undefined);
+if (!step.done) { const number: number = step.value; }
+const closed: IteratorReturnResult<undefined> = sequence.return();
+iterators.apply(value => value, sequence);
+const maybeIterator = iterators.maybe(sequence);
+if (maybeIterator !== null) maybeIterator.next();
+const asyncIterator: Promise<SnekIterator<string | null>> = iterators.delayed();
+// @ts-expect-error generators do not accept sent values
+sequence.next(1);
+// @ts-expect-error generators do not accept return values
+sequence.return(1);
+// @ts-expect-error JavaScript iterators are not Snek-owned handles
+iterators.echo([1, 2][Symbol.iterator]());
+// @ts-expect-error iterator element types must match
+iterators.echo(iterators.words());
+// @ts-expect-error nullable iterators must be narrowed
+maybeIterator.next();
 import {type SnekLibrary as OptionalLibrary} from "./generated/optional.js";
 declare const optional: OptionalLibrary;
 const optionalText: string | null = optional.echo(null);
@@ -283,6 +305,10 @@ class BundlerTests(unittest.TestCase):
         print(f"Bundler browser: {engine} {cls.browser.version}; compiler: {cls.compiler}", flush=True)
 
     def compile(self, optimize):
+        source = self.root / "iterators.py"
+        source.write_text(ITERATOR_SOURCE)
+        driver.build(source, self.root / "src/generated/iterators.wasm", optimize=optimize,
+                     compiler=self.compiler, library=True, exports=ITERATOR_EXPORTS)
         source = self.root / "optional.py"
         source.write_text(OPTIONAL_SOURCE)
         driver.build(source, self.root / "src/generated/optional.wasm", optimize=optimize,

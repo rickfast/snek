@@ -129,7 +129,20 @@ the distinction between an empty string and `null`. This works within borrowed
 collection/host scratch frames and in suspended async results. Nullable strings
 enable open-world Unicode tables just like ordinary host string input. Plain
 `None` returns remain `undefined`, while nullable references use `null` and reject
-`undefined`. Raw coroutine/generator values and numeric optionals remain excluded.
+`undefined`. Raw coroutine values and numeric optionals remain excluded.
+
+Bridge ABI 9 adds Snek-owned iterator handles. Per-type advance/close wrappers
+reuse the ordinary generator protocol and exception translation; value getters
+retain concrete yield types. JavaScript wrappers strongly root frames, preserve
+identity with weak maps, and implement `next`, `return` and `Symbol.iterator`.
+Unlike collection access, advancement/closing enters the normal non-reentrant
+execution guard because it executes user code. JavaScript IteratorClose therefore
+runs Snek cleanup on early loop exit. Foreign host exceptions that leave a frame
+busy trigger a private abort helper: clear busy and yielded value, and mark the
+frame terminal without running Snek cleanup. Exceptions after a completed step
+do not abort a suspended frame. Neither GC finalization nor arbitrary JavaScript
+iterator adapters are introduced. Nullable and nested iterators use the shared
+boundary graph, identity checks and invariant TypeScript brand.
 
 Class boundaries use opaque `SnekObject` handles. A per-instance JavaScript
 private brand validates ownership; the private field strongly roots the WasmGC
