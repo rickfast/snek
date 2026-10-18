@@ -16,6 +16,7 @@ from check_library import SOURCE, EXPORTS, HOST_SOURCE, HOST_EXPORTS, ASYNC_SOUR
 from check_library import OBJECT_SOURCE, OBJECT_EXPORTS, CALLBACK_SOURCE, CALLBACK_EXPORTS
 from check_library import ASYNC_CALLBACK_SOURCE, ASYNC_CALLBACK_EXPORTS
 from check_library import WAIT_ALL_SOURCE, WAIT_ALL_EXPORTS
+from check_library import LIST_SOURCE, LIST_EXPORTS
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -63,6 +64,10 @@ class BrowserTests(unittest.TestCase):
         for name, optimize in (("tasks", False), ("tasks-optimized", True)):
             driver.build(source, root / (name + ".wasm"), optimize=optimize,
                          compiler=compiler, library=True, exports=WAIT_ALL_EXPORTS)
+        source.write_text(LIST_SOURCE)
+        for name, optimize in (("lists", False), ("lists-optimized", True)):
+            driver.build(source, root / (name + ".wasm"), optimize=optimize,
+                         compiler=compiler, library=True, exports=LIST_EXPORTS)
         shutil.copyfile(ROOT / "examples/library/worker.mjs", root / "worker.mjs")
         driver.build(ROOT / "examples/library/host_demo.py", root / "host_demo.wasm", optimize=False,
                      compiler=compiler, library=True, exports=["increment"])
@@ -93,6 +98,34 @@ class BrowserTests(unittest.TestCase):
         self.page = context.new_page()
         self.page.set_default_timeout(15000)
         self.page.goto(self.url)
+
+    def test_typed_list_handles(self):
+        for target in ("lists", "lists-optimized"):
+            with self.subTest(target=target):
+                result = self.page.evaluate('''async target => {
+                  const {instantiate} = await import(`/${target}.js`);
+                  let seen, current, output = "";
+                  const options = {stdout(text) {
+                    output += text; current.append("x".repeat(500000)); current.pop();
+                  }, imports: {
+                    edit(items, a, b) {seen = [a, b]; items.set(0, "🐍".repeat(40000)); return items;},
+                    later: async items => {await new Promise(r => setTimeout(r, 1)); return items;},
+                  }};
+                  const lib = await instantiate(`/${target}.wasm`, options);
+                  const list = current = lib.words();
+                  const same = lib.from_host(list) === list && await lib.delayed(list) === list;
+                  list.append("straße");
+                  const upper = lib.upper(list);
+                  const popped = list.pop();
+                  let foreign = false;
+                  try {lib.echo((await instantiate(`/${target}.wasm`, options)).words());}
+                  catch (e) {foreign = e instanceof TypeError;}
+                  return {same, seen, upper, popped, foreign, output, first: list.get(0).length,
+                    rest: list.toArray().slice(1), nullValue: lib.nullable(null).pop()};
+                }''', target)
+                self.assertEqual(result, {"same": True, "seen": ["left", "right"], "upper": "STRASSE",
+                    "popped": "straße", "foreign": True, "output": "before\nafter\n", "first": 80000,
+                    "rest": ["last", "awaited"], "nullValue": None})
 
     def test_raw_and_optimized_unicode_types_errors(self):
         for target in ("raw", "optimized"):

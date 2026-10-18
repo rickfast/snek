@@ -1,9 +1,12 @@
 ;; Call-scoped bridge arena. Library targets disallow WASI arena users.
 ;; Strings are copied into the GC heap; private JS drivers retain opaque GC frames.
-(global (export "__snek_abi") i32 (i32.const 3))
+(global (export "__snek_abi") i32 (i32.const 4))
 (export "__snek_yielded" (global $sm.yielded))
 (global $__snek_bump (mut i32) (i32.const 65536))
 (global $__snek_length (export "__snek_length") (mut i32) (i32.const 0))
+;; Nested, non-user-code list operations borrow the current scratch frame.
+(func (export "__snek_mark") (result i32) (global.get $__snek_bump))
+(func (export "__snek_restore") (param $mark i32) (global.set $__snek_bump (local.get $mark)))
 (func $__snek_reset (export "__snek_reset")
   (global.set $sm.yielded (i32.const 0))
   (global.set $rt.out_len (i32.const 0))

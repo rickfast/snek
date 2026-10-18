@@ -1464,7 +1464,7 @@ def emit_module(module: ir.Module, component: bool = False, *, graph_factory=Non
         from .machine_bridge import WasmMachineBackend
         machine_backend = WasmMachineBackend(Path(os.environ["SNEK_MACHINE_EMITTER"]))
     selected = []
-    from bootstrap.library import LibraryExport, library_code, library_target, library_host_imports, library_host_wrapper, library_callbacks, library_callback_imports, library_callback_async
+    from bootstrap.library import LibraryExport, library_code, library_target, library_host_imports, library_host_wrapper, library_callbacks, library_callback_imports, library_callback_async, library_lists
     hosts = [LibraryExport(f.host, f.name, [str(t) for _, t in f.params],
                           str(f.ret.elem) if isinstance(f.ret, CoroutineT) else str(f.ret),
                           "$" + mangle(f.ret) if isinstance(f.ret, CoroutineT) else "")
@@ -1482,7 +1482,7 @@ def emit_module(module: ir.Module, component: bool = False, *, graph_factory=Non
             selected.append(LibraryExport(name, function.name, [str(t) for _, t in function.params],
                                           str(function.ret.elem) if isinstance(function.ret, CoroutineT) else str(function.ret),
                                           "$" + mangle(function.ret) if isinstance(function.ret, CoroutineT) else ""))
-        if any("str" in item.params for item in selected) or any(item.ret == "str" or item.heap for item in hosts) or library_callbacks(selected, hosts):
+        if any("str" in item.params for item in selected) or any(item.ret == "str" or item.heap for item in hosts) or library_callbacks(selected, hosts) or library_lists(selected, hosts):
             # Do not mutate the checked IR: command emission can reuse it.
             module = replace(module, unicode=replace(module.unicode, dynamic=True))
     emitter = Emitter(module, component=component, graph_factory=graph_factory, machine_backend=machine_backend)

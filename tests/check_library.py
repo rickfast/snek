@@ -46,6 +46,41 @@ def internal() -> i32:
 '''
 EXPORTS = ["add", "big", "single", "double", "flip", "text", "count", "show", "fail"]
 
+LIST_SOURCE = '''from snek import i32, HostObject, host, checkpoint
+@host("edit")
+def edit(items: list[str], before: str, after: str) -> list[str]:
+    pass
+@host("later")
+async def later(items: list[str]) -> list[str]:
+    pass
+def words() -> list[str]:
+    return ["first", "last"]
+def numbers() -> list[i32]:
+    return [1, 2]
+def echo(items: list[str]) -> list[str]:
+    return items
+def upper(items: list[str]) -> str:
+    return items[-1].upper()
+def mutate(items: list[str]) -> list[str]:
+    items.append("snek")
+    return items
+def from_host(items: list[str]) -> list[str]:
+    print("before")
+    result = edit(items, "left", "right")
+    print("after")
+    return result
+async def delayed(items: list[str]) -> list[str]:
+    await checkpoint()
+    result = await later(items)
+    result.append("awaited")
+    return result
+def objects(value: HostObject) -> list[HostObject]:
+    return [value]
+def nullable(value: HostObject | None) -> list[HostObject | None]:
+    return [value]
+'''
+LIST_EXPORTS = ["words", "numbers", "echo", "upper", "mutate", "from_host", "delayed", "objects", "nullable"]
+
 OBJECT_SOURCE = '''from snek import HostObject, host, checkpoint
 from typing import Callable, Iterator
 @host("lookup")
@@ -411,6 +446,138 @@ assert.equal(lib.__snek_init, undefined);
 assert.ok(Object.isFrozen(lib));
 const second = await instantiate(await WebAssembly.compile(bytes));
 assert.equal(second.add(2, 3), 5);
+''')
+
+    def test_typed_list_handles_identity_mutation_and_lifetime(self):
+        self.src.write_text(LIST_SOURCE)
+        built = self.build(LIST_EXPORTS)
+        self.assertIn('"words"(): SnekList<string>', built.dts_path.read_text())
+        self.node('''
+const options = {imports: {edit: x => x, later: async x => x}};
+const lib = await instantiate(bytes, options);
+const list = lib.words();
+assert.deepEqual(list.toArray(), ["first", "last"]);
+assert.equal(list.length, 2);
+assert.equal(list.get(-1), "last");
+assert.equal(lib.echo(list), list);
+assert.equal(lib.mutate(list), list);
+list.set(-1, "straße 🐍");
+assert.equal(lib.upper(list), "STRASSE 🐍");
+assert.equal(list.pop(), "straße 🐍");
+for (let i = 0; i < 100; i++) list.append(String(i));
+assert.equal(list.length, 102);
+const snapshot = list.toArray(); snapshot[0] = "copy";
+assert.equal(list.get(0), "first");
+for (const i of [-103, 102, 2**32]) assert.throws(() => list.get(i), RangeError);
+for (const i of [NaN, Infinity, 0.5, "0", 1n]) assert.throws(() => list.set(i, "x"), TypeError);
+assert.throws(() => list.set(0, 12), /expected string/);
+assert.throws(() => list.append("\\ud800"), /surrogate/);
+assert.equal(list.get(0), "first");
+assert.throws(() => lib.echo(["array"]), /handle from this Snek instance/);
+assert.throws(() => lib.echo({...list}), /handle from this Snek instance/);
+const other = await instantiate(bytes, options);
+assert.throws(() => lib.echo(other.words()), /handle from this Snek instance/);
+assert.throws(() => lib.echo(lib.numbers()), /handle from this Snek instance/);
+const value = {};
+assert.equal(lib.objects(value).get(0), value);
+const optional = lib.nullable(null);
+optional.append(value); optional.set(0, value);
+assert.deepEqual(optional.toArray(), [value, value]);
+optional.set(0, null);
+assert.equal(optional.pop(), value);
+assert.equal(optional.pop(), null);
+assert.throws(() => optional.pop(), RangeError);
+assert.throws(() => optional.get(0), RangeError);
+assert.throws(() => optional.append(undefined), /HostObject/);
+assert(Object.isFrozen(list));
+// The handle itself owns the GC reference, independently of the public API.
+const survivor = (await instantiate(bytes, options)).words();
+survivor.append("alive"); assert.equal(survivor.pop(), "alive");
+''')
+
+    def test_list_handles_inside_host_calls_and_async_steps(self):
+        self.src.write_text(LIST_SOURCE)
+        self.build(LIST_EXPORTS)
+        self.node('''
+let lib, saved, output = "", release;
+lib = await instantiate(bytes, {stdout: text => {output += text;}, imports: {
+  edit(items, before, after) {
+    assert.equal(before, "left"); assert.equal(after, "right");
+    assert.equal(items, saved);
+    items.set(0, "🐍".repeat(40000));
+    assert.equal(items.get(0).length, 80000);
+    assert.throws(() => items.set(999, "scratch"), RangeError);
+    items.append("résumé");
+    assert.equal(items.pop(), "résumé");
+    assert.throws(() => lib.words(), /not reentrant/);
+    return items;
+  },
+  later: items => new Promise(resolve => {release = () => resolve(items);}),
+}});
+saved = lib.words();
+assert.equal(lib.from_host(saved), saved);
+assert.equal(output, "before\\nafter\\n");
+assert.equal(saved.get(0), "🐍".repeat(40000));
+const pending = lib.delayed(saved);
+while (!release) await new Promise(resolve => setTimeout(resolve, 1));
+saved.set(1, "while waiting"); release();
+assert.equal(await pending, saved);
+assert.deepEqual(saved.toArray().slice(1), ["while waiting", "awaited"]);
+const bad = await instantiate(bytes, {imports: {edit: () => [], later: async () => []}});
+assert.throws(() => bad.from_host(bad.words()), /handle from this Snek instance/);
+await assert.rejects(bad.delayed(bad.words()), SnekError);
+''')
+
+    def test_list_handles_from_stdout_can_grow_memory(self):
+        self.src.write_text(LIST_SOURCE)
+        self.build(LIST_EXPORTS)
+        self.node('''
+let saved, output = "";
+const lib = await instantiate(bytes, {imports: {edit: x => x, later: async x => x},
+  stdout(text) {output += text; saved.append("x".repeat(500000));},
+});
+saved = lib.words();
+assert.equal(lib.from_host(saved), saved);
+assert.equal(output, "before\\nafter\\n");
+assert.equal(saved.get(-1).length, 500000);
+assert.equal(lib.echo(saved), saved);
+''')
+
+    def test_list_host_only_signatures_and_initialization(self):
+        self.src.write_text('''from snek import host, i64
+@host("take")
+def take(items: list[i64]) -> list[i64]:
+    pass
+def total() -> i64:
+    return sum(take([1, 2]))
+print(total())
+''')
+        self.build(["total"])
+        self.node('''
+let output = "", saved;
+const lib = await instantiate(bytes, {stdout: text => {output += text;}, imports: {
+  take(items) {saved = items; items.append(3n); return items;},
+}});
+assert.equal(output, "6\\n");
+assert.deepEqual(saved.toArray(), [1n, 2n, 3n]);
+assert.equal(lib.total(), 6n);
+''')
+
+    def test_list_scalar_element_types(self):
+        self.src.write_text('from snek import i32, i64, f32, f64\n' + '\n'.join(
+            f'def {ty}_list() -> list[{ty}]:\n    return []\n' for ty in ("i32", "i64", "f32", "f64", "bool")))
+        self.build([ty + "_list" for ty in ("i32", "i64", "f32", "f64", "bool")])
+        self.node('''
+const lib = await instantiate(bytes);
+for (const [type, value] of [["i32", -2147483648], ["i64", -(1n<<63n)], ["f32", 1.25], ["f64", Infinity], ["bool", true]]) {
+  const list = lib[type + "_list"]();
+  list.append(value); list.set(0, value);
+  assert.deepEqual(list.toArray(), [value]);
+  assert.equal(list.pop(), value); assert.equal(list.length, 0);
+}
+assert.throws(() => lib.i32_list().append(2**31), RangeError);
+assert.throws(() => lib.i64_list().append(1), TypeError);
+assert.throws(() => lib.bool_list().append(1), TypeError);
 ''')
 
     def test_opaque_host_objects(self):
@@ -805,7 +972,7 @@ assert.equal(lib.call("hi"), "hi🐍🐍");
             ('@host("x")\nasync def f() -> None:\n    return\n', "pass body"),
             ('@host("x")\ndef f() -> i32:\n    return 1\n', "pass body"),
             ('@host("x")\ndef f(x: i32 = 0) -> None:\n    pass\n', "default arguments"),
-            ('@host("x")\ndef f(x: list[i32]) -> None:\n    pass\n', "host boundaries"),
+            ('@host("x")\ndef f(x: list[list[i32]]) -> None:\n    pass\n', "host boundaries"),
             ('@host("x")\ndef f() -> str | None:\n    pass\n', "scalar, string"),
             ('def outer() -> None:\n    @host("x")\n    def inner() -> None:\n        pass\n', "top-level"),
             ('@host("same")\ndef a() -> i32:\n    pass\n@host("same")\ndef b() -> str:\n    pass\n', "conflicting signatures"),
@@ -1228,7 +1395,7 @@ assert.equal(output, "loop cleaned\\n");
         self.node('''
 const original = WebAssembly.instantiate;
 try {
-  for (const version of [undefined, 1, 2, 4]) {
+  for (const version of [undefined, 1, 2, 3, 5]) {
     WebAssembly.instantiate = async (...args) => {
       const instance = await original(...args);
       return {exports: {...instance.exports, __snek_abi: version === undefined ? undefined : new WebAssembly.Global({value: "i32"}, version)}};
@@ -1310,9 +1477,9 @@ assert.equal(lib.number("٤٢"), 42);
 
     def test_unsupported_boundaries_and_services(self):
         for source in (
-            'def value(x: list[str]) -> str:\n    return x[0]\n',
-            'def value() -> list[str]:\n    return ["x"]\n',
-            'async def value() -> list[str]:\n    return ["x"]\n',
+            'def value(x: list[list[str]]) -> str:\n    return x[0][0]\n',
+            'def value() -> list[list[str]]:\n    return [["x"]]\n',
+            'async def value() -> list[list[str]]:\n    return [["x"]]\n',
             'from snek import sys\ndef value() -> str:\n    return sys.argv[0]\n',
             'from snek import time, f64\ndef value() -> f64:\n    return time.time()\n',
         ):

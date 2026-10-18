@@ -119,6 +119,7 @@ class CallableT(Type):
 
 def host_boundary(t: Type) -> bool:
     leaf = (I32, I64, F32, F64, BOOL, STR, HOST_OBJECT, OptionalT(HOST_OBJECT))
+    if isinstance(t, ListT): return t.elem in leaf
     if isinstance(t, CallableT):
         ret = t.ret.elem if isinstance(t.ret, CoroutineT) else t.ret
         return all(p in leaf for p in t.params) and ret in (*leaf, NONE)

@@ -9,6 +9,8 @@ including DOM updates and reads. [Async host imports](libraries.md#async-imports
 let Snek await JavaScript Promises from APIs such as `fetch` and timers.
 [Opaque `HostObject` references](libraries.md#opaque-javascript-objects) let Snek
 retain and pass DOM nodes and other JavaScript objects without accessing their properties.
+[Typed list handles](libraries.md#snek-owned-list-handles) let JavaScript inspect
+and mutate Snek-owned lists without copying them.
 
 ## Compatibility and loading
 

@@ -14,6 +14,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from snekc import driver
+from check_library import LIST_SOURCE, LIST_EXPORTS
 
 EXAMPLE = ROOT / "examples/vite"
 SERVER = '''
@@ -26,6 +27,23 @@ console.log(JSON.stringify({url: server.resolvedUrls.local[0]}));
 '''
 
 TYPES = '''
+import {type SnekLibrary as ListLibrary, type SnekList} from "./generated/lists.js";
+declare const lists: ListLibrary;
+const words: SnekList<string> = lists.words();
+const snapshot: string[] = words.toArray();
+words.append("typed"); words.set(-1, words.get(0));
+const popped: string = words.pop();
+const delayed: Promise<SnekList<string>> = lists.delayed(words);
+// @ts-expect-error mutable lists are invariant, even for nullable element types
+const widened: SnekList<object | null> = lists.objects(document.body);
+// @ts-expect-error list elements are typed
+words.append(42);
+// @ts-expect-error length is read-only
+words.length = 0;
+// @ts-expect-error arrays are not handles
+lists.echo(["array"]);
+// @ts-expect-error list element types must match
+lists.echo(lists.numbers());
 import {instantiate, type SnekLibrary} from "./generated/program.js";
 declare const library: SnekLibrary;
 const result: Promise<string> = library.load("url");
@@ -91,6 +109,10 @@ class BundlerTests(unittest.TestCase):
         print(f"Bundler browser: {engine} {cls.browser.version}; compiler: {cls.compiler}", flush=True)
 
     def compile(self, optimize):
+        source = self.root / "lists.py"
+        source.write_text(LIST_SOURCE)
+        driver.build(source, self.root / "src/generated/lists.wasm", optimize=optimize,
+                     compiler=self.compiler, library=True, exports=LIST_EXPORTS)
         driver.build(self.root / "program.py", self.root / "src/generated/program.wasm",
                      optimize=optimize, compiler=self.compiler, library=True,
                      exports=["greet", "twice", "load", "identity", "apply", "make_greeter", "notify", "apply_async"])

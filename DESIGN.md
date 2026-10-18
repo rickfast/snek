@@ -61,7 +61,7 @@ or `snek run examples/modules/main.py`.
 `--library --export FUNCTION` produces a core Wasm library and generated
 JavaScript/TypeScript bindings. Both exports and `@host("name")`
 imports support fixed-width numbers, booleans, copied strings and opaque `HostObject`
-references (including nullable references), typed sync/async `Callable` values, plus `None`
+references (including nullable references), typed list handles, sync/async `Callable` values, plus `None`
 returns. Host declarations have typed signatures and `pass` bodies; their host
 names remain explicit metadata in checked IR, not ordinary function bodies.
 JavaScript supplies the functions when instantiating the library. There is no
@@ -74,6 +74,16 @@ entry guard resets the arena on exceptional exit. Private JavaScript closures re
 opaque WasmGC callable and coroutine references; public bindings expose ordinary
 JavaScript functions and Promises, not raw Snek objects. Weak maps preserve callback
 identity without manual handle tables.
+Snek-owned lists of scalar/string/HostObject elements use `SnekList<T>` wrappers
+around private GC references. Per-element-type weak maps preserve identity and
+reject foreign-instance handles. Generated private helpers reuse typed list
+get/set/append/pop operations. JS validates indices before entry; negative indices
+count from the end. These operations run no user Snek code and may be used inside
+a host callback: they borrow and restore the current scratch mark and string length
+without resetting output, coroutine yield state, or active host requests. Outside a
+call they use the normal entry guard. `toArray()` copies values one at a time;
+ordinary handle passing does not copy list storage. Nested lists, callback
+elements, optional lists and class handles are not yet part of this boundary.
 Async callback signatures use `Coroutine[None, None, T]`. Imported callback frames
 reuse the async host protocol and exported callback frames reuse the async export
 driver, including per-invocation pending results and exception translation.

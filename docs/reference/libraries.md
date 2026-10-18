@@ -131,7 +131,9 @@ the current call (or rejects initialization) and propagates unchanged; it is not
 a Snek exception and does not run Snek `except`/`finally` cleanup. Use typed return
 values for expected host failures. Boundary validation errors behave the same way.
 The JavaScript bridge still resets its scratch memory, and subsequent calls work.
-Callbacks cannot re-enter the same instance; a later event can make a fresh call.
+Callbacks cannot invoke exports or Snek callbacks on the same active instance;
+a later event can make a fresh call. The primitive [list handle operations](#snek-owned-list-handles)
+are safe inside host callbacks.
 
 The CPython shim preserves declarations for imports and tooling but raises a clear
 error when called: CPython has no JavaScript host. Python tests can replace the
@@ -317,8 +319,9 @@ async def load_both() -> str:
 
 Here `fetch_text` is an async host declaration returning `str`, and `texts` is a
 `list[str]`. Results stay in argument order even when requests finish out of order.
-The returned list is an ordinary Snek-owned list; existing library boundary limits
-still apply, so return a string or another supported boundary value to JavaScript.
+The returned list is an ordinary Snek-owned list. If its elements are scalars,
+strings or opaque host objects, an exported async function can return it directly
+as a [list handle](#snek-owned-list-handles). Other element types stay inside Snek.
 
 `gather` requires one or more distinct, fresh coroutines with exactly matching,
 non-`None` result types. Numbers, strings, objects, optional references, collections
@@ -344,6 +347,7 @@ reject `gather`, just as they reject `wait_all`.
 | `str` | `string`, copied as UTF-8 |
 | `HostObject` | `object`, opaque GC-managed JavaScript reference |
 | `HostObject | None` | `object | null` |
+| `list[T]` with supported elements | Live, GC-managed `SnekList<T>` handle |
 | `Callable[[T, ...], R]` | Typed synchronous function, or async function when `R` is a `Coroutine` |
 | `None` return | `void` / `undefined` |
 
@@ -354,14 +358,64 @@ Float infinities, NaN and signed zero follow Wasm arithmetic. JavaScript strings
 must contain valid Unicode scalar values: lone UTF-16 surrogates are rejected.
 
 Strings are copied into the GC heap before user code runs and copied back for
-JavaScript results. Snek-owned collections and class instances do not cross the
-boundary; `HostObject` passes a JavaScript-owned external reference without copying
-it, and `Callable` exposes a JavaScript function backed by a GC-managed closure.
+JavaScript results. Supported Snek lists cross as live handles, while other
+collections and class instances stay internal. `HostObject` passes a JavaScript-owned
+external reference without copying it, and `Callable` exposes a JavaScript
+function backed by a GC-managed closure.
 Temporary linear memory is reused after each call, so callers never free values;
 its capacity can remain at the largest call's high-water mark.
 Exported string parameters and host string returns also enable full-Unicode tables for the operations used by the
 program, so case conversion and character classification work on host input even
 when those characters never appear in the source.
+
+## Snek-owned list handles
+
+Export a function returning `list[T]` to create a live `SnekList<T>` handle in
+JavaScript. Supported element types are `i32`, `i64`, `f32`, `f64`, `bool`, `str`,
+`HostObject` and `HostObject | None`:
+
+```python
+def words() -> list[str]:
+    return ["hello", "world"]
+
+def join_words(items: list[str]) -> str:
+    return " ".join(items)
+```
+
+```javascript
+const words = lib.words();
+words.set(0, "hello 🐍");
+words.append("from Snek");
+console.log(words.length, words.get(-1));
+console.log(lib.join_words(words));
+const snapshot = words.toArray(); // a separate JavaScript array
+const last = words.pop();
+```
+
+Handles expose read-only `length` and typed `get`, `set`, `append`, `pop` and
+`toArray` methods. Indices must be safe integers; negative indices count from the
+end. Invalid indices and popping an empty list throw JavaScript `RangeError`.
+Element validation follows the scalar/string/object rules above. `toArray()`
+copies the elements; object elements retain their JavaScript identity.
+
+Passing a handle into Snek does not copy the list. Mutations on either side are
+visible to the other, and returning the same list from the same instance returns
+the same JavaScript wrapper. WasmGC manages its lifetime: keep the handle while
+you need it, then let JavaScript collect it. There is no `free()` or `dispose()`.
+
+Lists work in sync and async exports and `@host` parameters/results. Host callbacks
+may inspect and mutate received handles immediately, without re-entering Snek
+user code. Handles also remain usable between suspended async steps. This does
+not permit calling ordinary exports or Snek callbacks during a synchronous step.
+Concurrent invocations sharing a list see each other's changes; handles do not
+provide transaction isolation.
+
+Create lists in Snek, then pass their handles back. JavaScript arrays, lookalike
+objects, handles for different element types, and handles from another instance
+are rejected. Handles are not transferable between workers; send `toArray()` data
+instead. Nested lists, dictionary/tuple/class handles, callback elements and
+optional lists are not supported yet. `Callable` boundary signatures still use
+scalar/string/object types, not lists.
 
 ## Opaque JavaScript objects
 
@@ -536,7 +590,8 @@ functions appear on the returned, frozen API object.
 ## Current limits
 
 Exports must be entry-module functions with the boundary types above (or coroutines
-returning those types). Collections, Snek classes, other optional types, generators and raw coroutine objects cannot cross
+returning those types). Collections other than the supported list handles, Snek classes,
+other optional types, generators and raw coroutine objects cannot cross
 the boundary. Libraries can use these internally where supported by the language,
 but cannot perform async module initialization or use WASI services such as
 stdin, environment variables, clocks and randomness. Unsupported signatures and

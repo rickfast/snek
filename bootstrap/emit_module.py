@@ -11,7 +11,7 @@ from bootstrap.emit_runtime import emit_collection_helpers, emit_keyed_builtin, 
 from bootstrap.emit_host import emit_host_helpers, emit_host_core_imports, emit_io_helpers, emit_component_imports
 from bootstrap.emit_suspension import OwnedMachine, owned_has_await, owned_machine_types, owned_machine_helpers, owned_runtime_machines, owned_runtime_machine
 from bootstrap.tasks import wait_all_code
-from bootstrap.library import LibraryExport, library_target, library_code, library_host_imports, library_host_wrapper, library_callbacks, library_callback_imports, library_callback_async
+from bootstrap.library import LibraryExport, library_target, library_code, library_host_imports, library_host_wrapper, library_callbacks, library_callback_imports, library_callback_async, library_lists
 
 
 def emit_closures(e: SourceEmitter) -> str:
@@ -234,7 +234,7 @@ def emit_source_module(checked: BodyChecker, prelude_source: str, component: boo
         library = library_code(selected, host_functions)
         callbacks = library_callbacks(selected, host_functions)
         imports += "\n" + library_callback_imports(callbacks, len(host_functions))
-        if len(callbacks) > 0: unicode_dynamic = True
+        if len(callbacks) > 0 or len(library_lists(selected, host_functions)) > 0: unicode_dynamic = True
         start = start.replace('(export "_start")', '(export "__snek_init")')
     # Host strings are open-world input, even when every source literal is ASCII.
     imports += "\n" + library_host_imports(host_functions, e.types.host_objects, library_callback_async(callbacks))

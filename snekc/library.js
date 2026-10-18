@@ -63,11 +63,14 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
   const errorDecoder = new TextDecoder("utf-8", { ignoreBOM: true });
   let wasm, busy = false, activeTask = null, errorText = "";
   const callbackStates = callbackSignatures.map(() => ({toWasm: new WeakMap(), toJS: new WeakMap()}));
+  const listStates = listSignatures.map(() => ({toWasm: new WeakMap(), toJS: new WeakMap()}));
   const imports = { wasi_snapshot_preview1: {
     fd_write(fd, iovs, count, written) {
-      const view = new DataView(wasm.memory.buffer);
       let total = 0;
       for (let i = 0; i < count; i++) {
+        // stdout may use list handles and grow memory. Never retain a view
+        // across an application callback, including the final byte count.
+        const view = new DataView(wasm.memory.buffer);
         const ptr = view.getUint32(iovs + i * 8, true);
         const len = view.getUint32(iovs + i * 8 + 4, true);
         const bytes = new Uint8Array(wasm.memory.buffer, ptr, len);
@@ -76,7 +79,7 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
         else return 8; // EBADF
         total += len;
       }
-      view.setUint32(written, total, true);
+      new DataView(wasm.memory.buffer).setUint32(written, total, true);
       return 0;
     },
     proc_exit(code) { throw new SnekError(errorText.trimEnd() || `Snek exited with status ${code}`); }
@@ -180,8 +183,10 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
     throw new SnekLoadError("Unable to instantiate Snek library. Use the .wasm and .js files from the same --library build.", { cause });
   }
   wasm = instance.exports;
-  if (wasm.__snek_abi?.value !== 3 || !(wasm.__snek_yielded instanceof WebAssembly.Global) || !(wasm.memory instanceof WebAssembly.Memory) || !(wasm.__snek_length instanceof WebAssembly.Global) ||
-      ["__snek_init", "__snek_reset", "__snek_alloc", ...callbackSignatures.flatMap(([, , , isAsync], i) =>
+  if (wasm.__snek_abi?.value !== 4 || !(wasm.__snek_yielded instanceof WebAssembly.Global) || !(wasm.memory instanceof WebAssembly.Memory) || !(wasm.__snek_length instanceof WebAssembly.Global) ||
+      ["__snek_init", "__snek_reset", "__snek_alloc", "__snek_mark", "__snek_restore",
+        ...listSignatures.flatMap((_, i) => ["len", "get", "set", "append", "pop"].map(op => `__snek_list_${op}_${i}`)),
+        ...callbackSignatures.flatMap(([, , , isAsync], i) =>
         [`__snek_wrap_${i}`, `__snek_call_${i}`, ...(isAsync ? [`__snek_step___snek_callback_${i}`, `__snek_result___snek_callback_${i}`] : [])]), ...signatures.flatMap(([name, , , isAsync]) =>
         isAsync ? [name, `__snek_step_${name}`, `__snek_result_${name}`] : [name])]
         .some(name => typeof wasm[name] !== "function"))
@@ -206,6 +211,15 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
     try { return action(); }
     finally { finish(); }
   }
+  // These operations cannot call user Snek code. A host callback may use its
+  // list arguments while a Wasm step is active, without resetting that step's
+  // scratch strings, output, yielded flag, or pending request ownership.
+  function listOperation(action) {
+    if (!busy) return enter(action);
+    const mark = wasm.__snek_mark(), length = wasm.__snek_length.value;
+    try { return action(); }
+    finally { wasm.__snek_restore(mark); wasm.__snek_length.value = length; }
+  }
   // Only synchronous execution owns the instance. Each suspended invocation
   // retains its own GC frame and pending host result, never borrowed memory.
   function enterTask(task, action) {
@@ -217,6 +231,12 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
     }
   }
   function lower(type, value) {
+    const list = listSignatures.findIndex(([signature]) => signature === type);
+    if (list !== -1) {
+      const raw = listStates[list].toWasm.get(value);
+      if (!raw) throw new TypeError(`expected ${type} handle from this Snek instance`);
+      return [raw];
+    }
     const callback = callbackSignatures.findIndex(([signature]) => signature === type);
     if (callback !== -1) {
       if (typeof value !== "function") throw new TypeError("expected function for " + type);
@@ -269,6 +289,43 @@ export async function instantiate(source, { stdout = () => {}, imports: host = {
   enter(() => wasm.__snek_init());
   const api = Object.create(null);
   function lift(result, value) {
+    const list = listSignatures.findIndex(([signature]) => signature === result);
+    if (list !== -1) {
+      const state = listStates[list];
+      let wrapped = state.toJS.get(value);
+      if (!wrapped) {
+        const [, element] = listSignatures[list];
+        const size = () => wasm[`__snek_list_len_${list}`](value);
+        const index = i => {
+          if (!Number.isSafeInteger(i)) throw new TypeError("list index must be a safe integer");
+          const length = size();
+          if (i < 0) i += length;
+          if (i < 0 || i >= length) throw new RangeError("list index out of range");
+          return i;
+        };
+        wrapped = Object.freeze({
+          get length() { return listOperation(size); },
+          get(i) { return listOperation(() => lift(element, wasm[`__snek_list_get_${list}`](value, index(i)))); },
+          set(i, item) { return listOperation(() => {
+            const lowered = lower(element, item);
+            wasm[`__snek_list_set_${list}`](value, index(i), ...lowered);
+          }); },
+          append(item) { return listOperation(() => wasm[`__snek_list_append_${list}`](value, ...lower(element, item))); },
+          pop() { return listOperation(() => {
+            if (size() === 0) throw new RangeError("pop from empty list");
+            return lift(element, wasm[`__snek_list_pop_${list}`](value));
+          }); },
+          toArray() {
+            const items = [];
+            for (let i = 0, length = size(); i < length; i++) items.push(wrapped.get(i));
+            return items;
+          },
+        });
+        state.toJS.set(value, wrapped);
+        state.toWasm.set(wrapped, value);
+      }
+      return wrapped;
+    }
     const callback = callbackSignatures.findIndex(([signature]) => signature === result);
     if (callback !== -1) {
       const state = callbackStates[callback];
