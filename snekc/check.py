@@ -1739,6 +1739,11 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
                       [ir.ExprStmt(ir.DictOp(NONE, "iter_end", ctx.get(d), []))], exc)
         out = [ir.SetLocal(d, seq), ir.SetLocal(i, ir.Const(I32, 0)),
                ir.SetLocal(n, ir.DictOp(I32, "iter_start", ctx.get(d), [])), ir.SetLocal(remaining, ctx.get(n)), loop]
+        if getattr(s, "generator_size", None) is not None:
+            # Keep iter_start/iter_end paired inside the lazy frame, but use
+            # the size captured when the outer generator expression was made.
+            out[2] = ir.ExprStmt(ir.DictOp(I32, "iter_start", ctx.get(d), []))
+            out.insert(3, ir.SetLocal(n, self.check_expr(s.generator_size, I32)))
         ctx.flow = loop_flow.copy()
         return out
 
@@ -1937,10 +1942,10 @@ class Checker(ClosureChecker, OrderedBuiltinChecker, StdlibChecker):
             return self.check_fstring(node)
         if isinstance(node, ast.IfExp):
             return self.check_ifexp(node, expected)
-        if isinstance(node, (ast.ListComp, ast.DictComp)):
+        if isinstance(node, (ast.ListComp, ast.DictComp, ast.GeneratorExp)):
             return self.check_comprehension(node, expected)
-        if isinstance(node, (ast.SetComp, ast.GeneratorExp)):
-            raise CompileError("set comprehensions and generator expressions are not supported yet", node)
+        if isinstance(node, ast.SetComp):
+            raise CompileError("set comprehensions are not supported yet", node)
         if isinstance(node, ast.Set):
             raise CompileError(f"{type(node).__name__.lower()} literals are not supported yet", node)
         if isinstance(node, ast.Lambda):

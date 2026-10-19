@@ -783,8 +783,9 @@ class Parser:
             class_name = self.name()
             bases: list[Node] = []
             keywords: list[Node] = []
-            if self.accept("("):
-                call = self.call_arguments(token.node("Name"))
+            if self.at("("):
+                opening = self.take()
+                call = self.call_arguments(token.node("Name"), opening)
                 bases = call.get("args").items
                 keywords = call.get("keywords").items
             class_body = self.suite()
@@ -1186,8 +1187,9 @@ class Parser:
         while True:
             if self.accept("."):
                 value = location(value, "Attribute").put("value", value).put("attr", string(self.name()))
-            elif self.accept("("):
-                value = self.call_arguments(value)
+            elif self.at("("):
+                opening = self.take()
+                value = self.call_arguments(value, opening)
             elif self.accept("["):
                 first = self.slice_item()
                 subscript = first
@@ -1204,7 +1206,7 @@ class Parser:
                 break
         return value
 
-    def call_arguments(self, function: Node) -> Node:
+    def call_arguments(self, function: Node, opening: Token) -> Node:
         args: list[Node] = []
         keywords: list[Node] = []
         unpacked_keyword = False
@@ -1225,6 +1227,12 @@ class Parser:
                 if len(keywords) > 0:
                     token.error("positional argument follows keyword argument")
                 args.append(self.expression(0))
+                if self.at("for") or self.at("async"):
+                    if len(args) != 1:
+                        token.error("generator expression must be parenthesized")
+                    args[0] = opening.node("GeneratorExp").put("elt", args[0]).put("generators", self.comprehension_generators())
+                    self.expect(")")
+                    return location(function, "Call").put("func", function).put("args", sequence(args)).put("keywords", sequence(keywords))
             if not self.accept(","):
                 break
         self.expect(")")
@@ -1268,7 +1276,22 @@ class Parser:
         if self.accept("("):
             if self.accept(")"):
                 return token.node("Tuple").put("elts", sequence([]))
-            grouped = self.expressions(0)
+            grouped = self.star_expression(0)
+            if self.at("for") or self.at("async"):
+                if grouped.kind == "Starred":
+                    token.error("invalid generator expression element")
+                generators = self.comprehension_generators()
+                self.expect(")")
+                return token.node("GeneratorExp").put("elt", grouped).put("generators", generators)
+            if self.accept(","):
+                if grouped.kind == "YieldFrom":
+                    token.error("yield from requires a single expression")
+                items = [grouped]
+                while not self.at(")"):
+                    items.append(self.star_expression(0))
+                    if not self.accept(","):
+                        break
+                grouped = token.node("Tuple").put("elts", sequence(items))
             self.expect(")")
             if grouped.kind == "Tuple":
                 grouped.line = token.line

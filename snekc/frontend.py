@@ -20,7 +20,7 @@ _TYPES = {
         "Module Expression FunctionDef AsyncFunctionDef ClassDef Return Delete Assign AnnAssign "
         "AugAssign For AsyncFor While If With AsyncWith Raise Try Assert Import ImportFrom "
         "Global Nonlocal Expr Pass Break Continue BoolOp BinOp UnaryOp Lambda IfExp Dict List "
-        "Tuple ListComp DictComp comprehension Await Yield YieldFrom Compare Call FormattedValue JoinedStr Constant Attribute "
+        "Tuple ListComp DictComp GeneratorExp comprehension Await Yield YieldFrom Compare Call FormattedValue JoinedStr Constant Attribute "
         "Subscript Starred Name Slice arguments arg keyword alias withitem ExceptHandler "
         "And Or Add Sub Mult MatMult Div Mod Pow LShift RShift BitOr BitXor BitAnd FloorDiv "
         "Invert Not UAdd USub Eq NotEq Lt LtE Gt GtE Is IsNot In NotIn"

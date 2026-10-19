@@ -37,7 +37,7 @@ def main_guard(node: Node) -> bool:
 
 
 def direct_yield(node: Node) -> bool:
-    if node.kind in ("ListComp", "DictComp"):
+    if node.kind in ("ListComp", "DictComp", "GeneratorExp"):
         return direct_yield(node.get("generators").items[0].get("iter"))
     if node.kind == "Yield" or node.kind == "YieldFrom":
         return True

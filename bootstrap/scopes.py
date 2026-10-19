@@ -27,8 +27,8 @@ class BodyScope:
         raise ValueError("missing lexical scope")
 
 
-def comprehension_loop(node: Node, first_iter: Node) -> Node:
-    value = Node("List", "", node.line, node.column).put("elts", sequence([node.get("elt")])) if node.kind == "ListComp" else Node("Dict", "", node.line, node.column).put("keys", sequence([node.get("key")])).put("values", sequence([node.get("value")]))
+def comprehension_loop(node: Node, first_iter: Node, first_size: Node) -> Node:
+    value = Node("Yield", "", node.line, node.column).put("value", node.get("elt")) if node.kind == "GeneratorExp" else Node("List", "", node.line, node.column).put("elts", sequence([node.get("elt")])) if node.kind == "ListComp" else Node("Dict", "", node.line, node.column).put("keys", sequence([node.get("key")])).put("values", sequence([node.get("value")]))
     body = sequence([Node("ComprehensionEmit", "", node.line, node.column).put("value", value)])
     generators = node.get("generators").items
     for index in range(len(generators) - 1, -1, -1):
@@ -40,18 +40,20 @@ def comprehension_loop(node: Node, first_iter: Node) -> Node:
         iterable = gen.get("iter") if index > 0 else first_iter
         body = sequence([Node("For", "", gen.line, gen.column).put("target", gen.get("target"))
                          .put("iter", iterable).put("body", body).put("orelse", sequence([]))])
+        if index == 0 and first_size.kind != "none":
+            body.items[0].put("generator_size", first_size)
     return body.items[0]
 
 
 def scope_body(node: Node) -> Node:
-    if node.kind in ("ListComp", "DictComp"):
-        return sequence([comprehension_loop(node, missing())])
+    if node.kind in ("ListComp", "DictComp", "GeneratorExp"):
+        return sequence([comprehension_loop(node, missing(), missing())])
     return node.get("body")
 
 
 def scope_walk(node: Node, out: list[Node]) -> None:
     out.append(node)
-    if node.kind in ("ListComp", "DictComp"):
+    if node.kind in ("ListComp", "DictComp", "GeneratorExp"):
         scope_walk(node.get("generators").items[0].get("iter"), out)
     elif node.kind == "AnnAssign":
         scope_walk(node.get("target"), out)
@@ -121,7 +123,7 @@ def body_scope(node: Node, outer: list[str]) -> BodyScope:
         if (name not in scope.bound and name in outer) or name in scope.nonlocal_names:
             add_name(scope.free, name)
     for item in nodes:
-        if item.kind in ("FunctionDef", "AsyncFunctionDef", "Lambda", "ListComp", "DictComp"):
+        if item.kind in ("FunctionDef", "AsyncFunctionDef", "Lambda", "ListComp", "DictComp", "GeneratorExp"):
             child = body_scope(item, outer + scope.bound)
             scope.children.append(child)
             for name in child.free:

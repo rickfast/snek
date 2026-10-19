@@ -11,7 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from snekc import ir
 from snekc.check import check_module
-from snekc.types import CellT, I32
+from snekc.types import CellT, I32, IteratorT
 
 
 def walk(value):
@@ -61,6 +61,20 @@ def outer(n: i32, offset: i32) -> list[i32]:
         outer = next(f for f in module.funcs if f.name == "outer")
         cells = {n for n, t in outer.locals.items() if isinstance(t, CellT)}
         self.assertEqual(cells, {"cell.offset"})
+
+    def test_generator_expression_is_a_lazy_machine_not_a_materialized_list(self):
+        module = self.check('''
+from typing import Iterator
+def outer(n: i32) -> Iterator[i32]:
+    return (x + n for x in range(n))
+''')
+        outer = next(f for f in module.funcs if f.name == "outer")
+        self.assertFalse(outer.machine)
+        helper = next(f for f in module.funcs if f.name.startswith("closure."))
+        self.assertTrue(helper.machine)
+        self.assertEqual(helper.ret, IteratorT(I32))
+        self.assertTrue(any(isinstance(n, ir.Yield) for n in walk(helper.body)))
+        self.assertFalse(any(isinstance(n, (ir.ListLit, ir.ListAppend)) for n in walk(helper.body)))
 
     def test_siblings_share_a_single_cell(self):
         module = self.check('''

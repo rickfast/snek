@@ -71,6 +71,8 @@ def normalized(value):
 
 
 VALID = [
+    "a = (x * y for x in xs if x for y in ys)\nb = f(x for x in xs)\nc = f(((x, y) for x, y in pairs), 1)\n",
+    "async def f():\n return (await g(x) async for x in xs if await p(x))\n",
     "a = [x * y for x in xs if x > 0 if ok(x) for y in ys(x)]\nb = {x: y for x, y in items if y}\n",
     "a = [x if x else 0 for x in (xs if flag else ys)]\nb = [[x for x in row] for row in rows]\n",
     "async def f():\n return {k: await v(k) async for k in keys if await ok(k)}\n",
@@ -104,6 +106,8 @@ VALID = [
 ]
 
 INVALID = [
+    '(x, y for x in xs)', '(*x for x in xs)', 'f(x for x in xs,)',
+    'f(1, x for x in xs)', 'f(x for x in xs, 1)', 'f(x=1, y for y in xs)',
     "if True:\npass\n", "if True:\n  pass\n pass\n", " x = 1\n",
     "if True:\n\tpass\n        pass\n", "if True:\n pass\n\tpass\n",
     "x = (1]\n", "x = [1\n", "x = 1)\n", "x = 1 \\ x\n", "x = 1 \\\n",
@@ -196,7 +200,7 @@ class ParserTests(unittest.TestCase):
                 self.assertIn(b"line ", result.stderr)
 
     def test_explicit_subset_boundaries(self):
-        for source in ["x = b'bytes'", "x = 1j", "x = {1, 2}", "x = (n for n in xs)", "x = {n for n in xs}",
+        for source in ["x = b'bytes'", "x = 1j", "x = {1, 2}", "x = {n for n in xs}",
                        "x = (n := 1)", "x = '\\ud800'", "café = 1"]:
             with self.subTest(source=source):
                 ast.parse(source)
@@ -253,6 +257,10 @@ class ParserTests(unittest.TestCase):
         source = 'x = "雪"\ny = f"😀{x + 1}"\n'
         actual = self.wasm_parse(source)["body"][1]["value"]["values"][1]["value"]["left"]
         expected = ast.parse(source).body[1].value.values[1].value.left
+        self.assertEqual((actual["_line"], actual["_column"]), (expected.lineno, expected.col_offset))
+        source = 'f(\n x for x in xs\n)\n'
+        actual = self.wasm_parse(source)["body"][0]["value"]["args"][0]
+        expected = ast.parse(source).body[0].value.args[0]
         self.assertEqual((actual["_line"], actual["_column"]), (expected.lineno, expected.col_offset))
 
     def test_mutated_syntax(self):

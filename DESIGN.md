@@ -488,7 +488,7 @@ context for empty nested lists, nullable references and typed lambdas.
 In `async def`, ordinary comprehensions may contain `await` in their iterable,
 filters, keys, values or elements. These run sequentially, with normal exception
 and cancellation cleanup; they do not implicitly start tasks concurrently.
-Async iteration (`async for`), set comprehensions, generator expressions and
+Async iteration (`async for`), set comprehensions and
 assignment expressions (`:=`) remain unsupported.
 
 Both compilers lower comprehensions to typed helper closures using the existing
@@ -499,6 +499,42 @@ local assignments. The current constructor initialization rules and ordinary
 list/dictionary runtime helpers remain unchanged. See
 [the synchronous example](examples/comprehensions.py) and
 [the async example](examples/comprehensions_async.py).
+
+### Generator expressions
+
+`(expression for target in iterable if condition)` creates a lazy `Iterator[T]`,
+without building an intermediate list. Nested loops, repeated filters, tuple
+unpacking and lexical target isolation follow the comprehension rules above.
+The parentheses may be omitted when the generator is a call's sole argument:
+
+```python
+values = (x * x for x in range(10) if x % 2 == 0)
+print(next(values))       # 0
+print(list(values))       # [4, 16, 36, 64]
+print(list(x + 1 for x in range(3)))
+```
+
+The outer iterable expression (including nonliteral range bounds) is evaluated
+once when the generator is created. Filters, inner iterables and yielded values
+are evaluated only as the generator advances. Captured outer variables remain
+late-bound, while replacing the original iterable variable does not replace the
+iterator's source. Dictionary/view iterators remember their initial size at
+creation and report size changes even before the first `next()`.
+
+The element expression infers `T`; an `Iterator[T]` annotation supplies context
+for nullable values, empty nested collections and lambdas. Forward captures need
+a known type at the creation site, as with other comprehension helpers.
+`for`, `iter`, `next` (including its default argument), `list`, `send(None)`,
+`throw` and `close` use the existing generator machinery. Closing an unstarted
+expression does not execute its body. Closing a started one unwinds its own
+active loops; it does not close a separate source generator. JavaScript receives
+the same typed iterator handles as for generator functions.
+
+Synchronous generator expressions also work inside `async def`, including an
+awaited outer iterable. `await` in the lazy body and `async for` would require an
+async generator and are rejected. `yield from` remains unsupported, and
+`sum`/`sorted`/`min`/`max` still require lists; use `list(values)` to materialize
+explicitly when needed. See [the example](examples/generator_expressions.py).
 
 ## Dictionaries
 

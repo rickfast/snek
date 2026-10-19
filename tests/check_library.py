@@ -47,7 +47,7 @@ def internal() -> i32:
 EXPORTS = ["add", "big", "single", "double", "flip", "text", "count", "show", "fail"]
 
 COMPREHENSION_SOURCE = '''from snek import i32, host
-from typing import Callable
+from typing import Callable, Iterator
 @host("later")
 async def later(value: i32) -> i32:
     pass
@@ -62,8 +62,16 @@ async def collect(n: i32) -> list[i32]:
         return [await later(i) for i in range(n)]
     finally:
         print("cleanup")
+def observed(x: i32) -> i32:
+    print("item", x)
+    return x * x
+def lazy(n: i32) -> Iterator[i32]:
+    print("created")
+    return (observed(x) for x in range(n))
+def lazy_keys(values: dict[str, i32]) -> Iterator[str]:
+    return (key for key in values)
 '''
-COMPREHENSION_EXPORTS = ["squares", "labels", "callbacks", "collect"]
+COMPREHENSION_EXPORTS = ["squares", "labels", "callbacks", "collect", "lazy", "lazy_keys"]
 
 LIST_SOURCE = '''from snek import i32, HostObject, host, checkpoint
 @host("edit")
@@ -937,6 +945,28 @@ ASYNC_EXPORTS = ["read_text", "wait", "number", "scalar", "load", "recover", "fl
 
 
 class LibraryTests(unittest.TestCase):
+    def test_generator_expression_lazy_handles_and_initial_dictionary_size(self):
+        self.src.write_text(COMPREHENSION_SOURCE, encoding="utf-8")
+        self.build(COMPREHENSION_EXPORTS)
+        self.node('''
+let output = "";
+const lib = await instantiate(bytes, {stdout: x => {output += x;}, imports: {later: async x => x}});
+const values = lib.lazy(4);
+assert.equal(output, "created\\n");
+assert.deepEqual(values.next(), {done: false, value: 0});
+assert.equal(output, "created\\nitem 0\\n");
+for (const x of values) {assert.equal(x, 1); break;}
+assert.equal(output, "created\\nitem 0\\nitem 1\\n");
+assert.deepEqual(values.next(), {done: true, value: undefined});
+const fresh = lib.lazy(3); fresh.return();
+assert.equal(output, "created\\nitem 0\\nitem 1\\ncreated\\n");
+const dict = lib.labels(2), keys = lib.lazy_keys(dict);
+dict.set("new", 3);
+assert.throws(() => keys.next(), /dictionary changed size during iteration/);
+assert.deepEqual(keys.next(), {done: true, value: undefined});
+assert.deepEqual([...lib.lazy_keys(dict)], ["0", "1", "new"]);
+''')
+
     def test_comprehension_handles_async_order_and_cancellation(self):
         self.src.write_text(COMPREHENSION_SOURCE, encoding="utf-8")
         self.build(COMPREHENSION_EXPORTS)

@@ -84,6 +84,7 @@ from helpers import value, items
 def show() -> None:
     print([value + 1 for value in items()], value())
     print([[value + inner for inner in range(2)] for value in items()])
+    print(list(value + inner for value in items() for inner in range(2)))
 show()
 for x in range(2):
     print([x for x in range(x + 1)], x)
@@ -95,7 +96,7 @@ def items() -> list[i32]:
     return [1, 2]
 ''',
         })
-        self.compare(b"[2, 3] 9\n[[1, 2], [2, 3]]\n[0] 0\n[0, 1] 1\n")
+        self.compare(b"[2, 3] 9\n[[1, 2], [2, 3]]\n[1, 2, 2, 3]\n[0] 0\n[0, 1] 1\n")
 
     def test_standard_library_aliases_are_per_module(self):
         self.files({

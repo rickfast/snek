@@ -120,7 +120,7 @@ def numeric_join(a: DeclType, b: DeclType) -> DeclType:
 
 
 def bound_names(node: Node, out: list[str]) -> None:
-    if node.kind in ("ListComp", "DictComp"):
+    if node.kind in ("ListComp", "DictComp", "GeneratorExp"):
         bound_names(node.get("generators").items[0].get("iter"), out)
         return
     if node.kind in ("FunctionDef", "AsyncFunctionDef", "ClassDef", "Lambda"):
@@ -764,6 +764,9 @@ class BodyChecker:
 
     def comprehension_parameter(self, node: Node, sig: DeclSignature, arguments: list[BodyExpr]) -> Node:
         value = self.expr(node, DeclType("unknown"))
+        return self.comprehension_argument(node, value, sig, arguments)
+
+    def comprehension_argument(self, node: Node, value: BodyExpr, sig: DeclSignature, arguments: list[BodyExpr]) -> Node:
         name = "comp.arg." + str(len(sig.params))
         sig.params.append(DeclParam(name, value.ty, missing()))
         arguments.append(value)
@@ -771,12 +774,21 @@ class BodyChecker:
 
     def comprehension(self, node: Node, expected: DeclType) -> BodyExpr:
         parent = self.ctx
+        lazy = node.kind == "GeneratorExp"
         generators = node.get("generators").items
         for gen in generators:
             if gen.get("is_async").text != "0":
                 declaration_error("async for comprehensions are not supported yet", node)
+        if lazy:
+            nodes: list[Node] = []
+            scope_walk(scope_body(node), nodes)
+            for item in nodes:
+                if item.kind == "Await":
+                    declaration_error("async generator expressions are not supported yet", node)
         sig = DeclSignature()
         arguments: list[BodyExpr] = []
+        pre: list[BodyStmt] = []
+        first_size = missing()
         first = generators[0].get("iter")
         if first.kind == "Call" and named(first.get("func"), "range") and "range" not in parent.bound and "range" not in parent.types:
             args: list[Node] = []
@@ -787,7 +799,12 @@ class BodyChecker:
             first = (Node("Call", "", first.line, first.column).put("func", Node("Name").put("id", string("comp.range")))
                      .put("args", sequence(args)).put("keywords", first.get("keywords")))
         else:
-            first = self.comprehension_parameter(first, sig, arguments)
+            value = self.expr(first, DeclType("unknown"))
+            if lazy and value.ty.kind in ("dict", "view"):
+                value = self.capture(value, pre)
+                mapping = BodyExpr("DictOp", value.ty.args[0], node, "mapping").add(value) if value.ty.kind == "view" else value
+                first_size = self.comprehension_argument(first, BodyExpr("DictOp", DeclType("i32"), node, "len").add(mapping), sig, arguments)
+            first = self.comprehension_argument(first, value, sig, arguments)
         scope = BodyScope(node)
         if parent.initializing:
             outer: list[str] = []
@@ -800,19 +817,26 @@ class BodyChecker:
         name = "closure." + str(self.nclosures)
         self.nclosures += 1
         child = BodyContext(name, sig)
-        child.async_body = parent.async_body
-        child.function.machine = child.async_body
+        child.async_body = parent.async_body and not lazy
+        child.function.machine = lazy or child.async_body
         child.comp_hint = inner_type(expected)
         self.ctx = child
         self.prepare_scope(scope, parent)
-        loop = self.statement(comprehension_loop(node, first))
-        ty = child.types[child.comp_result]
-        empty = BodyExpr("ListLit" if ty.kind == "list" else "DictLit", ty, node)
-        value = BodyExpr("LocalGet", ty, node, child.comp_result)
-        value.declared = ty
-        child.function.body = [BodyStmt("SetLocal", node, child.comp_result).add(empty)] + loop.stmts + [BodyStmt("Return", node).add(value)]
-        sig.ret = DeclType("Coroutine").add(ty) if child.async_body else ty
-        child.result_type = ty
+        loop = self.statement(comprehension_loop(node, first, first_size))
+        ty = DeclType("unknown")
+        if lazy:
+            ty = DeclType("Iterator").add(child.yield_type)
+            sig.ret = ty
+            child.result_type = DeclType("None")
+            child.function.body = loop.stmts + [BodyStmt("Return", node)]
+        else:
+            ty = child.types[child.comp_result]
+            empty = BodyExpr("ListLit" if ty.kind == "list" else "DictLit", ty, node)
+            value = BodyExpr("LocalGet", ty, node, child.comp_result)
+            value.declared = ty
+            child.function.body = [BodyStmt("SetLocal", node, child.comp_result).add(empty)] + loop.stmts + [BodyStmt("Return", node).add(value)]
+            sig.ret = DeclType("Coroutine").add(ty) if child.async_body else ty
+            child.result_type = ty
         child.function.closure_type = callable_type(sig)
         self.finish_closures()
         self.functions.append(child.function)
@@ -822,11 +846,21 @@ class BodyChecker:
             closure.add(self.cell_ref(free, parent.types[free], node))
         call = BodyExpr("CallValue", sig.ret, node).add(closure)
         for argument in arguments: call.add(argument)
-        return BodyExpr("Await", ty, node).add(call) if child.async_body else call
+        return self.sequence_expr(pre, BodyExpr("Await", ty, node).add(call) if child.async_body else call)
 
     def comprehension_emit(self, node: Node) -> BodyBlock:
         literal = node.get("value")
         hint = self.ctx.comp_hint
+        if literal.kind == "Yield":
+            expected = hint.args[0] if hint.kind in ("Iterator", "list") else DeclType("unknown")
+            value = self.expr(literal.get("value"), expected)
+            ty = value.ty if expected.kind == "unknown" else expected
+            if ty.kind == "None":
+                declaration_error("cannot infer generator element type; add an Iterator annotation", node)
+            self.ctx.yield_type = ty
+            result = BodyBlock()
+            result.stmts.append(BodyStmt("Yield", node).add(self.coerce(value, ty, literal.get("value"))))
+            return result
         nodes = literal.get("elts").items if literal.kind == "List" else [literal.get("keys").items[0], literal.get("values").items[0]]
         hints: list[DeclType] = hint.args if hint.kind in ("list", "dict") else []
         values: list[BodyExpr] = []
@@ -983,7 +1017,7 @@ class BodyChecker:
     def prepare(self, node: Node) -> None:
         # Explicit annotations apply throughout the lexical scope, including
         # earlier assignments. They do not make a value definitely assigned.
-        if node.kind in ("FunctionDef", "AsyncFunctionDef", "ClassDef", "Lambda", "ListComp", "DictComp"):
+        if node.kind in ("FunctionDef", "AsyncFunctionDef", "ClassDef", "Lambda", "ListComp", "DictComp", "GeneratorExp"):
             return
         if node.kind == "AnnAssign" and node.get("target").kind == "Name":
             if node.get("target").get("id").text in self.ctx.scope.free:
@@ -1185,7 +1219,7 @@ class BodyChecker:
             return self.defer_closure(node, sig)
         if node.kind in ("List", "Tuple", "Dict"):
             return self.collection(node, inner_type(expected))
-        if node.kind in ("ListComp", "DictComp"):
+        if node.kind in ("ListComp", "DictComp", "GeneratorExp"):
             return self.comprehension(node, expected)
         if node.kind == "Attribute":
             return self.attribute(node)
@@ -2777,7 +2811,9 @@ class BodyChecker:
                 declaration_error("chained assignment is not supported", node)
             result.stmts.append(self.assign(targets[0], node.get("value"), DeclType("unknown")))
         elif node.kind == "AnnAssign":
-            result.stmts.append(self.assign(node.get("target"), node.get("value"), self.annotation(node.get("annotation"))))
+            annotated = self.assign(node.get("target"), node.get("value"), self.annotation(node.get("annotation")))
+            if annotated.kind != "Pass":
+                result.stmts.append(annotated)
         elif node.kind == "AugAssign":
             return self.augmented(node)
         elif node.kind == "Delete":
@@ -3115,6 +3151,8 @@ class BodyChecker:
         loop = BodyStmt("Loop", node)
         if ty.kind == "dict":
             count = self.capture(BodyExpr("DictOp", DeclType("i32"), node, "iter_start").add(seq), result.stmts)
+            if "generator_size" in node.keys:
+                count = self.capture(self.expr(node.get("generator_size"), DeclType("i32")), result.stmts)
             remaining = self.capture(count, result.stmts)
             next = BodyExpr("DictOp", DeclType("i32"), node, "next").add(seq).add(index).add(count).add(remaining)
             cond = BodyExpr("Compare", DeclType("bool"), node, "ge").add(index).add(self.integer(0, node))

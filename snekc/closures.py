@@ -11,10 +11,10 @@ from dataclasses import dataclass, field, fields, replace
 
 from . import ir
 from .errors import CompileError
-from .types import CallableT, CellT, EnvT, FuncSig, NONE, OptionalT, Type, ClassT, ListT, DictT, CoroutineT
+from .types import CallableT, CellT, EnvT, FuncSig, NONE, OptionalT, Type, ClassT, ListT, DictT, DictViewT, CoroutineT, IteratorT, I32
 
 
-COMPREHENSIONS = (ast.ListComp, ast.DictComp)
+COMPREHENSIONS = (ast.ListComp, ast.DictComp, ast.GeneratorExp)
 FUNCTIONS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, *COMPREHENSIONS)
 
 
@@ -22,9 +22,10 @@ class ComprehensionEmit(ast.stmt):
     _fields = ("value",)
 
 
-def comprehension_loop(node, first_iter=None):
+def comprehension_loop(node, first_iter=None, first_size=None):
     """Reuse ordinary loop checking; only the innermost append/set is special."""
-    value = (ast.List(elts=[node.elt], ctx=ast.Load()) if isinstance(node, ast.ListComp)
+    value = (ast.Yield(value=node.elt) if isinstance(node, ast.GeneratorExp)
+             else ast.List(elts=[node.elt], ctx=ast.Load()) if isinstance(node, ast.ListComp)
              else ast.Dict(keys=[node.key], values=[node.value]))
     body = [ast.copy_location(ComprehensionEmit(value=ast.copy_location(value, node)), node)]
     for index, gen in reversed(list(enumerate(node.generators))):
@@ -32,6 +33,8 @@ def comprehension_loop(node, first_iter=None):
             body = [ast.copy_location(ast.If(test=condition, body=body, orelse=[]), condition)]
         iterable = gen.iter if index else (first_iter if first_iter is not None else ast.Constant(None))
         body = [ast.copy_location(ast.For(target=gen.target, iter=iterable, body=body, orelse=[]), gen.target)]
+        if index == 0:
+            body[0].generator_size = first_size
     return body[0]
 
 
@@ -113,14 +116,18 @@ class ClosureChecker:
     def check_comprehension(self, node, expected):
         from .check import FuncCtx, is_num_literal
         parent = self.ctx
+        lazy = isinstance(node, ast.GeneratorExp)
         for gen in node.generators:
             if gen.is_async:
                 raise CompileError("async for comprehensions are not supported yet", node)
         first = node.generators[0].iter
-        params, arguments = [], []
+        if lazy and any(isinstance(n, ast.Await) for n in scope_walk(body_nodes(node))):
+            raise CompileError("async generator expressions are not supported yet", node)
+        params, arguments, pre = [], [], []
+        first_size = None
 
-        def parameter(expr):
-            value = self.check_expr(expr)
+        def parameter(expr, value=None):
+            value = self.check_expr(expr) if value is None else value
             name = f"comp.arg.{len(params)}"
             params.append((name, value.ty))
             arguments.append(value)
@@ -134,7 +141,16 @@ class ClosureChecker:
             first = ast.copy_location(ast.Call(func=ast.Name(id="comp.range", ctx=ast.Load()),
                                               args=args, keywords=first.keywords), first)
         else:
-            first = parameter(first)
+            value = self.check_expr(first)
+            if lazy and isinstance(value.ty, (DictT, DictViewT)):
+                # Capture the iterator's initial size now, without borrowing the
+                # dictionary until the generator starts (it may never start).
+                tmp = parent.temp(value.ty)
+                pre.append(ir.SetLocal(tmp, value))
+                value = parent.get(tmp)
+                mapping = ir.DictOp(value.ty.mapping, "mapping", value, []) if isinstance(value.ty, DictViewT) else value
+                first_size = parameter(first, ir.DictOp(I32, "len", mapping, []))
+            first = parameter(first, value)
         scope = (parent.scope.children[id(node)] if parent.scope is not None
                  else analyze_scope(node, set(parent.types)))
         if parent.is_init:
@@ -144,7 +160,7 @@ class ClosureChecker:
         name = f"closure.{self.nclosures}"
         self.nclosures += 1
         child = FuncCtx(name, NONE)
-        child.async_ = parent.async_
+        child.async_ = parent.async_ and not lazy
         child.comp_hint = expected.inner if isinstance(expected, OptionalT) else expected
         child.add_param("closure.env", EnvT())
         for param, ty in params:
@@ -152,26 +168,39 @@ class ClosureChecker:
         self.ctx = child
         try:
             self.prepare_scope(node, scope, parent)
-            loop = self.check_for(comprehension_loop(node, first))
-            ty = child.types[child.comp_result]
-            result = child.get(child.comp_result)
-            empty = ir.ListLit(ty, []) if isinstance(ty, ListT) else ir.DictLit(ty, [])
-            ret = CoroutineT(ty) if child.async_ else ty
+            loop = self.check_for(comprehension_loop(node, first, first_size))
+            if lazy:
+                ty = ret = IteratorT(child.yields)
+                body = [*loop, ir.Return(None)]
+            else:
+                ty = child.types[child.comp_result]
+                result = child.get(child.comp_result)
+                empty = ir.ListLit(ty, []) if isinstance(ty, ListT) else ir.DictLit(ty, [])
+                ret = CoroutineT(ty) if child.async_ else ty
+                body = [ir.SetLocal(child.comp_result, empty), *loop, ir.Return(result)]
             closure_ty = CallableT(tuple(t for _, t in params), ret)
-            body = [ir.SetLocal(child.comp_result, empty), *loop, ir.Return(result)]
             func = ir.Func(name, child.params, ret, child.locals, body,
-                           machine=child.async_, closure_type=closure_ty)
+                           machine=lazy or child.async_, closure_type=closure_ty)
             self.out.append(self.finish_closures(func))
         finally:
             self.ctx = parent
         closure = ir.Closure(closure_ty, name, [cell_ref(n, parent.types[n]) for n in sorted(child.free)])
         call = ir.CallValue(ret, closure, arguments)
-        return ir.Await(ty, call) if child.async_ else call
+        result = ir.Await(ty, call) if child.async_ else call
+        return ir.Seq(result.ty, pre, result) if pre else result
 
     def comprehension_emit(self, node):
         ctx = self.ctx
         literal = node.value
         hint = ctx.comp_hint
+        if isinstance(literal, ast.Yield):
+            expected = hint.elem if isinstance(hint, (IteratorT, ListT)) else None
+            value = self.check_expr(literal.value, expected)
+            ty = expected or value.ty
+            if ty == NONE:
+                raise CompileError("cannot infer generator element type; add an Iterator annotation", node)
+            ctx.yields = ty
+            return [ir.Yield(self.coerce(value, ty, literal.value))]
         values = []
         nodes = literal.elts if isinstance(literal, ast.List) else [literal.keys[0], literal.values[0]]
         hints = ([hint.elem] if isinstance(hint, ListT) else [hint.key, hint.value] if isinstance(hint, DictT) else [])

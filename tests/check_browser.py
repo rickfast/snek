@@ -186,6 +186,29 @@ class BrowserTests(unittest.TestCase):
                 self.assertEqual(result, {"squares": [0, 4, 16], "labels": [["0", 4], ["1", 3]],
                     "callbacks": [2, 4, 2], "values": [10, 11, 12], "calls": [0, 1, 2], "output": "cleanup\n"})
 
+    def test_generator_expressions(self):
+        for target in ("comprehensions", "comprehensions-optimized"):
+            with self.subTest(target=target):
+                result = self.page.evaluate('''async target => {
+                  const {instantiate} = await import(`/${target}.js`);
+                  let output = "";
+                  const lib = await instantiate(`/${target}.wasm`, {
+                    stdout: x => {output += x;}, imports: {later: async x => x},
+                  });
+                  const values = lib.lazy(4), before = output;
+                  const first = values.next().value;
+                  for (const x of values) break;
+                  const dict = lib.labels(2), keys = lib.lazy_keys(dict);
+                  dict.set("new", 3);
+                  let rejected = false;
+                  try {keys.next();} catch (e) {rejected = /dictionary changed size/.test(e.message);}
+                  return {before, first, output, done: values.next().done, rejected,
+                    keys: [...lib.lazy_keys(dict)]};
+                }''', target)
+                self.assertEqual(result, {"before": "created\n", "first": 0,
+                    "output": "created\nitem 0\nitem 1\n", "done": True,
+                    "rejected": True, "keys": ["0", "1", "new"]})
+
     def test_iterator_handles(self):
         for target in ("iterators", "iterators-optimized"):
             with self.subTest(target=target):

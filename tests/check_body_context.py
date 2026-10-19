@@ -36,7 +36,7 @@ class BodyContextTests(unittest.TestCase):
     def test_finished_functions_release_scope_flow_and_closure_contexts(self):
         fixtures = ("closures", "closures_cleanup", "closures_suspended", "keyed_builtins",
                     "generator_cleanup", "async_functions", "inheritance", "context_cleanup", "format_specs",
-                    "comprehensions", "comprehensions_async")
+                    "comprehensions", "comprehensions_async", "generator_expressions")
         original = BodyContext.__init__
         for fixture in fixtures:
             contexts = []
